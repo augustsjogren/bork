@@ -1250,6 +1250,7 @@ mod tests {
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             agents_allowlist: None,
+            agent_launch: std::collections::HashMap::new(),
         }
     }
 
@@ -2245,6 +2246,7 @@ mod tests {
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             agents_allowlist: None,
+            agent_launch: std::collections::HashMap::new(),
         }
     }
 

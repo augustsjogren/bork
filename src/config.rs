@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -6,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::global_config::global_config_dir;
 use crate::toml_lite::{self, Table};
-use crate::types::{AgentKind, Issue};
+use crate::types::{AgentKind, AgentMode, Issue};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -19,6 +20,49 @@ pub struct AppConfig {
     /// Allowed agents for this project, if explicitly configured.
     /// `None` means "no restriction; use whatever is installed".
     pub agents_allowlist: Option<Vec<AgentKind>>,
+    /// Per-agent launch overrides. Keyed by `AgentKind`. Use
+    /// [`AppConfig::launch_args_for`] to resolve mode-specific args.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub agent_launch: HashMap<AgentKind, AgentLaunchConfig>,
+}
+
+/// User-controlled invocation args for a single agent, with optional
+/// per-mode overrides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentLaunchConfig {
+    /// Args always passed to this agent regardless of mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Per-mode args. When `Some`, these *replace* bork's built-in mode
+    /// flags for that mode. An empty `Vec` therefore means "no mode flags".
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub mode_args: HashMap<AgentMode, Vec<String>>,
+}
+
+impl AppConfig {
+    /// Look up the configured launch override for an agent, if any.
+    pub fn agent_launch_for(&self, kind: AgentKind) -> Option<&AgentLaunchConfig> {
+        self.agent_launch.get(&kind)
+    }
+
+    /// Resolve the configured args for `(agent, mode)`.
+    ///
+    /// Returns `(base_args, mode_args_override)` where:
+    /// - `base_args` is `agent.<name>.args`, always applied.
+    /// - `mode_args_override` is `Some(args)` when the user configured
+    ///   per-mode args; the caller should use these *instead of* bork's
+    ///   built-in mode flags. `None` means "use built-in mode flags".
+    pub fn launch_args_for(
+        &self,
+        kind: AgentKind,
+        mode: AgentMode,
+    ) -> (&[String], Option<&[String]>) {
+        let Some(cfg) = self.agent_launch_for(kind) else {
+            return (&[], None);
+        };
+        let mode_args = cfg.mode_args.get(&mode).map(Vec::as_slice);
+        (&cfg.args, mode_args)
+    }
 }
 
 pub const DEFAULT_DONE_SESSION_TTL: u64 = 300;
@@ -36,6 +80,7 @@ impl Default for AppConfig {
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             agents_allowlist: None,
+            agent_launch: HashMap::new(),
         }
     }
 }
@@ -106,11 +151,50 @@ pub struct PartialConfig {
     pub done_session_ttl: Option<u64>,
     pub debug: Option<bool>,
     pub agents_allowlist: Option<Vec<AgentKind>>,
+    /// Per-agent launch overrides parsed from `[agent.<name>]` sections.
+    pub agent_launch: HashMap<AgentKind, PartialAgentLaunch>,
+}
+
+/// Partial layer for a single agent's launch config. `None` fields are
+/// inherited from the layer below; `Some` fields override.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PartialAgentLaunch {
+    pub args: Option<Vec<String>>,
+    pub mode_args: HashMap<AgentMode, Vec<String>>,
+}
+
+impl PartialAgentLaunch {
+    fn merge(self, other: PartialAgentLaunch) -> PartialAgentLaunch {
+        let mut mode_args = self.mode_args;
+        for (mode, args) in other.mode_args {
+            mode_args.insert(mode, args);
+        }
+        PartialAgentLaunch {
+            args: other.args.or(self.args),
+            mode_args,
+        }
+    }
+
+    fn materialize(self) -> AgentLaunchConfig {
+        AgentLaunchConfig {
+            args: self.args.unwrap_or_default(),
+            mode_args: self.mode_args,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.args.is_none() && self.mode_args.is_empty()
+    }
 }
 
 impl PartialConfig {
     /// Merge `other` on top of `self`. Any field set in `other` wins.
     fn merge(self, other: PartialConfig) -> PartialConfig {
+        let mut agent_launch = self.agent_launch;
+        for (kind, layer) in other.agent_launch {
+            let merged = agent_launch.remove(&kind).unwrap_or_default().merge(layer);
+            agent_launch.insert(kind, merged);
+        }
         PartialConfig {
             project_name: other.project_name.or(self.project_name),
             agent_kind: other.agent_kind.or(self.agent_kind),
@@ -118,6 +202,7 @@ impl PartialConfig {
             done_session_ttl: other.done_session_ttl.or(self.done_session_ttl),
             debug: other.debug.or(self.debug),
             agents_allowlist: other.agents_allowlist.or(self.agents_allowlist),
+            agent_launch,
         }
     }
 }
@@ -142,6 +227,13 @@ fn materialize(merged: PartialConfig, project_root: &Path) -> AppConfig {
         .project_name
         .unwrap_or_else(|| default_project_name(project_root));
 
+    let agent_launch = merged
+        .agent_launch
+        .into_iter()
+        .filter(|(_, layer)| !layer.is_empty())
+        .map(|(kind, layer)| (kind, layer.materialize()))
+        .collect();
+
     AppConfig {
         project_name,
         project_root: project_root.to_path_buf(),
@@ -150,6 +242,7 @@ fn materialize(merged: PartialConfig, project_root: &Path) -> AppConfig {
         done_session_ttl: merged.done_session_ttl.unwrap_or(DEFAULT_DONE_SESSION_TTL),
         debug: merged.debug.unwrap_or(false),
         agents_allowlist: merged.agents_allowlist,
+        agent_launch,
     }
 }
 
@@ -211,6 +304,8 @@ fn partial_from_table(table: &Table) -> PartialConfig {
             .collect::<Vec<_>>()
     });
 
+    let agent_launch = collect_agent_launch(table);
+
     PartialConfig {
         project_name,
         agent_kind,
@@ -218,7 +313,44 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         done_session_ttl,
         debug,
         agents_allowlist,
+        agent_launch,
     }
+}
+
+/// Scan dotted keys of the form `agent.<name>.args` and
+/// `agent.<name>.mode.<mode>.args` and bucket them per agent.
+fn collect_agent_launch(table: &Table) -> HashMap<AgentKind, PartialAgentLaunch> {
+    let mut out: HashMap<AgentKind, PartialAgentLaunch> = HashMap::new();
+    for (key, value) in table {
+        let Some(rest) = key.strip_prefix("agent.") else {
+            continue;
+        };
+        let mut parts = rest.split('.');
+        let Some(agent_name) = parts.next() else {
+            continue;
+        };
+        let Some(kind) = AgentKind::parse(agent_name) else {
+            continue;
+        };
+        let Some(items) = value.as_list() else {
+            continue;
+        };
+        let args: Vec<String> = items.to_vec();
+
+        let entry = out.entry(kind).or_default();
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("args"), None, None) => {
+                entry.args = Some(args);
+            }
+            (Some("mode"), Some(mode_name), Some("args")) if parts.next().is_none() => {
+                if let Some(mode) = AgentMode::parse(mode_name) {
+                    entry.mode_args.insert(mode, args);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 pub fn load_state(project_root: &Path) -> AppState {
@@ -420,5 +552,148 @@ debug = true
         assert_eq!(cfg.done_session_ttl, DEFAULT_DONE_SESSION_TTL);
         assert!(!cfg.debug);
         assert!(cfg.agents_allowlist.is_none());
+        assert!(cfg.agent_launch.is_empty());
+    }
+
+    // --- agent_launch parsing ---
+
+    #[test]
+    fn parse_partial_agent_base_args_from_section() {
+        let p = parse_partial(
+            r#"
+[agent.claude]
+args = ["--dangerously-skip-permissions"]
+"#,
+        );
+        let claude = p.agent_launch.get(&AgentKind::Claude).unwrap();
+        assert_eq!(
+            claude.args.as_deref(),
+            Some(&["--dangerously-skip-permissions".to_string()][..])
+        );
+        assert!(claude.mode_args.is_empty());
+    }
+
+    #[test]
+    fn parse_partial_agent_mode_args_replace_builtins() {
+        let p = parse_partial(
+            r#"
+[agent.claude.mode.build]
+args = ["--dangerously-skip-permissions"]
+"#,
+        );
+        let claude = p.agent_launch.get(&AgentKind::Claude).unwrap();
+        assert!(claude.args.is_none());
+        assert_eq!(
+            claude.mode_args.get(&AgentMode::Build).map(Vec::as_slice),
+            Some(&["--dangerously-skip-permissions".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn parse_partial_supports_dotted_keys() {
+        let p = parse_partial(r#"agent.codex.mode.yolo.args = ["--bypass"]"#);
+        let codex = p.agent_launch.get(&AgentKind::Codex).unwrap();
+        assert_eq!(
+            codex.mode_args.get(&AgentMode::Yolo).map(Vec::as_slice),
+            Some(&["--bypass".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn parse_partial_ignores_unknown_agent_or_mode() {
+        let p = parse_partial(
+            r#"
+[agent.bogus]
+args = ["--x"]
+[agent.claude.mode.wat]
+args = ["--y"]
+"#,
+        );
+        // Unknown agent dropped entirely.
+        assert!(!p.agent_launch.contains_key(&AgentKind::OpenCode));
+        // Unknown mode names produce no mode_args entry for Claude.
+        let claude = p.agent_launch.get(&AgentKind::Claude);
+        assert!(
+            claude.is_none_or(|c| c.mode_args.is_empty()),
+            "unknown mode names should not register",
+        );
+    }
+
+    #[test]
+    fn merge_project_agent_launch_overrides_global() {
+        let cfg = merge_to_app(
+            r#"
+[agent.claude]
+args = ["--from-global"]
+"#,
+            r#"
+[agent.claude]
+args = ["--from-project"]
+"#,
+        );
+        let claude = cfg.agent_launch.get(&AgentKind::Claude).unwrap();
+        assert_eq!(claude.args, vec!["--from-project".to_string()]);
+    }
+
+    #[test]
+    fn merge_layers_keep_disjoint_agent_launch_keys() {
+        let cfg = merge_to_app(
+            r#"
+[agent.claude]
+args = ["--global-claude"]
+"#,
+            r#"
+[agent.codex]
+args = ["--project-codex"]
+"#,
+        );
+        let claude = cfg.agent_launch.get(&AgentKind::Claude).unwrap();
+        assert_eq!(claude.args, vec!["--global-claude".to_string()]);
+        let codex = cfg.agent_launch.get(&AgentKind::Codex).unwrap();
+        assert_eq!(codex.args, vec!["--project-codex".to_string()]);
+    }
+
+    #[test]
+    fn merge_project_clears_mode_args_with_empty_array() {
+        let cfg = merge_to_app(
+            r#"
+[agent.claude.mode.plan]
+args = ["--permission-mode", "plan"]
+"#,
+            r#"
+[agent.claude.mode.plan]
+args = []
+"#,
+        );
+        let claude = cfg.agent_launch.get(&AgentKind::Claude).unwrap();
+        let plan_args = claude.mode_args.get(&AgentMode::Plan).unwrap();
+        assert!(plan_args.is_empty());
+    }
+
+    #[test]
+    fn launch_args_for_returns_base_and_mode_override() {
+        let cfg = merge_to_app(
+            "",
+            r#"
+[agent.claude]
+args = ["--extra"]
+[agent.claude.mode.build]
+args = ["--dangerously-skip-permissions"]
+"#,
+        );
+        let (base, mode_args) = cfg.launch_args_for(AgentKind::Claude, AgentMode::Build);
+        assert_eq!(base, &["--extra".to_string()]);
+        assert_eq!(
+            mode_args,
+            Some(&["--dangerously-skip-permissions".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn launch_args_for_returns_none_when_unconfigured() {
+        let cfg = merge_to_app("", "");
+        let (base, mode_args) = cfg.launch_args_for(AgentKind::Claude, AgentMode::Plan);
+        assert!(base.is_empty());
+        assert!(mode_args.is_none());
     }
 }

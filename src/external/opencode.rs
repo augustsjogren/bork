@@ -92,19 +92,42 @@ fn build_agent_cmd(
         shell_escape_single_quotes(&prompt)
     };
 
+    // Built-in mode flags. These are replaced when the user configured
+    // per-mode args under `[agent.<name>.mode.<mode>]`.
+    let builtin_mode_flag = match issue.agent_kind {
+        AgentKind::OpenCode => match issue.agent_mode {
+            // Yolo is Claude-only; treat as Build for OpenCode
+            AgentMode::Plan => "--agent plan",
+            AgentMode::Build | AgentMode::Yolo => "",
+        },
+        AgentKind::Claude => match issue.agent_mode {
+            AgentMode::Plan => "--permission-mode plan",
+            AgentMode::Yolo => "--dangerously-skip-permissions",
+            AgentMode::Build => "",
+        },
+        AgentKind::Codex => match issue.agent_mode {
+            // `--full-auto` is deprecated upstream; use explicit sandbox + approval flags.
+            AgentMode::Plan => "--sandbox workspace-write --ask-for-approval on-request",
+            AgentMode::Build => "--sandbox workspace-write --ask-for-approval never",
+            AgentMode::Yolo => "--dangerously-bypass-approvals-and-sandbox",
+        },
+    };
+
+    let trailing = trailing_args(
+        config,
+        issue.agent_kind,
+        issue.agent_mode,
+        builtin_mode_flag,
+    );
+
     match issue.agent_kind {
         AgentKind::OpenCode => {
-            // Yolo is Claude-only; treat as Build for OpenCode
-            let mode_flag = match issue.agent_mode {
-                AgentMode::Plan => " --agent plan",
-                AgentMode::Build | AgentMode::Yolo => "",
-            };
             if let Some(ref sid) = issue.session_id {
                 // Resume existing session — skip --prompt, history is preserved
                 let escaped_sid = shell_escape_single_quotes(sid);
                 let cmd = format!(
                     "{} && opencode --session '{}'{}",
-                    env_prefix, escaped_sid, mode_flag,
+                    env_prefix, escaped_sid, trailing,
                 );
                 (cmd, None)
             } else {
@@ -112,7 +135,7 @@ fn build_agent_cmd(
                     "{} && opencode --prompt '{}'{}",
                     env_prefix,
                     build_escaped_prompt(),
-                    mode_flag,
+                    trailing,
                 );
                 (cmd, None)
             }
@@ -120,18 +143,13 @@ fn build_agent_cmd(
         AgentKind::Claude => {
             let session_display_name = format!("{}: {}", issue.id, issue.title);
             let escaped_name = shell_escape_single_quotes(&session_display_name);
-            let mode_flag = match issue.agent_mode {
-                AgentMode::Plan => " --permission-mode plan",
-                AgentMode::Yolo => " --dangerously-skip-permissions",
-                AgentMode::Build => "",
-            };
 
             if let Some(ref sid) = issue.session_id {
                 // Resume existing session — skip the prompt, history is preserved
                 let escaped_sid = shell_escape_single_quotes(sid);
                 let cmd = format!(
                     "{} && claude --name '{}'{} --resume '{}'",
-                    env_prefix, escaped_name, mode_flag, escaped_sid,
+                    env_prefix, escaped_name, trailing, escaped_sid,
                 );
                 (cmd, Some(sid.clone()))
             } else {
@@ -141,44 +159,82 @@ fn build_agent_cmd(
                 if uuid.is_empty() {
                     let cmd = format!(
                         "{} && claude --name '{}'{} '{}'",
-                        env_prefix, escaped_name, mode_flag, escaped_prompt,
+                        env_prefix, escaped_name, trailing, escaped_prompt,
                     );
                     (cmd, None)
                 } else {
                     let escaped_uuid = shell_escape_single_quotes(&uuid);
                     let cmd = format!(
                         "{} && claude --name '{}'{} --session-id '{}' '{}'",
-                        env_prefix, escaped_name, mode_flag, escaped_uuid, escaped_prompt,
+                        env_prefix, escaped_name, trailing, escaped_uuid, escaped_prompt,
                     );
                     (cmd, Some(uuid))
                 }
             }
         }
         AgentKind::Codex => {
-            // `--full-auto` is deprecated upstream; use explicit sandbox + approval flags.
-            let mode_flag = match issue.agent_mode {
-                AgentMode::Plan => " --sandbox workspace-write --ask-for-approval on-request",
-                AgentMode::Build => " --sandbox workspace-write --ask-for-approval never",
-                AgentMode::Yolo => " --dangerously-bypass-approvals-and-sandbox",
-            };
-
             if let Some(ref sid) = issue.session_id {
                 let escaped_sid = shell_escape_single_quotes(sid);
                 let cmd = format!(
                     "{} && codex resume '{}'{}",
-                    env_prefix, escaped_sid, mode_flag
+                    env_prefix, escaped_sid, trailing
                 );
                 (cmd, Some(sid.clone()))
             } else {
                 let cmd = format!(
                     "{} && codex{} '{}'",
                     env_prefix,
-                    mode_flag,
+                    trailing,
                     build_escaped_prompt()
                 );
                 (cmd, None)
             }
         }
+    }
+}
+
+/// Build the trailing args string (always starts with a leading space when
+/// non-empty) that gets appended to each agent invocation.
+///
+/// Resolution:
+/// - Base args from `[agent.<name>].args` are always appended.
+/// - Per-mode args from `[agent.<name>.mode.<mode>].args` replace the
+///   built-in mode flags. Set to `[]` to suppress mode flags entirely.
+/// - When no per-mode override is configured, bork's built-in mode flags
+///   are used.
+///
+/// All configured args are individually shell-escaped so values containing
+/// spaces or quotes are passed through safely.
+fn trailing_args(
+    config: &AppConfig,
+    kind: AgentKind,
+    mode: AgentMode,
+    builtin_mode_flag: &str,
+) -> String {
+    let (base_args, mode_args_override) = config.launch_args_for(kind, mode);
+
+    let mut parts: Vec<String> = Vec::new();
+    match mode_args_override {
+        Some(args) => {
+            for arg in args {
+                parts.push(format!("'{}'", shell_escape_single_quotes(arg)));
+            }
+        }
+        None => {
+            let trimmed = builtin_mode_flag.trim();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_string());
+            }
+        }
+    }
+    for arg in base_args {
+        parts.push(format!("'{}'", shell_escape_single_quotes(arg)));
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", parts.join(" "))
     }
 }
 
@@ -858,6 +914,7 @@ mod tests {
             done_session_ttl: 300,
             debug: false,
             agents_allowlist: None,
+            agent_launch: std::collections::HashMap::new(),
         }
     }
 
@@ -1030,12 +1087,99 @@ mod tests {
         );
     }
 
+    fn config_with_launch(
+        kind: AgentKind,
+        base: &[&str],
+        mode_overrides: &[(AgentMode, &[&str])],
+    ) -> AppConfig {
+        let mut config = test_config();
+        let launch = crate::config::AgentLaunchConfig {
+            args: base.iter().map(|s| s.to_string()).collect(),
+            mode_args: mode_overrides
+                .iter()
+                .map(|(m, args)| (*m, args.iter().map(|s| s.to_string()).collect()))
+                .collect(),
+        };
+        config.agent_launch.insert(kind, launch);
+        config
+    }
+
     #[test]
     fn cmd_escapes_single_quotes_in_session_name() {
         let issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
         let config = test_config();
         let (cmd, _) = build_agent_cmd(&issue, &config, "it's-a-test", "/tmp/status");
         assert!(cmd.contains("BORK_SESSION='it'\\''s-a-test'"));
+    }
+
+    // --- agent_launch / trailing_args integration ---
+
+    #[test]
+    fn claude_base_args_are_appended() {
+        let issue = test_issue(AgentKind::Claude, AgentMode::Build);
+        let config = config_with_launch(AgentKind::Claude, &["--verbose"], &[]);
+        let (cmd, _) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(cmd.contains(" '--verbose' "));
+    }
+
+    #[test]
+    fn claude_mode_override_replaces_builtin_flag() {
+        let issue = test_issue(AgentKind::Claude, AgentMode::Plan);
+        let config = config_with_launch(
+            AgentKind::Claude,
+            &[],
+            &[(AgentMode::Plan, &["--dangerously-skip-permissions"])],
+        );
+        let (cmd, _) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(cmd.contains("'--dangerously-skip-permissions'"));
+        assert!(!cmd.contains("--permission-mode plan"));
+    }
+
+    #[test]
+    fn claude_empty_mode_override_clears_builtin_flag() {
+        let issue = test_issue(AgentKind::Claude, AgentMode::Plan);
+        let config = config_with_launch(AgentKind::Claude, &[], &[(AgentMode::Plan, &[])]);
+        let (cmd, _) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(!cmd.contains("--permission-mode plan"));
+    }
+
+    #[test]
+    fn opencode_extra_args_appended_on_resume() {
+        let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        issue.session_id = Some("ses_abc123".to_string());
+        let config = config_with_launch(AgentKind::OpenCode, &["--quiet"], &[]);
+        let (cmd, _) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(cmd.contains("opencode --session 'ses_abc123' '--quiet'"));
+    }
+
+    #[test]
+    fn codex_mode_override_replaces_sandbox_flags() {
+        let issue = test_issue(AgentKind::Codex, AgentMode::Build);
+        let config = config_with_launch(
+            AgentKind::Codex,
+            &[],
+            &[(AgentMode::Build, &["--sandbox", "read-only"])],
+        );
+        let (cmd, _) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(cmd.contains("'--sandbox' 'read-only'"));
+        assert!(!cmd.contains("workspace-write"));
+        assert!(!cmd.contains("--ask-for-approval never"));
+    }
+
+    #[test]
+    fn launcher_does_not_affect_other_agents() {
+        let issue = test_issue(AgentKind::Claude, AgentMode::Build);
+        let config = config_with_launch(AgentKind::OpenCode, &["--quiet"], &[]);
+        let (cmd, _) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(!cmd.contains("--quiet"));
+    }
+
+    #[test]
+    fn configured_args_are_individually_shell_escaped() {
+        let issue = test_issue(AgentKind::Claude, AgentMode::Build);
+        let config = config_with_launch(AgentKind::Claude, &["it's a flag"], &[]);
+        let (cmd, _) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(cmd.contains("'it'\\''s a flag'"));
     }
 
     #[test]

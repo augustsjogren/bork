@@ -62,7 +62,7 @@ impl fmt::Display for Column {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AgentKind {
     OpenCode,
     Claude,
@@ -100,7 +100,7 @@ impl fmt::Display for AgentKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AgentMode {
     Plan,
     Build,
@@ -109,6 +109,16 @@ pub enum AgentMode {
 }
 
 impl AgentMode {
+    /// Parse a mode name from config (case-insensitive).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "plan" => Some(AgentMode::Plan),
+            "build" => Some(AgentMode::Build),
+            "yolo" => Some(AgentMode::Yolo),
+            _ => None,
+        }
+    }
+
     /// Cycles Plan → Build → Plan (for OpenCode, which has no yolo mode).
     pub fn toggle(self) -> Self {
         match self {
