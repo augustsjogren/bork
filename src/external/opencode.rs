@@ -155,9 +155,10 @@ fn build_agent_cmd(
             }
         }
         AgentKind::Codex => {
+            // `--full-auto` is deprecated upstream; use explicit sandbox + approval flags.
             let mode_flag = match issue.agent_mode {
-                AgentMode::Plan => " --sandbox read-only --ask-for-approval untrusted",
-                AgentMode::Build => " --full-auto",
+                AgentMode::Plan => " --sandbox workspace-write --ask-for-approval on-request",
+                AgentMode::Build => " --sandbox workspace-write --ask-for-approval never",
                 AgentMode::Yolo => " --dangerously-bypass-approvals-and-sandbox",
             };
 
@@ -978,17 +979,18 @@ mod tests {
         let issue = test_issue(AgentKind::Codex, AgentMode::Plan);
         let config = test_config();
         let (cmd, sid) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
-        assert!(cmd.contains("codex --sandbox read-only --ask-for-approval untrusted"));
+        assert!(cmd.contains("codex --sandbox workspace-write --ask-for-approval on-request"));
         assert!(cmd.contains("You are working on bork-1: Fix bug"));
         assert!(sid.is_none());
     }
 
     #[test]
-    fn codex_fresh_build_uses_full_auto() {
+    fn codex_fresh_build_uses_workspace_write_never() {
         let issue = test_issue(AgentKind::Codex, AgentMode::Build);
         let config = test_config();
         let (cmd, _) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
-        assert!(cmd.contains("codex --full-auto"));
+        assert!(cmd.contains("codex --sandbox workspace-write --ask-for-approval never"));
+        assert!(!cmd.contains("--full-auto"));
         assert!(!cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
     }
 
@@ -999,6 +1001,7 @@ mod tests {
         let (cmd, _) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
         assert!(cmd.contains("codex --dangerously-bypass-approvals-and-sandbox"));
         assert!(!cmd.contains("--full-auto"));
+        assert!(!cmd.contains("workspace-write"));
     }
 
     #[test]
@@ -1007,7 +1010,9 @@ mod tests {
         issue.session_id = Some("019d76ad-9734-77c0-8169-a727a5524013".to_string());
         let config = test_config();
         let (cmd, sid) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
-        assert!(cmd.contains("codex resume '019d76ad-9734-77c0-8169-a727a5524013' --full-auto"));
+        assert!(cmd.contains(
+            "codex resume '019d76ad-9734-77c0-8169-a727a5524013' --sandbox workspace-write --ask-for-approval never"
+        ));
         assert!(!cmd.contains("--prompt"));
         assert_eq!(
             sid,
