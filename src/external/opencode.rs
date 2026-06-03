@@ -96,7 +96,7 @@ fn build_agent_cmd(
     // per-mode args under `[agent.<name>.mode.<mode>]`.
     let builtin_mode_flag = match issue.agent_kind {
         AgentKind::OpenCode => match issue.agent_mode {
-            // Yolo is Claude-only; treat as Build for OpenCode
+            // OpenCode has no yolo mode; treat it as Build.
             AgentMode::Plan => "--agent plan",
             AgentMode::Build | AgentMode::Yolo => "",
         },

@@ -320,9 +320,9 @@ Per-agent invocation args can be customized in either layer. Useful for flags bo
 [agent.claude]
 args = ["--verbose"]
 
-# Replace bork's built-in "build" mode flags for Claude. Set to `[]` to
+# Replace bork's built-in "plan" mode flags for Claude. Set to `[]` to
 # launch without any mode flags.
-[agent.claude.mode.build]
+[agent.claude.mode.plan]
 args = ["--dangerously-skip-permissions"]
 
 # Dotted-key form is also supported, equivalent to a section header.

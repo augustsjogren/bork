@@ -4,7 +4,8 @@
 //! - `key = "value"` (string, optional quotes)
 //! - `key = true` / `key = false` (or quoted equivalents)
 //! - `key = 300` (integer; quoted form also accepted)
-//! - `key = ["a", "b"]` (string array, optional quotes per element)
+//! - `key = ["a", "b"]` (string array, optional quotes per element;
+//!   double-quoted strings support `\"`, `\\`, `\n`, `\r`, and `\t` escapes)
 //! - `[section]` / `[section.subsection]` headers — keys inside the section
 //!   are flattened into dotted keys, e.g. `[agent.claude]` + `args = [...]`
 //!   becomes `agent.claude.args`.
@@ -137,14 +138,19 @@ fn join_key(section: &[String], key: &str) -> String {
 }
 
 /// Strip an inline `#` comment, but only when the `#` is not inside a quoted
-/// string. The parser is intentionally simple: arrays should not contain `#`.
+/// string.
 fn strip_comment(line: &str) -> &str {
-    let mut in_string = false;
+    let mut quote = None;
+    let mut escaped = false;
     for (idx, ch) in line.char_indices() {
-        match ch {
-            '"' => in_string = !in_string,
-            '#' if !in_string => return &line[..idx],
-            _ => {}
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if ch == '\\' => escaped = true,
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == '#' => return &line[..idx],
+            None => {}
         }
     }
     line
@@ -154,7 +160,7 @@ fn parse_value(raw: &str) -> Value {
     if let Some(list) = parse_list(raw) {
         return Value::List(list);
     }
-    let token = trim_token(raw);
+    let token = parse_token(raw);
     if token == "true" {
         return Value::Bool(true);
     }
@@ -164,25 +170,79 @@ fn parse_value(raw: &str) -> Value {
     if let Ok(n) = token.parse::<i64>() {
         return Value::Int(n);
     }
-    Value::String(token.to_string())
+    Value::String(token)
 }
 
 fn parse_list(raw: &str) -> Option<Vec<String>> {
     let trimmed = raw.trim();
     let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?;
     let mut items = Vec::new();
-    for part in inner.split(',') {
-        let token = trim_token(part);
-        if token.is_empty() {
-            continue;
+
+    let mut start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    for (idx, ch) in inner.char_indices() {
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if ch == '\\' => escaped = true,
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == ',' => {
+                push_list_item(&mut items, &inner[start..idx]);
+                start = idx + ch.len_utf8();
+            }
+            None => {}
         }
-        items.push(token.to_string());
     }
+    push_list_item(&mut items, &inner[start..]);
+
     Some(items)
 }
 
-fn trim_token(value: &str) -> &str {
-    value.trim().trim_matches('"').trim_matches('\'').trim()
+fn push_list_item(items: &mut Vec<String>, raw: &str) {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() {
+        items.push(parse_token(trimmed));
+    }
+}
+
+fn parse_token(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Some(inner) = trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        return unescape_double_quoted(inner);
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+    {
+        return inner.to_string();
+    }
+    trimmed.to_string()
+}
+
+fn unescape_double_quoted(value: &str) -> String {
+    let mut out = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -246,6 +306,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_arrays_with_quoted_commas() {
+        let t = parse(r#"args = ["--allowed-tools", "Read,Grep"]"#);
+        assert_eq!(
+            t["args"].as_list(),
+            Some(&["--allowed-tools".to_string(), "Read,Grep".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn parses_arrays_with_escaped_quotes() {
+        let t = parse(r#"args = ["--flag=\"value\""]"#);
+        assert_eq!(
+            t["args"].as_list(),
+            Some(&["--flag=\"value\"".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn parses_arrays_with_hash_inside_single_quotes() {
+        let t = parse("args = ['--flag=#value'] # trailing");
+        assert_eq!(
+            t["args"].as_list(),
+            Some(&["--flag=#value".to_string()][..])
+        );
+    }
+
+    #[test]
     fn empty_array() {
         let t = parse("agents = []");
         assert_eq!(t["agents"].as_list(), Some(&[][..]));
@@ -268,6 +355,12 @@ debug = true
     #[test]
     fn hash_inside_quotes_is_not_a_comment() {
         let t = parse(r#"prompt = "hello # world""#);
+        assert_eq!(t["prompt"].as_str(), Some("hello # world"));
+    }
+
+    #[test]
+    fn hash_inside_single_quotes_is_not_a_comment() {
+        let t = parse("prompt = 'hello # world'");
         assert_eq!(t["prompt"].as_str(), Some("hello # world"));
     }
 
