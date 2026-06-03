@@ -180,6 +180,7 @@ mod tests {
             done_session_ttl: 300,
             debug: false,
             agents_allowlist: None,
+            agent_launch: std::collections::HashMap::new(),
         };
 
         (tmp, project, cfg)

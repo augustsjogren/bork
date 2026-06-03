@@ -311,6 +311,30 @@ The new/edit issue dialog includes an Agent field that lets you pick which codin
 
 > Note: `~/.config/bork/agents.toml` from earlier versions is no longer read. Move its keys into `~/.config/bork/config.toml`.
 
+### Agent Launch Args
+
+Per-agent invocation args can be customized in either layer. Useful for flags bork doesn't know about, or for replacing the built-in mode flags entirely.
+
+```toml
+# Always append `--verbose` to every Claude invocation.
+[agent.claude]
+args = ["--verbose"]
+
+# Replace bork's built-in "plan" mode flags for Claude. Set to `[]` to
+# launch without any mode flags.
+[agent.claude.mode.plan]
+args = ["--dangerously-skip-permissions"]
+
+# Dotted-key form is also supported, equivalent to a section header.
+agent.codex.mode.yolo.args = ["--dangerously-bypass-approvals-and-sandbox"]
+```
+
+Semantics:
+- `[agent.<name>].args` are always appended after bork's own flags.
+- `[agent.<name>.mode.<mode>].args` *replace* bork's built-in flags for that agent/mode. Omit the key to keep the defaults; set to `[]` to launch with no mode flags.
+- Project config overrides global config per key.
+- Each configured arg is shell-escaped individually, so values containing spaces or quotes are passed through safely.
+
 ### State
 
 Issue data is stored in `.bork/state.json` as a flat JSON array. Writes are atomic (write to temp file, then rename) so state is never corrupted even if bork crashes.
