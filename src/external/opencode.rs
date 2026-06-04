@@ -89,6 +89,8 @@ fn build_agent_cmd(
             &issue.github_pr_links,
             |number| github::pr_url(&main_worktree, number),
         );
+        prompt.push_str("\n\nBork project: ");
+        prompt.push_str(&config.project_name);
         if let Some(worktree) = issue.worktree.as_deref() {
             prompt.push_str("\n\nAssigned worktree: ");
             prompt.push_str(worktree);
@@ -887,6 +889,14 @@ mod tests {
         let (cmd, _) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
         assert!(cmd.contains("opencode --prompt"));
         assert!(!cmd.contains("--agent plan"));
+    }
+
+    #[test]
+    fn fresh_prompt_includes_project_name() {
+        let issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        let config = test_config();
+        let (cmd, _) = build_agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(cmd.contains("Bork project: bork"));
     }
 
     #[test]
