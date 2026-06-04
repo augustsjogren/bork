@@ -388,6 +388,10 @@ enum IssueCommand {
         /// Skip creating a git worktree before launching the agent
         #[arg(long)]
         no_worktree: bool,
+
+        /// Project name or path to start the issue in. Defaults to current project.
+        #[arg(long)]
+        project: Option<String>,
     },
 
     /// Update an existing issue
@@ -638,7 +642,9 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
             mode,
             slug,
             no_worktree,
+            project,
         } => {
+            let project_root = resolve_start_project_root(project.as_deref())?;
             let report = start_issue(
                 &project_root,
                 StartIssueOptions {
@@ -712,6 +718,37 @@ struct StartIssueReport {
     title: String,
     worktree_dir: Option<String>,
     session_name: String,
+}
+
+fn resolve_start_project_root(project: Option<&str>) -> anyhow::Result<PathBuf> {
+    let Some(project) = project else {
+        return Ok(config::find_project_root());
+    };
+
+    let project_path = Path::new(project);
+    if project_path.exists() {
+        if let Some(root) = find_project_root_from(project_path) {
+            return Ok(root);
+        }
+    }
+
+    global_config::prune_stale_projects();
+    global_config::list_projects()
+        .into_iter()
+        .find(|entry| entry.name == project)
+        .map(|entry| entry.path)
+        .ok_or_else(|| anyhow::anyhow!("Project '{}' not found", project))
+}
+
+fn find_project_root_from(path: &Path) -> Option<PathBuf> {
+    let mut dir = if path.is_file() { path.parent()? } else { path };
+
+    loop {
+        if dir.join(".bork").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
 }
 
 fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<StartIssueReport> {
@@ -1710,6 +1747,30 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn find_project_root_from_container_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".bork")).unwrap();
+
+        assert_eq!(
+            find_project_root_from(dir.path()),
+            Some(dir.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn find_project_root_from_nested_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let nested = dir.path().join("main").join("src");
+        std::fs::create_dir_all(dir.path().join(".bork")).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            find_project_root_from(&nested),
+            Some(dir.path().to_path_buf())
+        );
     }
 
     #[test]

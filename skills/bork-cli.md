@@ -43,6 +43,7 @@ Use this when you want to spin off a new issue and have another agent work on it
 ```bash
 bork issue start "Implement search" --prompt "Add search using the existing indexing code"
 bork issue start "Fix auth bug" --agent claude --mode build --slug fix-auth-bug
+bork issue start "Add API route" --project my-api --prompt "Implement this in my-api"
 bork issue start "Investigate flaky test" --no-worktree --prompt "Find the root cause"
 ```
 
@@ -54,6 +55,7 @@ Options:
 - `--mode`: plan, build (default), yolo
 - `--slug`: worktree/branch slug (generated from title by default)
 - `--no-worktree`: launch without creating a worktree
+- `--project`: registered project name or path (defaults to current project)
 
 ### Show issue details
 
