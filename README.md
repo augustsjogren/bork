@@ -302,6 +302,7 @@ agent_kind       = "opencode"                        # default agent for this pr
 default_agent    = "claude"                          # alias for agent_kind, more natural in the global file
 agents           = ["opencode", "claude", "codex"]   # allowed agent picker entries (order matters)
 default_prompt   = "Check AGENTS.md for project context and start working on the issue."
+review_prompt    = "Review this PR. Summarize findings."  # prompt for auto-imported review-requested PRs
 done_session_ttl = 300                               # seconds a Done tmux session lingers
 debug            = false                             # enable debug-only keybindings
 ```

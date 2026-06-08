@@ -10,7 +10,7 @@ const BUSY_MIN_VISIBLE: Duration = Duration::from_millis(250);
 use ratatui::style::{Modifier, Style};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
-use crate::config::{AppConfig, AppState};
+use crate::config::{AppConfig, AppState, DEFAULT_REVIEW_PROMPT};
 use crate::external::linear::LinearIssue;
 use crate::types::{
     AgentKind, AgentMode, AgentStatus, AgentStatusInfo, Column, Issue, IssueKind, LinkedGithubPr,
@@ -755,7 +755,10 @@ impl Project {
                 agent_kind: self.config.agent_kind,
                 agent_mode: AgentMode::Plan,
                 prompt: Some(
-                    "Review this PR. Read the diff, check for correctness, regressions, missing tests, and edge cases. Summarize your findings.".to_string(),
+                    self.config
+                        .review_prompt
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_REVIEW_PROMPT.to_string()),
                 ),
                 worktree: None,
                 done_at: None,
@@ -2019,6 +2022,7 @@ mod tests {
             project_root: PathBuf::from("/tmp/test-bork"),
             agent_kind: AgentKind::OpenCode,
             default_prompt: None,
+            review_prompt: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             agents_allowlist: None,
@@ -4567,6 +4571,7 @@ mod tests {
             project_root: PathBuf::from(format!("/tmp/test-{}", name)),
             agent_kind: AgentKind::OpenCode,
             default_prompt: None,
+            review_prompt: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             agents_allowlist: None,

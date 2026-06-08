@@ -918,6 +918,7 @@ mod tests {
             project_root: std::path::PathBuf::from("/tmp/test"),
             agent_kind: AgentKind::OpenCode,
             default_prompt: Some("The source code is in main/.".to_string()),
+            review_prompt: None,
             done_session_ttl: 300,
             debug: false,
             agents_allowlist: None,
