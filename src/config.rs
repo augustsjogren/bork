@@ -15,6 +15,7 @@ pub struct AppConfig {
     pub project_root: PathBuf,
     pub agent_kind: AgentKind,
     pub default_prompt: Option<String>,
+    pub review_prompt: Option<String>,
     pub done_session_ttl: u64,
     pub debug: bool,
     /// Allowed agents for this project, if explicitly configured.
@@ -69,6 +70,8 @@ pub const DEFAULT_DONE_SESSION_TTL: u64 = 300;
 
 pub const DEFAULT_PROMPT_FALLBACK: &str = "The source code is in main/. Use `bork issue start \"Title\" --project <name-or-path> --prompt \"Details...\"` to spin off new issues with their own worktrees and agents.";
 
+pub const DEFAULT_REVIEW_PROMPT: &str = "Read the diff, check for correctness, regressions, missing tests, and edge cases. Summarize your findings. Use any code review skills that might be installed. Categorize call outs in High, Medium, Low importance. Add file name, linenumber to each call out.";
+
 impl Default for AppConfig {
     fn default() -> Self {
         let project_root = find_project_root();
@@ -77,6 +80,7 @@ impl Default for AppConfig {
             project_root,
             agent_kind: AgentKind::OpenCode,
             default_prompt: None,
+            review_prompt: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             agents_allowlist: None,
@@ -148,6 +152,7 @@ pub struct PartialConfig {
     pub project_name: Option<String>,
     pub agent_kind: Option<AgentKind>,
     pub default_prompt: Option<String>,
+    pub review_prompt: Option<String>,
     pub done_session_ttl: Option<u64>,
     pub debug: Option<bool>,
     pub agents_allowlist: Option<Vec<AgentKind>>,
@@ -199,6 +204,7 @@ impl PartialConfig {
             project_name: other.project_name.or(self.project_name),
             agent_kind: other.agent_kind.or(self.agent_kind),
             default_prompt: other.default_prompt.or(self.default_prompt),
+            review_prompt: other.review_prompt.or(self.review_prompt),
             done_session_ttl: other.done_session_ttl.or(self.done_session_ttl),
             debug: other.debug.or(self.debug),
             agents_allowlist: other.agents_allowlist.or(self.agents_allowlist),
@@ -239,6 +245,7 @@ fn materialize(merged: PartialConfig, project_root: &Path) -> AppConfig {
         project_root: project_root.to_path_buf(),
         agent_kind: merged.agent_kind.unwrap_or(AgentKind::OpenCode),
         default_prompt: merged.default_prompt,
+        review_prompt: merged.review_prompt,
         done_session_ttl: merged.done_session_ttl.unwrap_or(DEFAULT_DONE_SESSION_TTL),
         debug: merged.debug.unwrap_or(false),
         agents_allowlist: merged.agents_allowlist,
@@ -294,6 +301,11 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
+    let review_prompt = table
+        .get("review_prompt")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
     let done_session_ttl = table.get("done_session_ttl").and_then(|v| v.as_u64());
     let debug = table.get("debug").and_then(|v| v.as_bool());
 
@@ -310,6 +322,7 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         project_name,
         agent_kind,
         default_prompt,
+        review_prompt,
         done_session_ttl,
         debug,
         agents_allowlist,
@@ -424,11 +437,40 @@ agent_kind = "opencode"
 project_name = "bork"
 agent_kind = "claude"
 default_prompt = "Do the thing"
+review_prompt = "Review the thing"
 "#,
         );
         assert_eq!(p.project_name.as_deref(), Some("bork"));
         assert_eq!(p.agent_kind, Some(AgentKind::Claude));
         assert_eq!(p.default_prompt.as_deref(), Some("Do the thing"));
+        assert_eq!(p.review_prompt.as_deref(), Some("Review the thing"));
+    }
+
+    #[test]
+    fn parse_partial_review_prompt() {
+        let p = parse_partial(r#"review_prompt = "Look closely""#);
+        assert_eq!(p.review_prompt.as_deref(), Some("Look closely"));
+    }
+
+    #[test]
+    fn merge_project_review_prompt_overrides_global() {
+        let cfg = merge_to_app(
+            r#"review_prompt = "from global""#,
+            r#"review_prompt = "from project""#,
+        );
+        assert_eq!(cfg.review_prompt.as_deref(), Some("from project"));
+    }
+
+    #[test]
+    fn merge_global_review_prompt_used_when_project_unset() {
+        let cfg = merge_to_app(r#"review_prompt = "from global""#, "");
+        assert_eq!(cfg.review_prompt.as_deref(), Some("from global"));
+    }
+
+    #[test]
+    fn merge_empty_layers_leave_review_prompt_unset() {
+        let cfg = merge_to_app("", "");
+        assert!(cfg.review_prompt.is_none());
     }
 
     #[test]
@@ -449,6 +491,7 @@ default_prompt = "Do the thing"
         assert!(p.project_name.is_none());
         assert!(p.agent_kind.is_none());
         assert!(p.default_prompt.is_none());
+        assert!(p.review_prompt.is_none());
         assert!(p.done_session_ttl.is_none());
         assert!(p.debug.is_none());
         assert!(p.agents_allowlist.is_none());

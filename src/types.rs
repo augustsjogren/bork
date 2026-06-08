@@ -428,7 +428,6 @@ pub enum ReviewDecision {
 pub struct PrStatus {
     pub number: u32,
     pub title: String,
-    #[allow(dead_code)] // Fetched from GitHub; natural to display/open in a future PR detail view
     pub url: String,
     pub author: String,
     pub state: PrState,
