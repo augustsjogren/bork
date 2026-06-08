@@ -260,7 +260,7 @@ enum Command {
         agent: AgentKindArg,
     },
 
-    /// Install agent status hooks (OpenCode plugin + Claude Code/Codex hooks)
+    /// Install agent status hooks (OpenCode/Pi plugins + Claude Code/Codex hooks)
     Install,
 
     /// Remove agent status hooks
@@ -347,7 +347,7 @@ enum IssueCommand {
         #[arg(long, value_parser = parse_column)]
         column: Option<Column>,
 
-        /// Agent kind (opencode, claude, codex)
+        /// Agent kind (opencode, claude, codex, pi)
         #[arg(long, value_parser = parse_agent_kind)]
         agent: Option<AgentKind>,
 
@@ -377,7 +377,7 @@ enum IssueCommand {
         #[arg(long, value_parser = parse_column)]
         column: Option<Column>,
 
-        /// Change agent kind (opencode, claude, codex)
+        /// Change agent kind (opencode, claude, codex, pi)
         #[arg(long, value_parser = parse_agent_kind)]
         agent: Option<AgentKind>,
 
@@ -452,8 +452,12 @@ fn parse_column(s: &str) -> Result<Column, String> {
 }
 
 fn parse_agent_kind(s: &str) -> Result<AgentKind, String> {
-    AgentKind::parse(s)
-        .ok_or_else(|| format!("Unknown agent '{}'. Options: opencode, claude, codex", s))
+    AgentKind::parse(s).ok_or_else(|| {
+        format!(
+            "Unknown agent '{}'. Options: opencode, claude, codex, pi",
+            s
+        )
+    })
 }
 
 fn parse_agent_mode(s: &str) -> Result<AgentMode, String> {
@@ -481,6 +485,7 @@ enum AgentKindArg {
     Opencode,
     Claude,
     Codex,
+    Pi,
 }
 
 impl From<AgentKindArg> for AgentKind {
@@ -489,6 +494,7 @@ impl From<AgentKindArg> for AgentKind {
             AgentKindArg::Opencode => AgentKind::OpenCode,
             AgentKindArg::Claude => AgentKind::Claude,
             AgentKindArg::Codex => AgentKind::Codex,
+            AgentKindArg::Pi => AgentKind::Pi,
         }
     }
 }
