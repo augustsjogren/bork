@@ -754,12 +754,14 @@ impl Project {
                 column: Column::CodeReview,
                 agent_kind: self.config.agent_kind,
                 agent_mode: AgentMode::Plan,
-                prompt: Some(
-                    self.config
+                prompt: Some({
+                    let body = self
+                        .config
                         .review_prompt
-                        .clone()
-                        .unwrap_or_else(|| DEFAULT_REVIEW_PROMPT.to_string()),
-                ),
+                        .as_deref()
+                        .unwrap_or(DEFAULT_REVIEW_PROMPT);
+                    format!("Review this PR: #{} ({}). {}", pr.number, pr.url, body)
+                }),
                 worktree: None,
                 done_at: None,
                 session_id: None,

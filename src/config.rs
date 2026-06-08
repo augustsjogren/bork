@@ -70,7 +70,7 @@ pub const DEFAULT_DONE_SESSION_TTL: u64 = 300;
 
 pub const DEFAULT_PROMPT_FALLBACK: &str = "The source code is in main/. Use `bork issue start \"Title\" --project <name-or-path> --prompt \"Details...\"` to spin off new issues with their own worktrees and agents.";
 
-pub const DEFAULT_REVIEW_PROMPT: &str = "Review this PR. Read the diff, check for correctness, regressions, missing tests, and edge cases. Summarize your findings. Use any code review skills that might be installed. Categorize call outs in High, Medium, Low importance. Add file name, linenumber to each call out.";
+pub const DEFAULT_REVIEW_PROMPT: &str = "Read the diff, check for correctness, regressions, missing tests, and edge cases. Summarize your findings. Use any code review skills that might be installed. Categorize call outs in High, Medium, Low importance. Add file name, linenumber to each call out.";
 
 impl Default for AppConfig {
     fn default() -> Self {
