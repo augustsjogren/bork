@@ -139,6 +139,11 @@ pub fn install() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether `path` already exists and holds exactly `content`.
+fn file_has_content(path: &Path, content: &str) -> bool {
+    fs::read_to_string(path).is_ok_and(|existing| existing == content)
+}
+
 fn install_skills() {
     let project_root = crate::config::find_project_root();
     if !project_root.join(".bork").is_dir() {
@@ -160,12 +165,8 @@ fn install_skills() {
             let skill_dir = project_root.join(format!("{}/{}", root, name));
             let skill_path = skill_dir.join("SKILL.md");
 
-            if skill_path.exists() {
-                if let Ok(existing) = fs::read_to_string(&skill_path) {
-                    if existing == *content {
-                        continue;
-                    }
-                }
+            if file_has_content(&skill_path, content) {
+                continue;
             }
 
             if fs::create_dir_all(&skill_dir).is_ok() {
@@ -237,13 +238,9 @@ fn pi_extension_path() -> PathBuf {
 fn install_pi_extension() -> anyhow::Result<()> {
     let path = pi_extension_path();
 
-    if path.exists() {
-        if let Ok(existing) = fs::read_to_string(&path) {
-            if existing == PI_EXTENSION {
-                println!("  Pi extension already installed (skipped)");
-                return Ok(());
-            }
-        }
+    if file_has_content(&path, PI_EXTENSION) {
+        println!("  Pi extension already installed (skipped)");
+        return Ok(());
     }
 
     if let Some(parent) = path.parent() {
