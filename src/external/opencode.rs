@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::config::{self, AppConfig};
 use crate::error::AppError;
 use crate::external::{github, tmux};
-use crate::types::{AgentKind, AgentMode, Issue, LinkedGithubPr, LinkedLinear};
+use crate::types::{AgentKind, AgentMode, Issue, IssueKind, LinkedGithubPr, LinkedLinear};
 
 /// Launch an agent session for an issue.
 /// Creates a tmux session with two windows:
@@ -136,10 +136,17 @@ fn build_agent_cmd(
     // since resume paths skip the prompt entirely. Returned verbatim (no shell
     // escaping) because it's staged to a file and read back via `"$(cat ...)"`.
     let build_prompt_contents = || {
-        let default_prompt = config
-            .default_prompt
-            .as_deref()
-            .unwrap_or(config::DEFAULT_PROMPT_FALLBACK);
+        let default_prompt = if issue.kind == IssueKind::Orchestrator {
+            config
+                .orchestrator_prompt
+                .as_deref()
+                .unwrap_or(config::DEFAULT_ORCHESTRATOR_PROMPT)
+        } else {
+            config
+                .default_prompt
+                .as_deref()
+                .unwrap_or(config::DEFAULT_PROMPT_FALLBACK)
+        };
         let main_worktree = config.project_root.join("main");
         let mut prompt = build_prompt(
             &issue.id,
@@ -156,6 +163,12 @@ fn build_agent_cmd(
             prompt.push_str("\n\nAssigned worktree: ");
             prompt.push_str(worktree);
             prompt.push_str(". Do all work for this issue inside that directory.");
+        }
+        if issue.kind == IssueKind::Orchestrator {
+            prompt.push_str(&format!(
+                "\n\nMaintain your plan in plans/{}/planning.md, relative to the project root (the directory containing main/).",
+                issue.id
+            ));
         }
         prompt
     };
@@ -1097,6 +1110,7 @@ mod tests {
             agent_kind: AgentKind::OpenCode,
             default_prompt: Some("The source code is in main/.".to_string()),
             review_prompt: None,
+            orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
             done_session_ttl: 300,
@@ -1163,6 +1177,43 @@ mod tests {
         let prompt = prompt.unwrap();
         assert!(prompt.contains("Assigned worktree: bork-1-fix-bug"));
         assert!(prompt.contains("inside that directory"));
+    }
+
+    #[test]
+    fn orchestrator_prompt_uses_orchestrator_template() {
+        let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        issue.kind = crate::types::IssueKind::Orchestrator;
+        let config = test_config();
+        let (_, _, prompt) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        let prompt = prompt.unwrap();
+        assert!(prompt.contains("orchestrator agent"));
+        assert!(prompt.contains("bork issue start"));
+        assert!(prompt.contains("plans/bork-1/planning.md"));
+        assert!(!prompt.contains("Assigned worktree"));
+        // The regular default prompt is not used for orchestrators.
+        assert!(!prompt.contains("The source code is in main/."));
+    }
+
+    #[test]
+    fn orchestrator_prompt_respects_config_override() {
+        let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        issue.kind = crate::types::IssueKind::Orchestrator;
+        let mut config = test_config();
+        config.orchestrator_prompt = Some("Custom orchestration rules".to_string());
+        let (_, _, prompt) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        let prompt = prompt.unwrap();
+        assert!(prompt.contains("Custom orchestration rules"));
+        assert!(prompt.contains("plans/bork-1/planning.md"));
+    }
+
+    #[test]
+    fn agentic_prompt_does_not_use_orchestrator_template() {
+        let issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        let config = test_config();
+        let (_, _, prompt) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        let prompt = prompt.unwrap();
+        assert!(prompt.contains("The source code is in main/."));
+        assert!(!prompt.contains("planning.md"));
     }
 
     #[test]
@@ -1423,6 +1474,21 @@ mod tests {
         let mut config = test_config();
         config.setup_script = Some("npm install".to_string());
         assert_eq!(setup_prefix(&issue, &config), None);
+    }
+
+    #[test]
+    fn setup_prefix_skipped_for_orchestrator() {
+        // Orchestrators never have a worktree (set_kind clears it,
+        // auto_assign and `bork worktree` skip them), so setup_script
+        // must not run for their launches.
+        let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        issue.kind = crate::types::IssueKind::Orchestrator;
+        issue.worktree = None;
+        let mut config = test_config();
+        config.setup_script = Some("npm install".to_string());
+        assert_eq!(setup_prefix(&issue, &config), None);
+        let (cmd, _, _) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(!cmd.contains("npm install"));
     }
 
     #[test]

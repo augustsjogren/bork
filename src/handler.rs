@@ -323,7 +323,7 @@ fn handle_normal(
             };
             let issue = app.context_project(ctx).issues[idx].clone();
 
-            if issue.kind == IssueKind::NonAgentic {
+            if !issue.kind.is_agentic() {
                 app.open_edit_dialog(&issue, idx, ctx);
                 return PostAction::None;
             }
@@ -696,18 +696,35 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
     if let Some(idx) = dialog.editing_index {
         let p = app.find_project_mut(&proj_id).unwrap();
         if idx < p.issues.len() {
+            let session_name = p.issues[idx].session_name(&p.config.project_name);
+            let detached_worktree = p.issues[idx].worktree.clone();
+
             p.issues[idx].title = title;
             p.issues[idx].prompt = prompt;
             p.issues[idx].agent_kind = dialog.agent_kind;
             p.issues[idx].agent_mode = dialog.agent_mode;
-            p.issues[idx].kind = dialog.kind;
+            let crossed_orchestrator_boundary = p.issues[idx].set_kind(dialog.kind);
 
             apply_linear_fields(&mut p.issues[idx], &dialog);
             apply_pr_fields(&mut p.issues[idx], &dialog);
 
             let updated_id = p.issues[idx].id.clone();
             p.mark_dirty();
-            app.set_message(format!("Updated {}", updated_id));
+
+            if crossed_orchestrator_boundary {
+                // A live session would otherwise be re-attached with the old
+                // kind's prompt and cwd.
+                let _ = tmux::kill_session(&session_name);
+                match detached_worktree.filter(|_| dialog.kind == IssueKind::Orchestrator) {
+                    Some(wt) => app.set_message(format!(
+                        "Updated {} (session reset; worktree {} detached, remove it manually)",
+                        updated_id, wt
+                    )),
+                    None => app.set_message(format!("Updated {} (session reset)", updated_id)),
+                }
+            } else {
+                app.set_message(format!("Updated {}", updated_id));
+            }
         }
         return;
     }
@@ -770,7 +787,8 @@ fn apply_linear_fields(issue: &mut Issue, dialog: &crate::app::DialogState) {
 }
 
 fn apply_pr_fields(issue: &mut Issue, dialog: &crate::app::DialogState) {
-    if dialog.github_pr_cleared {
+    // Orchestrators have no PR field; drop any links left from a kind change.
+    if dialog.kind == IssueKind::Orchestrator || dialog.github_pr_cleared {
         issue.github_pr_links.clear();
     } else if !dialog.github_prs.is_empty() {
         issue.github_pr_links = dialog
@@ -1252,6 +1270,7 @@ mod tests {
             agent_kind: crate::types::AgentKind::OpenCode,
             default_prompt: Some("Check AGENTS.md for context.".to_string()),
             review_prompt: None,
+            orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
@@ -2253,6 +2272,7 @@ mod tests {
             agent_kind: crate::types::AgentKind::OpenCode,
             default_prompt: None,
             review_prompt: None,
+            orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,

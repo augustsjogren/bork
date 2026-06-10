@@ -241,7 +241,7 @@ fn spawn_pr_poll_worker(
 const AGENTS_START_HERE: &str = "\
 Start here (for AI agents):
   bork issue list                List the kanban board (use --json to parse)
-  bork issue create \"<title>\"    Add an issue (its agent runs in a worktree)
+  bork issue create \"<title>\"    Add an issue to the board
   bork issue start \"<title>\"     Create issue + worktree + agent in one step
                                  (--no-worktree to skip it, --base <branch> to
                                   pick the worktree's base; defaults to main)
@@ -250,12 +250,17 @@ Start here (for AI agents):
   bork issue archive <id>        Kill session + teardown + remove worktree
                                  (--force to discard uncommitted changes)
 
-  Each issue runs one coding agent. Pick which and how with:
+  Agentic issues each run one coding agent. Pick which and how with:
     --agent   opencode (default), claude, codex     # must be on your PATH
     --mode    plan (read-only), build, yolo          # yolo: claude/codex only
+    --kind    agentic (default), todo, orchestrator  # todo: no agent;
+                                                     # orchestrator: plans,
+                                                     # spawns + monitors issues
+                                                     # from the project root
 
   Defaults + allowlist live in ~/.config/bork/config.toml
-  (default_agent, agents = [...]); per-project override in .bork/config.toml.";
+  (default_agent, agents = [...], orchestrator_prompt);
+  per-project override in .bork/config.toml.";
 
 /// One-line pointer shown before Options on every subcommand `--help`, so the
 /// quickstart is discoverable at any level without repeating the full block.
@@ -444,7 +449,7 @@ enum IssueCommand {
         #[arg(long)]
         prompt: Option<String>,
 
-        /// Issue kind (agentic, todo)
+        /// Issue kind (agentic, todo, orchestrator)
         #[arg(long, value_parser = parse_issue_kind)]
         kind: Option<IssueKind>,
     },
@@ -507,6 +512,10 @@ enum IssueCommand {
         /// Update prompt text (empty string clears it)
         #[arg(long)]
         prompt: Option<String>,
+
+        /// Change issue kind (agentic, todo, orchestrator)
+        #[arg(long, value_parser = parse_issue_kind)]
+        kind: Option<IssueKind>,
     },
 
     /// Archive an issue: kill its session, run teardown, remove its worktree
@@ -602,8 +611,9 @@ fn parse_issue_kind(s: &str) -> Result<IssueKind, String> {
     match s.to_lowercase().as_str() {
         "agentic" => Ok(IssueKind::Agentic),
         "todo" | "non-agentic" | "nonagentic" => Ok(IssueKind::NonAgentic),
+        "orchestrator" | "orch" | "planner" => Ok(IssueKind::Orchestrator),
         _ => Err(format!(
-            "Unknown issue kind '{}'. Options: agentic, todo",
+            "Unknown issue kind '{}'. Options: agentic, todo, orchestrator",
             s
         )),
     }
@@ -737,6 +747,7 @@ const CONFIG_KEYS: &[(&str, ConfigKeyKind)] = &[
     ("agent_kind", ConfigKeyKind::Agent),
     ("default_prompt", ConfigKeyKind::Str),
     ("review_prompt", ConfigKeyKind::Str),
+    ("orchestrator_prompt", ConfigKeyKind::Str),
 ];
 
 fn config_key_kind(key: &str) -> Option<ConfigKeyKind> {
@@ -764,7 +775,15 @@ fn toml_literal_for(kind: ConfigKeyKind, value: &str) -> anyhow::Result<String> 
             None => anyhow::bail!("unknown agent '{}'", value),
         },
         ConfigKeyKind::Str => {
-            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            // toml_lite is line-based: raw newlines inside a quoted string
+            // corrupt the value on read-back, so escape control chars too
+            // (the reader understands \n, \r, and \t).
+            let escaped = value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t");
             Ok(format!("\"{}\"", escaped))
         }
     }
@@ -780,6 +799,7 @@ fn resolved_config_value(config: &config::AppConfig, key: &str) -> Option<String
         "agent_kind" => Some(config.agent_kind.to_string()),
         "default_prompt" => Some(config.default_prompt.clone().unwrap_or_default()),
         "review_prompt" => Some(config.review_prompt.clone().unwrap_or_default()),
+        "orchestrator_prompt" => Some(config.orchestrator_prompt.clone().unwrap_or_default()),
         _ => None,
     }
 }
@@ -892,6 +912,7 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
             agent,
             mode,
             prompt,
+            kind,
         } => {
             let issue = ops::update_issue(
                 &project_root,
@@ -902,6 +923,7 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
                     agent_kind: agent,
                     agent_mode: mode,
                     prompt,
+                    kind,
                 },
             )?;
             println!("Updated {}: \"{}\"", issue.id, issue.title);
@@ -1958,6 +1980,32 @@ fn resolve_editor() -> Option<(String, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toml_literal_escapes_control_chars_for_roundtrip() {
+        let literal =
+            toml_literal_for(ConfigKeyKind::Str, "line one\nline two\twith \"quotes\"").unwrap();
+        assert_eq!(literal, r#""line one\nline two\twith \"quotes\"""#);
+
+        // The escaped literal must survive a toml_lite read-back.
+        let table = toml_lite::parse(&format!("orchestrator_prompt = {}", literal));
+        assert_eq!(
+            table.get("orchestrator_prompt").and_then(|v| v.as_str()),
+            Some("line one\nline two\twith \"quotes\"")
+        );
+    }
+
+    #[test]
+    fn parse_issue_kind_accepts_orchestrator_aliases() {
+        assert_eq!(
+            parse_issue_kind("orchestrator"),
+            Ok(IssueKind::Orchestrator)
+        );
+        assert_eq!(parse_issue_kind("orch"), Ok(IssueKind::Orchestrator));
+        assert_eq!(parse_issue_kind("planner"), Ok(IssueKind::Orchestrator));
+        assert_eq!(parse_issue_kind("todo"), Ok(IssueKind::NonAgentic));
+        assert!(parse_issue_kind("bogus").is_err());
+    }
 
     // The wrapper tmux session name must never collide with agent session names.
     // Agent sessions follow the pattern "{project_name}-{issue_id}" where
