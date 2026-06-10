@@ -16,6 +16,13 @@ pub struct AppConfig {
     pub agent_kind: AgentKind,
     pub default_prompt: Option<String>,
     pub review_prompt: Option<String>,
+    /// Shell command run inside a fresh issue worktree before the agent
+    /// starts (e.g. dependency install). Prepended to the agent launch
+    /// command with `&&`, so the agent only starts if setup succeeds.
+    pub setup_script: Option<String>,
+    /// Shell command run inside a worktree right before it is removed by
+    /// `bork issue archive` (e.g. stopping services, dropping databases).
+    pub teardown_script: Option<String>,
     pub done_session_ttl: u64,
     pub debug: bool,
     /// Auto-create issues from PRs the user has been requested to review.
@@ -85,6 +92,8 @@ impl Default for AppConfig {
             agent_kind: AgentKind::OpenCode,
             default_prompt: None,
             review_prompt: None,
+            setup_script: None,
+            teardown_script: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             auto_import_reviews: true,
@@ -159,6 +168,8 @@ pub struct PartialConfig {
     pub agent_kind: Option<AgentKind>,
     pub default_prompt: Option<String>,
     pub review_prompt: Option<String>,
+    pub setup_script: Option<String>,
+    pub teardown_script: Option<String>,
     pub done_session_ttl: Option<u64>,
     pub debug: Option<bool>,
     pub auto_import_reviews: Option<bool>,
@@ -213,6 +224,8 @@ impl PartialConfig {
             agent_kind: other.agent_kind.or(self.agent_kind),
             default_prompt: other.default_prompt.or(self.default_prompt),
             review_prompt: other.review_prompt.or(self.review_prompt),
+            setup_script: other.setup_script.or(self.setup_script),
+            teardown_script: other.teardown_script.or(self.teardown_script),
             done_session_ttl: other.done_session_ttl.or(self.done_session_ttl),
             debug: other.debug.or(self.debug),
             auto_import_reviews: other.auto_import_reviews.or(self.auto_import_reviews),
@@ -258,6 +271,8 @@ fn materialize(merged: PartialConfig, project_root: &Path) -> AppConfig {
         agent_kind: merged.agent_kind.unwrap_or(AgentKind::OpenCode),
         default_prompt: merged.default_prompt,
         review_prompt: merged.review_prompt,
+        setup_script: merged.setup_script,
+        teardown_script: merged.teardown_script,
         done_session_ttl: merged.done_session_ttl.unwrap_or(DEFAULT_DONE_SESSION_TTL),
         debug: merged.debug.unwrap_or(false),
         auto_import_reviews: merged.auto_import_reviews.unwrap_or(true),
@@ -320,6 +335,16 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
+    let setup_script = table
+        .get("setup_script")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let teardown_script = table
+        .get("teardown_script")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
     let done_session_ttl = table.get("done_session_ttl").and_then(|v| v.as_u64());
     let debug = table.get("debug").and_then(|v| v.as_bool());
     let auto_import_reviews = table.get("auto_import_reviews").and_then(|v| v.as_bool());
@@ -341,6 +366,8 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         agent_kind,
         default_prompt,
         review_prompt,
+        setup_script,
+        teardown_script,
         done_session_ttl,
         debug,
         auto_import_reviews,
@@ -579,6 +606,43 @@ review_prompt = "Review the thing"
     }
 
     #[test]
+    fn parse_partial_setup_and_teardown_scripts() {
+        let p = parse_partial(
+            r#"
+setup_script = "npm install && cp .env.example .env"
+teardown_script = "docker compose down"
+"#,
+        );
+        assert_eq!(
+            p.setup_script.as_deref(),
+            Some("npm install && cp .env.example .env")
+        );
+        assert_eq!(p.teardown_script.as_deref(), Some("docker compose down"));
+    }
+
+    #[test]
+    fn merge_project_setup_script_overrides_global() {
+        let cfg = merge_to_app(
+            r#"setup_script = "global-setup""#,
+            r#"setup_script = "project-setup""#,
+        );
+        assert_eq!(cfg.setup_script.as_deref(), Some("project-setup"));
+    }
+
+    #[test]
+    fn merge_global_setup_script_used_when_project_unset() {
+        let cfg = merge_to_app(r#"setup_script = "global-setup""#, "");
+        assert_eq!(cfg.setup_script.as_deref(), Some("global-setup"));
+    }
+
+    #[test]
+    fn merge_empty_layers_leave_scripts_unset() {
+        let cfg = merge_to_app("", "");
+        assert!(cfg.setup_script.is_none());
+        assert!(cfg.teardown_script.is_none());
+    }
+
+    #[test]
     fn parse_partial_default_agent_alias() {
         let p = parse_partial(r#"default_agent = "claude""#);
         assert_eq!(p.agent_kind, Some(AgentKind::Claude));
@@ -597,6 +661,8 @@ review_prompt = "Review the thing"
         assert!(p.agent_kind.is_none());
         assert!(p.default_prompt.is_none());
         assert!(p.review_prompt.is_none());
+        assert!(p.setup_script.is_none());
+        assert!(p.teardown_script.is_none());
         assert!(p.done_session_ttl.is_none());
         assert!(p.debug.is_none());
         assert!(p.agents_allowlist.is_none());
