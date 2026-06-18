@@ -293,7 +293,7 @@ Start here (for AI agents):
                                                      # from the project root
 
   Defaults + allowlist live in ~/.config/bork/config.toml
-  (default_agent, agents = [...], orchestrator_prompt);
+  (default_agent, default_mode, agents = [...], orchestrator_prompt);
   per-project override in .bork/config.toml.";
 
 /// One-line pointer shown before Options on every subcommand `--help`, so the
@@ -828,6 +828,7 @@ enum ConfigKeyKind {
     U64,
     Str,
     Agent,
+    Mode,
 }
 
 const CONFIG_KEYS: &[(&str, ConfigKeyKind)] = &[
@@ -836,6 +837,7 @@ const CONFIG_KEYS: &[(&str, ConfigKeyKind)] = &[
     ("debug", ConfigKeyKind::Bool),
     ("done_session_ttl", ConfigKeyKind::U64),
     ("agent_kind", ConfigKeyKind::Agent),
+    ("agent_mode", ConfigKeyKind::Mode),
     ("default_prompt", ConfigKeyKind::Str),
     ("review_prompt", ConfigKeyKind::Str),
     ("orchestrator_prompt", ConfigKeyKind::Str),
@@ -865,6 +867,10 @@ fn toml_literal_for(kind: ConfigKeyKind, value: &str) -> anyhow::Result<String> 
             Some(_) => Ok(format!("\"{}\"", value)),
             None => anyhow::bail!("unknown agent '{}'", value),
         },
+        ConfigKeyKind::Mode => match AgentMode::parse(value) {
+            Some(_) => Ok(format!("\"{}\"", value)),
+            None => anyhow::bail!("unknown mode '{}' (expected plan, build, or yolo)", value),
+        },
         ConfigKeyKind::Str => {
             // toml_lite is line-based: raw newlines inside a quoted string
             // corrupt the value on read-back, so escape control chars too
@@ -888,6 +894,7 @@ fn resolved_config_value(config: &config::AppConfig, key: &str) -> Option<String
         "debug" => Some(config.debug.to_string()),
         "done_session_ttl" => Some(config.done_session_ttl.to_string()),
         "agent_kind" => Some(config.agent_kind.to_string()),
+        "agent_mode" => Some(config.agent_mode.to_string()),
         "default_prompt" => Some(config.default_prompt.clone().unwrap_or_default()),
         "review_prompt" => Some(config.review_prompt.clone().unwrap_or_default()),
         "orchestrator_prompt" => Some(config.orchestrator_prompt.clone().unwrap_or_default()),
@@ -1125,7 +1132,7 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
             title: opts.title.clone(),
             column: None,
             agent_kind: opts.agent_kind,
-            agent_mode: Some(opts.agent_mode.unwrap_or(AgentMode::Build)),
+            agent_mode: Some(opts.agent_mode.unwrap_or(config.agent_mode)),
             prompt: opts.prompt,
             kind: Some(IssueKind::Agentic),
         },

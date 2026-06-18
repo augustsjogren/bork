@@ -10,7 +10,7 @@ const BUSY_MIN_VISIBLE: Duration = Duration::from_millis(250);
 use crate::config::{AppConfig, AppState, DEFAULT_REVIEW_PROMPT};
 use crate::external::linear::LinearIssue;
 use crate::types::{
-    AgentKind, AgentStatus, AgentStatusInfo, Column, Issue, IssueKind, LinkedGithubPr,
+    AgentKind, AgentMode, AgentStatus, AgentStatusInfo, Column, Issue, IssueKind, LinkedGithubPr,
     PrImportSource, PrState, PrStatus, WorktreeStatus,
 };
 
@@ -158,6 +158,10 @@ impl Project {
             .first()
             .copied()
             .unwrap_or(self.config.agent_kind)
+    }
+
+    pub fn dialog_default_mode(&self) -> AgentMode {
+        self.config.agent_mode
     }
 
     pub fn mark_dirty(&mut self) {
@@ -1416,6 +1420,7 @@ impl App {
         let github_available = p.has_github_prs();
         let mut state = DialogState::new(
             p.dialog_default_agent(),
+            p.dialog_default_mode(),
             p.available_agents.clone(),
             p.linear_available,
             github_available,
@@ -1737,6 +1742,7 @@ mod tests {
             project_name: "bork".into(),
             project_root: PathBuf::from("/tmp/test-bork"),
             agent_kind: AgentKind::OpenCode,
+            agent_mode: crate::types::AgentMode::Plan,
             default_prompt: None,
             review_prompt: None,
             orchestrator_prompt: None,
@@ -2596,6 +2602,7 @@ mod tests {
     fn claude_dialog() -> DialogState {
         DialogState::new(
             crate::types::AgentKind::Claude,
+            crate::types::AgentMode::Plan,
             crate::types::AgentKind::ALL.to_vec(),
             false,
             false,
@@ -2605,6 +2612,7 @@ mod tests {
     fn opencode_dialog() -> DialogState {
         DialogState::new(
             crate::types::AgentKind::OpenCode,
+            crate::types::AgentMode::Plan,
             crate::types::AgentKind::ALL.to_vec(),
             false,
             false,
@@ -2614,6 +2622,7 @@ mod tests {
     fn codex_dialog() -> DialogState {
         DialogState::new(
             crate::types::AgentKind::Codex,
+            crate::types::AgentMode::Plan,
             crate::types::AgentKind::ALL.to_vec(),
             false,
             false,
@@ -2671,6 +2680,7 @@ mod tests {
     fn dialog_pi_hides_mode_field() {
         let d = DialogState::new(
             crate::types::AgentKind::Pi,
+            crate::types::AgentMode::Plan,
             crate::types::AgentKind::ALL.to_vec(),
             false,
             false,
@@ -2702,6 +2712,7 @@ mod tests {
         let config = test_config();
         let d = DialogState::new(
             config.agent_kind,
+            config.agent_mode,
             crate::types::AgentKind::ALL.to_vec(),
             false,
             false,
@@ -2731,6 +2742,7 @@ mod tests {
     fn dialog_new_defaults_to_agentic_with_title_focused() {
         let d = DialogState::new(
             crate::types::AgentKind::OpenCode,
+            crate::types::AgentMode::Plan,
             crate::types::AgentKind::ALL.to_vec(),
             false,
             false,
@@ -2774,6 +2786,7 @@ mod tests {
     fn dialog_orchestrator_hides_github_pr_field_keeps_agent() {
         let mut d = DialogState::new(
             crate::types::AgentKind::OpenCode,
+            crate::types::AgentMode::Plan,
             crate::types::AgentKind::ALL.to_vec(),
             true,
             true,
@@ -2812,6 +2825,7 @@ mod tests {
     fn dialog_prompt_supports_normal_edit_commands() {
         let mut d = DialogState::new(
             crate::types::AgentKind::OpenCode,
+            crate::types::AgentMode::Plan,
             crate::types::AgentKind::ALL.to_vec(),
             false,
             false,
@@ -4467,6 +4481,7 @@ mod tests {
             project_name: name.into(),
             project_root: PathBuf::from(format!("/tmp/test-{}", name)),
             agent_kind: AgentKind::OpenCode,
+            agent_mode: crate::types::AgentMode::Plan,
             default_prompt: None,
             review_prompt: None,
             orchestrator_prompt: None,

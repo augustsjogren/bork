@@ -56,6 +56,7 @@ fn make_prompt_textarea(text: &str) -> TextArea<'static> {
 impl DialogState {
     pub fn new(
         agent_kind: AgentKind,
+        agent_mode: AgentMode,
         available_agents: Vec<AgentKind>,
         linear_available: bool,
         github_available: bool,
@@ -75,7 +76,7 @@ impl DialogState {
             title_cursor: 0,
             prompt: make_prompt_textarea(""),
             available_agents,
-            agent_mode: Self::normalize_mode_for_agent(AgentMode::Plan, resolved_agent),
+            agent_mode: Self::normalize_mode_for_agent(agent_mode, resolved_agent),
             agent_kind: resolved_agent,
             focused_field: title_idx,
             editing_index: None,
