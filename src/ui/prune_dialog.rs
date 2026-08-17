@@ -131,7 +131,11 @@ fn state_label_for(c: &PruneCandidate) -> String {
     if c.session_alive {
         return "● session".to_string();
     }
-    if let Some(status) = c.status.as_ref().filter(|s| !s.is_clean()) {
+    let Some(status) = c.status.as_ref() else {
+        // Git poll hasn't reached this worktree yet.
+        return "? unknown".to_string();
+    };
+    if !status.is_clean() {
         return format!("◌ {} dirty", status.staged + status.unstaged);
     }
     match c.issue_column {

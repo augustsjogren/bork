@@ -2431,7 +2431,7 @@ fn maybe_auto_prune_message(app: &mut app::App) -> Option<String> {
             }
         }
         project.last_auto_prune_check = Some(now_inst);
-        let count = project.prunable_worktree_names().len();
+        let count = prune::discover_worktree_names(&project.config.project_root).len();
         if (count as u64) < project.config.prune_threshold {
             continue;
         }
