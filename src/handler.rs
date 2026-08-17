@@ -2725,11 +2725,26 @@ mod tests {
     // Prune dialog
     // ================================================================
 
+    /// App whose project root is a tempdir holding `names` as fake git
+    /// worktrees (dir + `.git` file), plus a `main/` that must be excluded.
+    /// The prune dialog discovers worktrees from disk, not the poll cache.
+    fn test_app_with_worktrees(names: &[&str]) -> (tempfile::TempDir, App) {
+        let dir = tempfile::TempDir::new().unwrap();
+        for name in names.iter().chain(&["main"]) {
+            std::fs::create_dir_all(dir.path().join(name)).unwrap();
+            std::fs::write(dir.path().join(name).join(".git"), "gitdir: x").unwrap();
+        }
+        let mut config = test_config();
+        config.project_root = dir.path().to_path_buf();
+        let app = App::new(config, crate::config::AppState::default());
+        (dir, app)
+    }
+
     #[test]
     fn open_prune_dialog_with_no_candidates_shows_message() {
-        let mut app = test_app();
+        let (_dir, mut app) = test_app_with_worktrees(&[]);
         act(&mut app, Action::OpenPruneDialog);
-        // No worktree poll data => no candidates => message, no dialog
+        // Only main/ on disk => no candidates => message, no dialog
         assert!(app.prune_dialog.is_none());
         assert!(app.input_mode == InputMode::Normal);
         assert!(app
@@ -2740,15 +2755,7 @@ mod tests {
 
     #[test]
     fn open_prune_dialog_with_candidates_enters_dialog_mode() {
-        let mut app = test_app();
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("wt-1".into(), "feature/x".into());
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("main".into(), "main".into());
+        let (_dir, mut app) = test_app_with_worktrees(&["wt-1"]);
         act(&mut app, Action::OpenPruneDialog);
         assert!(app.prune_dialog.is_some());
         assert_eq!(app.input_mode, InputMode::PruneDialog);
@@ -2757,12 +2764,25 @@ mod tests {
     }
 
     #[test]
+    fn open_prune_dialog_works_without_git_poll_data() {
+        // Regression: with a cold poll cache (e.g. a project with hundreds
+        // of worktrees whose first poll round hasn't finished), the dialog
+        // must still list what's on disk instead of "No worktrees to prune".
+        let (_dir, mut app) = test_app_with_worktrees(&["wt-1", "wt-2"]);
+        assert!(app.project().live.worktree_branches.is_empty());
+        act(&mut app, Action::OpenPruneDialog);
+        let dialog = app.prune_dialog.as_ref().unwrap();
+        assert_eq!(dialog.candidates.len(), 2);
+        // Unknown status => conservative Keep defaults.
+        for c in &dialog.candidates {
+            assert!(c.status.is_none());
+            assert_eq!(c.action, crate::prune::PruneAction::Keep);
+        }
+    }
+
+    #[test]
     fn prune_cancel_closes_dialog() {
-        let mut app = test_app();
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("wt-1".into(), "feature/x".into());
+        let (_dir, mut app) = test_app_with_worktrees(&["wt-1"]);
         act(&mut app, Action::OpenPruneDialog);
         act(&mut app, Action::PruneCancel);
         assert!(app.prune_dialog.is_none());
@@ -2771,13 +2791,8 @@ mod tests {
 
     #[test]
     fn prune_toggle_flips_action_for_selected_row() {
-        let mut app = test_app();
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("wt-1".into(), "feature/x".into());
+        let (_dir, mut app) = test_app_with_worktrees(&["wt-1"]);
         act(&mut app, Action::OpenPruneDialog);
-        // Default for a clean orphan is Remove
         let before = app.prune_dialog.as_ref().unwrap().candidates[0].action;
         act(&mut app, Action::PruneToggle);
         let after = app.prune_dialog.as_ref().unwrap().candidates[0].action;
@@ -2786,15 +2801,7 @@ mod tests {
 
     #[test]
     fn prune_select_all_remove_and_keep() {
-        let mut app = test_app();
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("wt-1".into(), "b1".into());
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("wt-2".into(), "b2".into());
+        let (_dir, mut app) = test_app_with_worktrees(&["wt-1", "wt-2"]);
         act(&mut app, Action::OpenPruneDialog);
         act(&mut app, Action::PruneSelectAllKeep);
         for c in &app.prune_dialog.as_ref().unwrap().candidates {
@@ -2808,11 +2815,7 @@ mod tests {
 
     #[test]
     fn prune_confirm_refuses_when_dirty_selected_for_removal() {
-        let mut app = test_app();
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("wt-1".into(), "feature/x".into());
+        let (_dir, mut app) = test_app_with_worktrees(&["wt-1"]);
         app.project_mut().live.worktree_statuses.insert(
             "wt-1".into(),
             crate::types::WorktreeStatus {
@@ -2834,11 +2837,7 @@ mod tests {
 
     #[test]
     fn prune_confirm_with_no_safe_removals_just_closes() {
-        let mut app = test_app();
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("wt-1".into(), "b".into());
+        let (_dir, mut app) = test_app_with_worktrees(&["wt-1"]);
         act(&mut app, Action::OpenPruneDialog);
         act(&mut app, Action::PruneSelectAllKeep);
         act(&mut app, Action::PruneConfirm);

@@ -41,8 +41,11 @@ impl PruneCandidate {
         issue: Option<&Issue>,
         session_alive: bool,
     ) -> Self {
-        let dirty = status.as_ref().is_some_and(|s| !s.is_clean());
-        let action = if dirty || session_alive {
+        // `status: None` means the git poll hasn't reached this worktree
+        // yet — treat it like dirty for the default so we never pre-select
+        // a worktree whose state we don't actually know.
+        let clean = status.as_ref().is_some_and(|s| s.is_clean());
+        let action = if !clean || session_alive {
             PruneAction::Keep
         } else {
             match issue.map(|i| i.column) {
@@ -65,11 +68,43 @@ impl PruneCandidate {
     }
 }
 
-/// Build the candidate list for `project`. Worktrees are discovered from
-/// the live git poll cache; the `main/` worktree is always excluded.
+/// Discover worktree directory names directly from disk: every child
+/// directory of the project root with a `.git`, except `main/` and dotdirs.
+/// Mirrors the discovery rule in `external::git::poll_all_worktrees`.
+///
+/// This is the single definition of "a prunable worktree". The dialog and
+/// the auto-prune prompt both count from here rather than the git poll
+/// cache, which fills one slow `git status` at a time and can lag the disk
+/// by a minute on projects with hundreds of worktrees.
+pub fn discover_worktree_names(project_root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(project_root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| {
+            name != "main"
+                && !name.starts_with('.')
+                && project_root.join(name).join(".git").exists()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Build the candidate list for `project`. Names come from the disk scan;
+/// the live git poll cache only enriches them with dirty/session state, so
+/// a worktree the poller hasn't reached yet still shows up (with unknown
+/// status, defaulting to Keep).
 pub fn scan_candidates(project: &Project) -> Vec<PruneCandidate> {
-    let mut candidates: Vec<PruneCandidate> = project
-        .prunable_worktree_names()
+    let names = discover_worktree_names(&project.config.project_root);
+    build_candidates(project, names)
+}
+
+pub fn build_candidates(project: &Project, names: Vec<String>) -> Vec<PruneCandidate> {
+    names
         .into_iter()
         .map(|name| {
             let issue = project
@@ -79,17 +114,15 @@ pub fn scan_candidates(project: &Project) -> Vec<PruneCandidate> {
             let status = project
                 .live
                 .worktree_statuses
-                .get(name)
-                .or_else(|| project.live.frozen_worktree_statuses.get(name))
+                .get(&name)
+                .or_else(|| project.live.frozen_worktree_statuses.get(&name))
                 .cloned();
             let session_alive = issue.is_some_and(|i| {
                 project.is_session_alive(&i.session_name(&project.config.project_name))
             });
-            PruneCandidate::new(name.clone(), status, issue, session_alive)
+            PruneCandidate::new(name, status, issue, session_alive)
         })
-        .collect();
-    candidates.sort_by(|a, b| a.worktree.cmp(&b.worktree));
-    candidates
+        .collect()
 }
 
 /// Split the current selection into worktrees that are safe to remove and
@@ -274,6 +307,36 @@ mod tests {
     fn live_session_defaults_keep() {
         let c = candidate("wt", Some(Column::Done), false, true);
         assert_eq!(c.action, PruneAction::Keep);
+    }
+
+    #[test]
+    fn discover_finds_git_dirs_excluding_main_and_hidden() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        // Real worktrees have a `.git` file; a `.git` dir (plain clone)
+        // must count too. Both spellings are covered here.
+        for name in ["main", "wt-b"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join(".git"), "gitdir: elsewhere").unwrap();
+        }
+        std::fs::create_dir_all(root.join("wt-a").join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".bork")).unwrap();
+        std::fs::create_dir_all(root.join("not-a-repo")).unwrap();
+
+        let names = discover_worktree_names(root);
+        assert_eq!(names, vec!["wt-a".to_string(), "wt-b".to_string()]);
+    }
+
+    #[test]
+    fn discover_missing_root_returns_empty() {
+        assert!(discover_worktree_names(Path::new("/nonexistent/bork-prune-test")).is_empty());
+    }
+
+    #[test]
+    fn unknown_status_defaults_keep() {
+        let c = PruneCandidate::new("wt".into(), None, None, false);
+        assert_eq!(c.action, PruneAction::Keep);
+        assert!(!c.is_dirty());
     }
 
     #[test]
