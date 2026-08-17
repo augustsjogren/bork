@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::{self, AppState};
+use crate::config;
 use crate::external::tmux;
 use crate::types::{AgentKind, AgentMode, Column, Issue, IssueKind};
 use crate::ui::styles::truncate;
@@ -620,9 +620,7 @@ pub fn archive_issue(
 #[allow(dead_code)] // Useful debugging/scripting utility; not yet wired to a CLI subcommand
 pub fn dump_state(project_root: &Path) -> anyhow::Result<String> {
     let state = config::load_state(project_root);
-    Ok(serde_json::to_string_pretty(&AppState {
-        issues: state.issues,
-    })?)
+    Ok(serde_json::to_string_pretty(&state)?)
 }
 
 #[cfg(test)]
@@ -1300,7 +1298,14 @@ mod tests {
 
     fn seed_issues(root: &Path, ids: &[&str]) {
         let issues = ids.iter().map(|id| test_issue(id, Column::Todo)).collect();
-        config::save_state(&AppState { issues }, root).unwrap();
+        config::save_state(
+            &config::AppState {
+                issues,
+                ..Default::default()
+            },
+            root,
+        )
+        .unwrap();
     }
 
     #[test]

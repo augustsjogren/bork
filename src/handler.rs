@@ -30,6 +30,22 @@ pub struct ActionResult {
     /// Set (on success *and* failure) when this result completes a session
     /// launch, so the main loop can clear the in-flight guard for the issue.
     pub launched_issue_id: Option<String>,
+    /// If set, apply this prune outcome to the issues of `project_id`.
+    pub prune_outcome: Option<(crate::app::ProjectId, crate::prune::PruneOutcome)>,
+}
+
+impl Default for ActionResult {
+    fn default() -> Self {
+        Self {
+            message: String::new(),
+            message_kind: MessageKind::Info,
+            session_to_open: None,
+            popup_title: None,
+            session_id: None,
+            launched_issue_id: None,
+            prune_outcome: None,
+        }
+    }
 }
 
 pub enum PostAction {
@@ -85,6 +101,10 @@ pub fn handle_action(
         }
         InputMode::Normal => handle_normal(app, action, ctx, ch),
         InputMode::Sidebar => handle_sidebar(app, action),
+        InputMode::PruneDialog => {
+            handle_prune_dialog(app, action, ctx, ch.action_tx);
+            PostAction::None
+        }
     }
 }
 
@@ -264,6 +284,10 @@ fn handle_normal(
             PostAction::None
         }
 
+        Action::OpenPruneDialog => {
+            app.open_prune_dialog(ctx);
+            PostAction::None
+        }
         Action::ToggleLinkFilter => {
             app.toggle_link_filter(ctx);
             PostAction::None
@@ -341,15 +365,12 @@ fn handle_normal(
                         session_to_open: Some(session_name),
                         popup_title: Some(popup_title),
                         session_id: None,
-                        launched_issue_id: None,
+                        ..Default::default()
                     },
                     Err(e) => ActionResult {
                         message: format!("Failed to open terminal: {e}"),
                         message_kind: MessageKind::Error,
-                        session_to_open: None,
-                        popup_title: None,
-                        session_id: None,
-                        launched_issue_id: None,
+                        ..Default::default()
                     },
                 };
                 let _ = tx.send(result);
@@ -415,10 +436,8 @@ fn handle_normal(
                 .unwrap_or_else(|_| ActionResult {
                     message: "Launch failed unexpectedly (internal panic)".to_string(),
                     message_kind: MessageKind::Error,
-                    session_to_open: None,
-                    popup_title: None,
-                    session_id: None,
                     launched_issue_id: Some(panic_issue_id),
+                    ..Default::default()
                 });
                 let _ = tx.send(result);
             });
@@ -471,15 +490,12 @@ fn handle_normal(
                         session_to_open: Some(session_name),
                         popup_title: Some(popup_title),
                         session_id: None,
-                        launched_issue_id: None,
+                        ..Default::default()
                     },
                     Err(e) => ActionResult {
                         message: format!("Failed to open tuicr: {e}"),
                         message_kind: MessageKind::Error,
-                        session_to_open: None,
-                        popup_title: None,
-                        session_id: None,
-                        launched_issue_id: None,
+                        ..Default::default()
                     },
                 };
                 let _ = tx.send(result);
@@ -1144,6 +1160,100 @@ fn attach_github_to_dialog(app: &mut App, _ctx: &ActionContext) {
     }
 }
 
+fn handle_prune_dialog(
+    app: &mut App,
+    action: Action,
+    _ctx: &ActionContext,
+    action_tx: &mpsc::Sender<ActionResult>,
+) {
+    match action {
+        Action::PruneCancel => app.close_prune_dialog(),
+        Action::PruneConfirm => submit_prune_dialog(app, action_tx),
+        _ => {
+            let Some(dialog) = app.prune_dialog.as_mut() else {
+                return;
+            };
+            match action {
+                Action::PruneMoveUp => dialog.move_up(),
+                Action::PruneMoveDown => dialog.move_down(),
+                Action::PruneToggle => dialog.toggle_current(),
+                Action::PruneSelectAllRemove => dialog.select_all_remove(),
+                Action::PruneSelectAllKeep => dialog.select_all_keep(),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn submit_prune_dialog(app: &mut App, action_tx: &mpsc::Sender<ActionResult>) {
+    let Some(dialog) = app.prune_dialog.as_mut() else {
+        return;
+    };
+
+    let (to_remove, dirty) = crate::prune::partition_selection(&dialog.candidates);
+    if !dirty.is_empty() {
+        dialog.error = Some(format!(
+            "Refusing: dirty worktrees can't be pruned ({}). Commit/stash first.",
+            dirty.join(", ")
+        ));
+        return;
+    }
+
+    if to_remove.is_empty() {
+        app.set_message("Nothing to prune");
+        app.close_prune_dialog();
+        return;
+    }
+
+    let project_id = dialog.project_id.clone();
+    let Some(project) = app.find_project(&project_id) else {
+        app.close_prune_dialog();
+        return;
+    };
+    let project_root = project.config.project_root.clone();
+
+    app.close_prune_dialog();
+    app.begin_busy();
+    app.set_message(format!("Pruning {} worktree(s)...", to_remove.len()));
+
+    let tx = action_tx.clone();
+    thread::spawn(move || {
+        let outcome = crate::prune::execute_removals(&project_root, &to_remove);
+        let (message, message_kind) = format_prune_result(&outcome);
+        let _ = tx.send(ActionResult {
+            message,
+            message_kind,
+            prune_outcome: Some((project_id, outcome)),
+            ..Default::default()
+        });
+    });
+}
+
+fn format_prune_result(outcome: &crate::prune::PruneOutcome) -> (String, MessageKind) {
+    let removed = outcome.removed_count();
+    let failed = outcome.failed_count();
+    if failed == 0 {
+        return (format!("Pruned {} worktree(s)", removed), MessageKind::Info);
+    }
+    let failure_summary: Vec<String> = outcome
+        .results
+        .iter()
+        .filter_map(|r| match &r.outcome {
+            crate::prune::RemoveOutcome::Failed(msg) => Some(format!("{}: {}", r.worktree, msg)),
+            _ => None,
+        })
+        .collect();
+    (
+        format!(
+            "Pruned {} worktree(s), {} failed ({})",
+            removed,
+            failed,
+            failure_summary.join("; ")
+        ),
+        MessageKind::Warning,
+    )
+}
+
 fn handle_sidebar(app: &mut App, action: Action) -> PostAction {
     match action {
         Action::ToggleSidebar => {
@@ -1265,10 +1375,7 @@ fn handle_confirm(
                             let _ = tx.send(ActionResult {
                                 message,
                                 message_kind,
-                                session_to_open: None,
-                                popup_title: None,
-                                session_id: None,
-                                launched_issue_id: None,
+                                ..Default::default()
                             });
                         });
                     }
@@ -1301,10 +1408,7 @@ fn handle_confirm(
                                 let _ = tx.send(ActionResult {
                                     message: format!("Deleted {} and killed session", id),
                                     message_kind: MessageKind::Info,
-                                    session_to_open: None,
-                                    popup_title: None,
-                                    session_id: None,
-                                    launched_issue_id: None,
+                                    ..Default::default()
                                 });
                             });
                             app.begin_busy();
@@ -1347,14 +1451,13 @@ fn launch_and_report(issue: Issue, config: AppConfig) -> ActionResult {
             popup_title: None,
             session_id: agent_sid.map(|sid| (issue.id.clone(), sid)),
             launched_issue_id: Some(issue.id.clone()),
+            ..Default::default()
         },
         Err(e) => ActionResult {
             message: format!("Failed to launch: {e}"),
             message_kind: MessageKind::Error,
-            session_to_open: None,
-            popup_title: None,
-            session_id: None,
             launched_issue_id: Some(issue.id),
+            ..Default::default()
         },
     }
 }
@@ -1389,12 +1492,14 @@ mod tests {
             auto_import_reviews: true,
             auto_import_authored_prs: true,
             agents_allowlist: None,
+            prune_threshold: crate::config::DEFAULT_PRUNE_THRESHOLD,
+            auto_prune_check_interval: crate::config::DEFAULT_AUTO_PRUNE_CHECK_INTERVAL,
             agent_launch: std::collections::HashMap::new(),
         }
     }
 
     fn test_app() -> App {
-        let state = crate::config::AppState { issues: vec![] };
+        let state = crate::config::AppState::default();
         App::new(test_config(), state)
     }
 
@@ -2243,6 +2348,8 @@ mod tests {
             auto_import_reviews: true,
             auto_import_authored_prs: true,
             agents_allowlist: None,
+            prune_threshold: crate::config::DEFAULT_PRUNE_THRESHOLD,
+            auto_prune_check_interval: crate::config::DEFAULT_AUTO_PRUNE_CHECK_INTERVAL,
             agent_launch: std::collections::HashMap::new(),
         }
     }
@@ -2251,18 +2358,21 @@ mod tests {
         let mut app = App::new(
             test_config_named("alpha"),
             crate::config::AppState {
+                last_prune_at: None,
                 issues: vec![test_issue("alpha-1", Column::Todo)],
             },
         );
         app.add_background_project(
             test_config_named("beta"),
             crate::config::AppState {
+                last_prune_at: None,
                 issues: vec![test_issue("beta-1", Column::InProgress)],
             },
         );
         app.add_background_project(
             test_config_named("gamma"),
             crate::config::AppState {
+                last_prune_at: None,
                 issues: vec![test_issue("gamma-1", Column::Todo)],
             },
         );
@@ -2377,7 +2487,7 @@ mod tests {
 
         app.add_background_project(
             test_config_named("delta"),
-            crate::config::AppState { issues: vec![] },
+            crate::config::AppState::default(),
         );
 
         app.sidebar.as_mut().unwrap().selected = 3;
@@ -2592,7 +2702,7 @@ mod tests {
     fn debug_reset_sets_should_quit_when_debug_enabled() {
         let mut config = test_config();
         config.debug = true;
-        let state = crate::config::AppState { issues: vec![] };
+        let state = crate::config::AppState::default();
         let mut app = App::new(config, state);
         assert!(!app.should_quit);
 
@@ -2609,5 +2719,130 @@ mod tests {
         act(&mut app, Action::DebugReset);
 
         assert!(!app.should_quit);
+    }
+
+    // ================================================================
+    // Prune dialog
+    // ================================================================
+
+    #[test]
+    fn open_prune_dialog_with_no_candidates_shows_message() {
+        let mut app = test_app();
+        act(&mut app, Action::OpenPruneDialog);
+        // No worktree poll data => no candidates => message, no dialog
+        assert!(app.prune_dialog.is_none());
+        assert!(app.input_mode == InputMode::Normal);
+        assert!(app
+            .message
+            .as_ref()
+            .is_some_and(|(m, _)| m.contains("No worktrees")));
+    }
+
+    #[test]
+    fn open_prune_dialog_with_candidates_enters_dialog_mode() {
+        let mut app = test_app();
+        app.project_mut()
+            .live
+            .worktree_branches
+            .insert("wt-1".into(), "feature/x".into());
+        app.project_mut()
+            .live
+            .worktree_branches
+            .insert("main".into(), "main".into());
+        act(&mut app, Action::OpenPruneDialog);
+        assert!(app.prune_dialog.is_some());
+        assert_eq!(app.input_mode, InputMode::PruneDialog);
+        // 'main' is excluded
+        assert_eq!(app.prune_dialog.as_ref().unwrap().candidates.len(), 1);
+    }
+
+    #[test]
+    fn prune_cancel_closes_dialog() {
+        let mut app = test_app();
+        app.project_mut()
+            .live
+            .worktree_branches
+            .insert("wt-1".into(), "feature/x".into());
+        act(&mut app, Action::OpenPruneDialog);
+        act(&mut app, Action::PruneCancel);
+        assert!(app.prune_dialog.is_none());
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn prune_toggle_flips_action_for_selected_row() {
+        let mut app = test_app();
+        app.project_mut()
+            .live
+            .worktree_branches
+            .insert("wt-1".into(), "feature/x".into());
+        act(&mut app, Action::OpenPruneDialog);
+        // Default for a clean orphan is Remove
+        let before = app.prune_dialog.as_ref().unwrap().candidates[0].action;
+        act(&mut app, Action::PruneToggle);
+        let after = app.prune_dialog.as_ref().unwrap().candidates[0].action;
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn prune_select_all_remove_and_keep() {
+        let mut app = test_app();
+        app.project_mut()
+            .live
+            .worktree_branches
+            .insert("wt-1".into(), "b1".into());
+        app.project_mut()
+            .live
+            .worktree_branches
+            .insert("wt-2".into(), "b2".into());
+        act(&mut app, Action::OpenPruneDialog);
+        act(&mut app, Action::PruneSelectAllKeep);
+        for c in &app.prune_dialog.as_ref().unwrap().candidates {
+            assert_eq!(c.action, crate::prune::PruneAction::Keep);
+        }
+        act(&mut app, Action::PruneSelectAllRemove);
+        for c in &app.prune_dialog.as_ref().unwrap().candidates {
+            assert_eq!(c.action, crate::prune::PruneAction::Remove);
+        }
+    }
+
+    #[test]
+    fn prune_confirm_refuses_when_dirty_selected_for_removal() {
+        let mut app = test_app();
+        app.project_mut()
+            .live
+            .worktree_branches
+            .insert("wt-1".into(), "feature/x".into());
+        app.project_mut().live.worktree_statuses.insert(
+            "wt-1".into(),
+            crate::types::WorktreeStatus {
+                staged: 1,
+                unstaged: 0,
+            },
+        );
+        act(&mut app, Action::OpenPruneDialog);
+        // Force Remove despite dirty
+        if let Some(d) = app.prune_dialog.as_mut() {
+            d.candidates[0].action = crate::prune::PruneAction::Remove;
+        }
+        act(&mut app, Action::PruneConfirm);
+        // Dialog stays open with an error
+        assert!(app.prune_dialog.is_some());
+        let err = app.prune_dialog.as_ref().unwrap().error.clone();
+        assert!(err.is_some_and(|s| s.contains("dirty")));
+    }
+
+    #[test]
+    fn prune_confirm_with_no_safe_removals_just_closes() {
+        let mut app = test_app();
+        app.project_mut()
+            .live
+            .worktree_branches
+            .insert("wt-1".into(), "b".into());
+        act(&mut app, Action::OpenPruneDialog);
+        act(&mut app, Action::PruneSelectAllKeep);
+        act(&mut app, Action::PruneConfirm);
+        assert!(app.prune_dialog.is_none());
+        assert_eq!(app.input_mode, InputMode::Normal);
     }
 }
