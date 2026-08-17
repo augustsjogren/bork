@@ -1205,7 +1205,7 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
             saved.column = Column::InProgress;
         }
         if let Some(sid) = agent_session_id {
-            saved.session_id = Some(sid);
+            saved.sessions.insert(issue.agent_kind, sid);
         }
     }
     config::save_state(&state, project_root)?;
@@ -1755,10 +1755,14 @@ fn run_tui() -> anyhow::Result<()> {
             app.busy_count = app.busy_count.saturating_sub(1);
             app.show_message(result.message, result.message_kind);
 
-            if let Some((issue_id, agent_sid)) = result.session_id {
+            if let Some(launched) = result.launched_session {
                 for project in &mut app.projects {
-                    if let Some(issue) = project.issues.iter_mut().find(|i| i.id == issue_id) {
-                        issue.session_id = Some(agent_sid);
+                    if let Some(issue) = project
+                        .issues
+                        .iter_mut()
+                        .find(|i| i.id == launched.issue_id)
+                    {
+                        issue.sessions.insert(launched.agent, launched.session_id);
                         project.mark_dirty();
                         break;
                     }

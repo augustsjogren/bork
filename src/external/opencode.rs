@@ -28,7 +28,7 @@ pub fn launch_session(
     let cwd = &config.project_root;
 
     if tmux::session_exists(&session_name) {
-        return Ok((session_name, issue.session_id.clone()));
+        return Ok((session_name, issue.current_session_id().map(str::to_string)));
     }
 
     tmux::create_session(&session_name, cwd)?;
@@ -82,12 +82,13 @@ pub fn launch_session(
 }
 
 /// Build the setup-script prefix for a launch command, if applicable.
-/// Only fresh sessions (no session_id to resume) for issues with an assigned
-/// worktree run the setup script. The script itself is user-authored shell
-/// and is inserted verbatim; the worktree dir is escaped. The tmux session's
-/// cwd is the project root, so the relative worktree dir resolves correctly.
+/// Only first launches (no agent has ever run for this issue) for issues with
+/// an assigned worktree run the setup script; switching to a different agent
+/// later must not re-run it. The script itself is user-authored shell and is
+/// inserted verbatim; the worktree dir is escaped. The tmux session's cwd is
+/// the project root, so the relative worktree dir resolves correctly.
 fn setup_prefix(issue: &Issue, config: &AppConfig) -> Option<String> {
-    if issue.session_id.is_some() {
+    if issue.has_ever_launched() {
         return None;
     }
     let worktree = issue.worktree.as_deref()?;
@@ -212,9 +213,11 @@ fn build_agent_cmd(
         builtin_mode_flag,
     );
 
+    let current_session = issue.current_session_id();
+
     match issue.agent_kind {
         AgentKind::OpenCode => {
-            if let Some(ref sid) = issue.session_id {
+            if let Some(sid) = current_session {
                 // Resume existing session — skip --prompt, history is preserved
                 let escaped_sid = shell_escape_single_quotes(sid);
                 let cmd = format!(
@@ -234,14 +237,14 @@ fn build_agent_cmd(
             let session_display_name = format!("{}: {}", issue.id, issue.title);
             let escaped_name = shell_escape_single_quotes(&session_display_name);
 
-            if let Some(ref sid) = issue.session_id {
+            if let Some(sid) = current_session {
                 // Resume existing session — skip the prompt, history is preserved
                 let escaped_sid = shell_escape_single_quotes(sid);
                 let cmd = format!(
                     "{} && claude --name '{}'{} --resume '{}'",
                     env_prefix, escaped_name, trailing, escaped_sid,
                 );
-                (cmd, Some(sid.clone()), None)
+                (cmd, Some(sid.to_string()), None)
             } else {
                 // Fresh session: stage prompt and optionally pre-assign a UUID
                 let prompt = build_prompt_contents();
@@ -268,13 +271,13 @@ fn build_agent_cmd(
             }
         }
         AgentKind::Codex => {
-            if let Some(ref sid) = issue.session_id {
+            if let Some(sid) = current_session {
                 let escaped_sid = shell_escape_single_quotes(sid);
                 let cmd = format!(
                     "{} && codex resume '{}'{}",
                     env_prefix, escaped_sid, trailing
                 );
-                (cmd, Some(sid.clone()), None)
+                (cmd, Some(sid.to_string()), None)
             } else {
                 let cmd = format!(
                     "{} && codex{} {}{}",
@@ -287,14 +290,14 @@ fn build_agent_cmd(
             let session_display_name = format!("{}: {}", issue.id, issue.title);
             let escaped_name = shell_escape_single_quotes(&session_display_name);
 
-            if let Some(ref sid) = issue.session_id {
+            if let Some(sid) = current_session {
                 // Resume existing session — skip the prompt, history is preserved.
                 let escaped_sid = shell_escape_single_quotes(sid);
                 let cmd = format!(
                     "{} && pi --session '{}'{}",
                     env_prefix, escaped_sid, trailing,
                 );
-                (cmd, Some(sid.clone()), None)
+                (cmd, Some(sid.to_string()), None)
             } else {
                 let cmd = format!(
                     "{} && pi --name '{}'{} {}{}",
@@ -1218,7 +1221,9 @@ mod tests {
     #[test]
     fn opencode_resume() {
         let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Plan);
-        issue.session_id = Some("ses_abc123".to_string());
+        issue
+            .sessions
+            .insert(issue.agent_kind, "ses_abc123".to_string());
         let config = test_config();
         let (cmd, sid, _) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
         assert!(cmd.contains("opencode --session 'ses_abc123'"));
@@ -1230,7 +1235,9 @@ mod tests {
     #[test]
     fn opencode_resume_build() {
         let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
-        issue.session_id = Some("ses_abc123".to_string());
+        issue
+            .sessions
+            .insert(issue.agent_kind, "ses_abc123".to_string());
         let config = test_config();
         let (cmd, _, _) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
         assert!(cmd.contains("opencode --session 'ses_abc123'"));
@@ -1275,7 +1282,9 @@ mod tests {
     #[test]
     fn claude_resume() {
         let mut issue = test_issue(AgentKind::Claude, AgentMode::Plan);
-        issue.session_id = Some("uuid-123-456".to_string());
+        issue
+            .sessions
+            .insert(issue.agent_kind, "uuid-123-456".to_string());
         let config = test_config();
         let (cmd, sid, _) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
         assert!(cmd.contains("claude --name"));
@@ -1288,7 +1297,9 @@ mod tests {
     #[test]
     fn claude_resume_yolo() {
         let mut issue = test_issue(AgentKind::Claude, AgentMode::Yolo);
-        issue.session_id = Some("uuid-789".to_string());
+        issue
+            .sessions
+            .insert(issue.agent_kind, "uuid-789".to_string());
         let config = test_config();
         let (cmd, _, _) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
         assert!(cmd.contains("--resume 'uuid-789'"));
@@ -1330,7 +1341,10 @@ mod tests {
     #[test]
     fn codex_resume_uses_session_id() {
         let mut issue = test_issue(AgentKind::Codex, AgentMode::Build);
-        issue.session_id = Some("019d76ad-9734-77c0-8169-a727a5524013".to_string());
+        issue.sessions.insert(
+            issue.agent_kind,
+            "019d76ad-9734-77c0-8169-a727a5524013".to_string(),
+        );
         let config = test_config();
         let (cmd, sid, _) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
         assert!(cmd.contains(
@@ -1409,7 +1423,10 @@ mod tests {
     #[test]
     fn pi_resume_uses_session_id() {
         let mut issue = test_issue(AgentKind::Pi, AgentMode::Build);
-        issue.session_id = Some("019d76ad-9734-77c0-8169-a727a5524013".to_string());
+        issue.sessions.insert(
+            issue.agent_kind,
+            "019d76ad-9734-77c0-8169-a727a5524013".to_string(),
+        );
         let config = test_config();
         let (cmd, sid, _) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
         assert!(cmd.contains("pi --session '019d76ad-9734-77c0-8169-a727a5524013'"));
@@ -1433,6 +1450,40 @@ mod tests {
         assert_eq!(parse_pi_session_id_from_filename("123_short.jsonl"), None);
     }
 
+    // --- per-agent sessions ---
+
+    #[test]
+    fn agent_switch_starts_fresh_ignoring_other_agents_sessions() {
+        // A session minted by opencode must never reach claude's resume flag
+        // (the historical bork-147 bug: `claude --resume ses_xxx`).
+        let mut issue = test_issue(AgentKind::Claude, AgentMode::Build);
+        issue
+            .sessions
+            .insert(AgentKind::OpenCode, "ses_abc123".to_string());
+        let config = test_config();
+        let (cmd, _, prompt) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(!cmd.contains("--resume"));
+        assert!(!cmd.contains("ses_abc123"));
+        // Fresh launch for the new agent carries the full prompt.
+        assert!(prompt.is_some());
+    }
+
+    #[test]
+    fn agent_switch_back_resumes_own_session() {
+        let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        issue
+            .sessions
+            .insert(AgentKind::OpenCode, "ses_abc123".to_string());
+        issue
+            .sessions
+            .insert(AgentKind::Claude, "uuid-123-456".to_string());
+        let config = test_config();
+        let (cmd, _, prompt) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(cmd.contains("opencode --session 'ses_abc123'"));
+        assert!(!cmd.contains("uuid-123-456"));
+        assert!(prompt.is_none());
+    }
+
     // --- setup_prefix ---
 
     #[test]
@@ -1451,7 +1502,23 @@ mod tests {
     fn setup_prefix_skipped_on_resume() {
         let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
         issue.worktree = Some("bork-1-fix-bug".to_string());
-        issue.session_id = Some("ses_abc123".to_string());
+        issue
+            .sessions
+            .insert(issue.agent_kind, "ses_abc123".to_string());
+        let mut config = test_config();
+        config.setup_script = Some("npm install".to_string());
+        assert_eq!(setup_prefix(&issue, &config), None);
+    }
+
+    #[test]
+    fn setup_prefix_skipped_when_another_agent_ran() {
+        // Setup ran on the very first launch; switching agents afterwards
+        // must not re-run it even though the new agent has no session yet.
+        let mut issue = test_issue(AgentKind::Claude, AgentMode::Build);
+        issue.worktree = Some("bork-1-fix-bug".to_string());
+        issue
+            .sessions
+            .insert(AgentKind::OpenCode, "ses_abc123".to_string());
         let mut config = test_config();
         config.setup_script = Some("npm install".to_string());
         assert_eq!(setup_prefix(&issue, &config), None);
@@ -1569,7 +1636,9 @@ mod tests {
     #[test]
     fn opencode_extra_args_appended_on_resume() {
         let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
-        issue.session_id = Some("ses_abc123".to_string());
+        issue
+            .sessions
+            .insert(issue.agent_kind, "ses_abc123".to_string());
         let config = config_with_launch(AgentKind::OpenCode, &["--quiet"], &[]);
         let (cmd, _, _) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
         assert!(cmd.contains("opencode --session 'ses_abc123' '--quiet'"));

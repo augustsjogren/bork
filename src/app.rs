@@ -1163,7 +1163,7 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
     merge_field!(prompt);
     merge_field!(worktree);
     merge_field!(done_at);
-    merge_field!(session_id);
+    merge_field!(sessions);
     merge_field!(linear_links);
     merge_field!(github_pr_links);
     merge_field!(linked_issues);

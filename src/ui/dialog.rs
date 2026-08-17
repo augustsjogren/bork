@@ -103,6 +103,7 @@ pub fn render_dialog(frame: &mut Frame, app: &App) {
                 frame,
                 dialog.agent_kind,
                 &dialog.available_agents,
+                &dialog.session_agents,
                 agent_area,
                 dialog.current_field() == DialogField::Agent,
                 label_width,
@@ -426,6 +427,7 @@ fn render_agent_field(
     frame: &mut Frame,
     agent_kind: AgentKind,
     available: &[AgentKind],
+    session_agents: &[AgentKind],
     area: Rect,
     focused: bool,
     label_width: usize,
@@ -447,8 +449,14 @@ fn render_agent_field(
             spans.push(Span::raw("  "));
         }
         let selected = *kind == agent_kind;
+        // ↺ = this agent has a session to resume.
+        let resume_marker = if session_agents.contains(kind) {
+            " \u{21ba}"
+        } else {
+            ""
+        };
         spans.push(Span::styled(
-            format!("[{} {}]", indicator(selected), kind),
+            format!("[{} {}{}]", indicator(selected), kind, resume_marker),
             if selected {
                 selected_style
             } else {

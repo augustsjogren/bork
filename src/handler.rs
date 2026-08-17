@@ -11,7 +11,9 @@ use crate::config::{self, AppConfig};
 use crate::external::{github, opencode, tmux, tuicr};
 use crate::global_config::ReloadResult;
 use crate::input::Action;
-use crate::types::{Column, Issue, IssueKind, LinkedGithubPr, LinkedLinear, PrImportSource};
+use crate::types::{
+    AgentKind, Column, Issue, IssueKind, LinkedGithubPr, LinkedLinear, PrImportSource,
+};
 
 pub struct ActionChannels<'a> {
     pub action_tx: &'a mpsc::Sender<ActionResult>,
@@ -21,12 +23,21 @@ pub struct ActionChannels<'a> {
     pub reload_tx: &'a mpsc::Sender<ReloadResult>,
 }
 
+/// A detected agent session id, keyed by the agent captured at launch time so
+/// it is stored under the agent that minted it, even if the user switches
+/// agents before this result lands.
+pub struct LaunchedSession {
+    pub issue_id: String,
+    pub agent: AgentKind,
+    pub session_id: String,
+}
+
 pub struct ActionResult {
     pub message: String,
     pub message_kind: MessageKind,
     pub session_to_open: Option<String>,
     pub popup_title: Option<String>,
-    pub session_id: Option<(String, String)>,
+    pub launched_session: Option<LaunchedSession>,
     /// Set (on success *and* failure) when this result completes a session
     /// launch, so the main loop can clear the in-flight guard for the issue.
     pub launched_issue_id: Option<String>,
@@ -340,7 +351,7 @@ fn handle_normal(
                         message_kind: MessageKind::Info,
                         session_to_open: Some(session_name),
                         popup_title: Some(popup_title),
-                        session_id: None,
+                        launched_session: None,
                         launched_issue_id: None,
                     },
                     Err(e) => ActionResult {
@@ -348,7 +359,7 @@ fn handle_normal(
                         message_kind: MessageKind::Error,
                         session_to_open: None,
                         popup_title: None,
-                        session_id: None,
+                        launched_session: None,
                         launched_issue_id: None,
                     },
                 };
@@ -417,7 +428,7 @@ fn handle_normal(
                     message_kind: MessageKind::Error,
                     session_to_open: None,
                     popup_title: None,
-                    session_id: None,
+                    launched_session: None,
                     launched_issue_id: Some(panic_issue_id),
                 });
                 let _ = tx.send(result);
@@ -470,7 +481,7 @@ fn handle_normal(
                         message_kind: MessageKind::Info,
                         session_to_open: Some(session_name),
                         popup_title: Some(popup_title),
-                        session_id: None,
+                        launched_session: None,
                         launched_issue_id: None,
                     },
                     Err(e) => ActionResult {
@@ -478,7 +489,7 @@ fn handle_normal(
                         message_kind: MessageKind::Error,
                         session_to_open: None,
                         popup_title: None,
-                        session_id: None,
+                        launched_session: None,
                         launched_issue_id: None,
                     },
                 };
@@ -772,7 +783,7 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
 
             p.issues[idx].title = title;
             p.issues[idx].prompt = prompt;
-            p.issues[idx].agent_kind = dialog.agent_kind;
+            let agent_changed = p.issues[idx].set_agent_kind(dialog.agent_kind);
             p.issues[idx].agent_mode = dialog.agent_mode;
             let crossed_orchestrator_boundary = p.issues[idx].set_kind(dialog.kind);
 
@@ -782,10 +793,13 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
             let updated_id = p.issues[idx].id.clone();
             p.mark_dirty();
 
-            if crossed_orchestrator_boundary {
+            if crossed_orchestrator_boundary || agent_changed {
                 // A live session would otherwise be re-attached with the old
-                // kind's prompt and cwd.
+                // kind's prompt and cwd, or the old agent's process.
                 let _ = tmux::kill_session(&session_name);
+            }
+
+            if crossed_orchestrator_boundary {
                 match detached_worktree.filter(|_| dialog.kind == IssueKind::Orchestrator) {
                     Some(wt) => app.set_message(format!(
                         "Updated {} (session reset; worktree {} detached, remove it manually)",
@@ -793,6 +807,11 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
                     )),
                     None => app.set_message(format!("Updated {} (session reset)", updated_id)),
                 }
+            } else if agent_changed {
+                app.set_message(format!(
+                    "Updated {} (switched to {}, other sessions kept)",
+                    updated_id, dialog.agent_kind
+                ));
             } else {
                 app.set_message(format!("Updated {}", updated_id));
             }
@@ -1267,7 +1286,7 @@ fn handle_confirm(
                                 message_kind,
                                 session_to_open: None,
                                 popup_title: None,
-                                session_id: None,
+                                launched_session: None,
                                 launched_issue_id: None,
                             });
                         });
@@ -1303,7 +1322,7 @@ fn handle_confirm(
                                     message_kind: MessageKind::Info,
                                     session_to_open: None,
                                     popup_title: None,
-                                    session_id: None,
+                                    launched_session: None,
                                     launched_issue_id: None,
                                 });
                             });
@@ -1345,7 +1364,11 @@ fn launch_and_report(issue: Issue, config: AppConfig) -> ActionResult {
             message_kind: MessageKind::Info,
             session_to_open: Some(session_name),
             popup_title: None,
-            session_id: agent_sid.map(|sid| (issue.id.clone(), sid)),
+            launched_session: agent_sid.map(|sid| LaunchedSession {
+                issue_id: issue.id.clone(),
+                agent: issue.agent_kind,
+                session_id: sid,
+            }),
             launched_issue_id: Some(issue.id.clone()),
         },
         Err(e) => ActionResult {
@@ -1353,7 +1376,7 @@ fn launch_and_report(issue: Issue, config: AppConfig) -> ActionResult {
             message_kind: MessageKind::Error,
             session_to_open: None,
             popup_title: None,
-            session_id: None,
+            launched_session: None,
             launched_issue_id: Some(issue.id),
         },
     }

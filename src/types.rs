@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -62,7 +63,7 @@ impl fmt::Display for Column {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum AgentKind {
     OpenCode,
     Claude,
@@ -288,8 +289,11 @@ pub struct Issue {
     pub worktree: Option<String>,
     #[serde(default)]
     pub done_at: Option<u64>,
+    /// Agent session IDs keyed by the agent that created them. Switching
+    /// agents keeps every agent's session resumable; only the entry for the
+    /// current `agent_kind` is ever used to resume.
     #[serde(default)]
-    pub session_id: Option<String>,
+    pub sessions: BTreeMap<AgentKind, String>,
 
     // --- New multi-link fields ---
     #[serde(default)]
@@ -303,6 +307,8 @@ pub struct Issue {
     pub linked_issues: Vec<String>,
 
     // --- Legacy singular fields (read-only, for migration from old state.json) ---
+    #[serde(default, skip_serializing)]
+    pub session_id: Option<String>,
     #[serde(default, skip_serializing)]
     pub linear_id: Option<String>,
     #[serde(default, skip_serializing)]
@@ -339,10 +345,11 @@ impl Issue {
             prompt: None,
             worktree: None,
             done_at: None,
-            session_id: None,
+            sessions: BTreeMap::new(),
             linear_links: Vec::new(),
             github_pr_links: Vec::new(),
             linked_issues: Vec::new(),
+            session_id: None,
             linear_id: None,
             linear_identifier: None,
             linear_url: None,
@@ -357,9 +364,25 @@ impl Issue {
         format!("{}-{}", project_name, self.id.to_lowercase())
     }
 
+    /// Session ID for the currently selected agent, if that agent has run
+    /// before. Sessions created by other agents stay in `sessions` untouched.
+    pub fn current_session_id(&self) -> Option<&str> {
+        self.sessions.get(&self.agent_kind).map(String::as_str)
+    }
+
+    /// Whether any agent has ever launched for this issue. Gates one-time
+    /// work like the worktree setup script.
+    pub fn has_ever_launched(&self) -> bool {
+        !self.sessions.is_empty()
+    }
+
     /// Migrate legacy singular fields into the new Vec fields.
     /// Called once after deserialization from old state.json format.
     pub fn migrate_legacy_fields(&mut self) {
+        if let Some(sid) = self.session_id.take() {
+            self.sessions.entry(self.agent_kind).or_insert(sid);
+        }
+
         if self.linear_links.is_empty() {
             if let (Some(id), Some(identifier), Some(url)) = (
                 self.linear_id.take(),
@@ -389,10 +412,10 @@ impl Issue {
     }
 
     /// Change the issue kind, clearing state the new kind invalidates.
-    /// Crossing the orchestrator boundary drops the agent session (resuming it
-    /// would skip the new kind's prompt); becoming an orchestrator also drops
-    /// the worktree and PR links since orchestrators run at the project root
-    /// and have no PR of their own.
+    /// Crossing the orchestrator boundary drops all agent sessions (resuming
+    /// any of them would skip the new kind's prompt); becoming an orchestrator
+    /// also drops the worktree and PR links since orchestrators run at the
+    /// project root and have no PR of their own.
     ///
     /// Returns `true` when the orchestrator boundary was crossed. Callers
     /// should then kill any live tmux session, since re-attaching it would
@@ -406,12 +429,25 @@ impl Issue {
         if kind != IssueKind::Orchestrator && previous != IssueKind::Orchestrator {
             return false;
         }
-        self.session_id = None;
+        self.sessions.clear();
         if kind == IssueKind::Orchestrator {
             self.worktree = None;
             self.github_pr_links.clear();
         }
         true
+    }
+
+    /// Change the selected agent. Stored sessions are kept — each agent
+    /// resumes its own on the next launch — but any live tmux session is
+    /// still running the old agent's process.
+    ///
+    /// Returns `true` when the agent actually changed. Callers should then
+    /// kill any live tmux session, since re-attaching it would silently
+    /// continue the old agent.
+    pub fn set_agent_kind(&mut self, kind: AgentKind) -> bool {
+        let changed = kind != self.agent_kind;
+        self.agent_kind = kind;
+        changed
     }
 
     pub fn has_linear(&self) -> bool {
@@ -683,7 +719,7 @@ mod tests {
         let mut issue = test_issue("bork-1", Column::InProgress);
         issue.kind = kind;
         issue.worktree = Some("bork-1-fix-bug".into());
-        issue.session_id = Some("ses_abc".into());
+        issue.sessions.insert(issue.agent_kind, "ses_abc".into());
         issue.github_pr_links.push(LinkedGithubPr {
             number: 42,
             imported: false,
@@ -698,7 +734,7 @@ mod tests {
         assert!(issue.set_kind(IssueKind::Orchestrator));
         assert_eq!(issue.kind, IssueKind::Orchestrator);
         assert!(issue.worktree.is_none());
-        assert!(issue.session_id.is_none());
+        assert!(issue.sessions.is_empty());
         assert!(issue.github_pr_links.is_empty());
     }
 
@@ -706,7 +742,7 @@ mod tests {
     fn set_kind_from_orchestrator_clears_session_only() {
         let mut issue = issue_with_session_state(IssueKind::Orchestrator);
         assert!(issue.set_kind(IssueKind::Agentic));
-        assert!(issue.session_id.is_none());
+        assert!(issue.sessions.is_empty());
         assert_eq!(issue.worktree, Some("bork-1-fix-bug".into()));
         assert_eq!(issue.github_pr_links.len(), 1);
     }
@@ -716,8 +752,21 @@ mod tests {
         let mut issue = issue_with_session_state(IssueKind::Agentic);
         assert!(!issue.set_kind(IssueKind::NonAgentic));
         assert_eq!(issue.worktree, Some("bork-1-fix-bug".into()));
-        assert_eq!(issue.session_id, Some("ses_abc".into()));
+        assert_eq!(issue.current_session_id(), Some("ses_abc"));
         assert_eq!(issue.github_pr_links.len(), 1);
+    }
+
+    #[test]
+    fn set_agent_kind_reports_change_and_keeps_sessions() {
+        let mut issue = issue_with_session_state(IssueKind::Agentic);
+        let original_agent = issue.agent_kind;
+        assert!(!issue.set_agent_kind(original_agent));
+        assert!(issue.set_agent_kind(AgentKind::Codex));
+        assert_eq!(issue.agent_kind, AgentKind::Codex);
+        assert_eq!(
+            issue.sessions.get(&original_agent).map(String::as_str),
+            Some("ses_abc")
+        );
     }
 
     #[test]
@@ -725,7 +774,7 @@ mod tests {
         let mut issue = issue_with_session_state(IssueKind::Orchestrator);
         assert!(!issue.set_kind(IssueKind::Orchestrator));
         assert_eq!(issue.worktree, Some("bork-1-fix-bug".into()));
-        assert_eq!(issue.session_id, Some("ses_abc".into()));
+        assert_eq!(issue.current_session_id(), Some("ses_abc"));
     }
 
     // --- Issue session_name ---
@@ -865,10 +914,10 @@ mod tests {
         assert_eq!(AgentKind::ALL.len(), 4);
     }
 
-    // --- Issue session_id ---
+    // --- Issue sessions ---
 
     #[test]
-    fn issue_deserializes_without_session_id_defaults_to_none() {
+    fn issue_deserializes_without_sessions_defaults_to_empty() {
         let json = r#"{
             "id": "bork-1",
             "title": "Test",
@@ -879,17 +928,65 @@ mod tests {
             "prompt": null
         }"#;
         let issue: Issue = serde_json::from_str(json).unwrap();
-        assert_eq!(issue.session_id, None);
+        assert!(issue.sessions.is_empty());
+        assert_eq!(issue.current_session_id(), None);
     }
 
     #[test]
-    fn issue_serializes_and_deserializes_session_id() {
+    fn issue_serializes_and_deserializes_sessions() {
         let mut issue = test_issue("bork-1", Column::InProgress);
-        issue.session_id = Some("ses_abc123xyz".to_string());
+        issue
+            .sessions
+            .insert(AgentKind::OpenCode, "ses_abc123xyz".to_string());
+        issue.sessions.insert(
+            AgentKind::Claude,
+            "0b5deb44-92b7-4a53-b1e1-000000000000".to_string(),
+        );
         let json = serde_json::to_string(&issue).unwrap();
-        assert!(json.contains("\"session_id\":\"ses_abc123xyz\""));
         let roundtrip: Issue = serde_json::from_str(&json).unwrap();
-        assert_eq!(roundtrip.session_id, Some("ses_abc123xyz".to_string()));
+        assert_eq!(roundtrip.sessions, issue.sessions);
+    }
+
+    #[test]
+    fn legacy_session_id_migrates_under_current_agent() {
+        let json = r#"{
+            "id": "bork-1",
+            "title": "Test",
+            "column": "Todo",
+            "agent_kind": "OpenCode",
+            "agent_mode": "Plan",
+            "prompt": null,
+            "session_id": "ses_legacy"
+        }"#;
+        let mut issue: Issue = serde_json::from_str(json).unwrap();
+        issue.migrate_legacy_fields();
+        assert_eq!(issue.current_session_id(), Some("ses_legacy"));
+        assert_eq!(issue.session_id, None);
+        // Legacy field never serializes back out.
+        let out = serde_json::to_string(&issue).unwrap();
+        assert!(!out.contains("\"session_id\""));
+    }
+
+    #[test]
+    fn current_session_id_follows_agent_kind() {
+        let mut issue = test_issue("bork-1", Column::InProgress);
+        issue.agent_kind = AgentKind::OpenCode;
+        issue
+            .sessions
+            .insert(AgentKind::OpenCode, "ses_abc".to_string());
+        assert_eq!(issue.current_session_id(), Some("ses_abc"));
+
+        // Switching agents hides the other agent's session but keeps it stored.
+        issue.agent_kind = AgentKind::Claude;
+        assert_eq!(issue.current_session_id(), None);
+        assert_eq!(
+            issue.sessions.get(&AgentKind::OpenCode).map(String::as_str),
+            Some("ses_abc")
+        );
+
+        // Switching back resumes the original session.
+        issue.agent_kind = AgentKind::OpenCode;
+        assert_eq!(issue.current_session_id(), Some("ses_abc"));
     }
 
     // --- AgentStatus ---
