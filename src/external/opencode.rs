@@ -1110,6 +1110,8 @@ mod tests {
             auto_import_reviews: true,
             auto_import_authored_prs: true,
             agents_allowlist: None,
+            prune_threshold: crate::config::DEFAULT_PRUNE_THRESHOLD,
+            auto_prune_check_interval: crate::config::DEFAULT_AUTO_PRUNE_CHECK_INTERVAL,
             agent_launch: std::collections::HashMap::new(),
         }
     }

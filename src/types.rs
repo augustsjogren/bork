@@ -294,6 +294,10 @@ pub struct Issue {
     /// current `agent_kind` is ever used to resume.
     #[serde(default)]
     pub sessions: BTreeMap<AgentKind, String>,
+    /// Timestamp of the last time this issue's worktree was pruned.
+    /// Cleared when a new worktree is assigned.
+    #[serde(default)]
+    pub pruned_at: Option<u64>,
 
     // --- New multi-link fields ---
     #[serde(default)]
@@ -346,6 +350,7 @@ impl Issue {
             worktree: None,
             done_at: None,
             sessions: BTreeMap::new(),
+            pruned_at: None,
             linear_links: Vec::new(),
             github_pr_links: Vec::new(),
             linked_issues: Vec::new(),
@@ -374,6 +379,14 @@ impl Issue {
     /// work like the worktree setup script.
     pub fn has_ever_launched(&self) -> bool {
         !self.sessions.is_empty()
+    }
+
+    /// Attach a worktree to this issue. Also clears the `pruned_at` marker so
+    /// the "pruned" card indicator disappears; every attach path must keep
+    /// these two fields in sync, so the invariant lives here.
+    pub fn attach_worktree(&mut self, worktree: String) {
+        self.worktree = Some(worktree);
+        self.pruned_at = None;
     }
 
     /// Migrate legacy singular fields into the new Vec fields.
@@ -823,6 +836,30 @@ mod tests {
         }"#;
         let issue: Issue = serde_json::from_str(json).unwrap();
         assert_eq!(issue.done_at, Some(1700000000));
+    }
+
+    #[test]
+    fn issue_deserializes_without_pruned_at_defaults_to_none() {
+        let json = r#"{
+            "id": "bork-1",
+            "title": "Test",
+            "column": "Todo",
+            "agent_kind": "OpenCode",
+            "agent_mode": "Plan",
+            "prompt": null
+        }"#;
+        let issue: Issue = serde_json::from_str(json).unwrap();
+        assert_eq!(issue.pruned_at, None);
+    }
+
+    #[test]
+    fn issue_roundtrips_pruned_at() {
+        let mut issue = test_issue("bork-1", Column::Todo);
+        issue.pruned_at = Some(1_700_000_000);
+        let json = serde_json::to_string(&issue).unwrap();
+        assert!(json.contains("\"pruned_at\":1700000000"));
+        let roundtrip: Issue = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.pruned_at, Some(1_700_000_000));
     }
 
     #[test]

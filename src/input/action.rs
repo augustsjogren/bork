@@ -93,5 +93,13 @@ pub enum Action {
     SidebarToggleSwimlane,
     NextSwimlane,
     PrevSwimlane,
+    OpenPruneDialog,
+    PruneMoveUp,
+    PruneMoveDown,
+    PruneToggle,
+    PruneSelectAllRemove,
+    PruneSelectAllKeep,
+    PruneConfirm,
+    PruneCancel,
     Noop,
 }

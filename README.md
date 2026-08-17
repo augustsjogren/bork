@@ -139,6 +139,7 @@ bork --help
 | `bork config set <key> <value>` | Set a config value (`--global` for the global file) |
 | `bork update` | Pull latest from `main` and rebuild |
 | `bork update --check` | Check whether a new version is available without pulling |
+| `bork prune` | Prune stale worktrees (interactive; `--dry-run`, `--yes`, `--include`, `--exclude`) |
 
 ### `bork init`
 
