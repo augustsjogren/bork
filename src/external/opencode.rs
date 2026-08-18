@@ -23,12 +23,16 @@ use crate::types::{AgentKind, AgentMode, Issue, IssueKind, LinkedGithubPr, Linke
 pub fn launch_session(
     issue: &Issue,
     config: &AppConfig,
-) -> Result<(String, Option<String>), AppError> {
+) -> Result<(String, Option<String>, bool), AppError> {
     let session_name = issue.session_name(&config.project_name);
     let cwd = &config.project_root;
 
     if tmux::session_exists(&session_name) {
-        return Ok((session_name, issue.current_session_id().map(str::to_string)));
+        return Ok((
+            session_name.clone(),
+            issue.current_session_id().map(str::to_string),
+            false,
+        ));
     }
 
     tmux::create_session(&session_name, cwd)?;
@@ -57,7 +61,9 @@ pub fn launch_session(
     // Fresh sessions with a worktree run the configured setup script inside
     // the worktree first; `&&` ensures the agent only starts if it succeeds
     // and its output stays visible in the agent window.
-    let agent_cmd = match setup_prefix(issue, config) {
+    let setup = setup_prefix(issue, config);
+    let setup_ran = setup.is_some();
+    let agent_cmd = match setup {
         Some(prefix) => format!("{} && {}", prefix, agent_cmd),
         None => agent_cmd,
     };
@@ -78,7 +84,20 @@ pub fn launch_session(
         },
     };
 
-    Ok((session_name, agent_session_id))
+    Ok((session_name, agent_session_id, setup_ran))
+}
+
+/// Kill an issue's tmux session and remove its transient status file so
+/// cards stop showing the dead agent. Returns `false` when a live session
+/// survived the kill (tmux hiccup): the next launch would silently attach
+/// the old agent's pane, so callers should surface that instead of
+/// reporting a clean kill.
+pub fn terminate_session(project_root: &Path, session_name: &str) -> bool {
+    let _ = tmux::kill_session(session_name);
+    let _ = std::fs::remove_file(
+        config::agent_status_dir(project_root).join(format!("{session_name}.json")),
+    );
+    !tmux::session_exists(session_name)
 }
 
 /// Build the setup-script prefix for a launch command, if applicable.

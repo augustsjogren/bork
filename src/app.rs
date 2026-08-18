@@ -1260,6 +1260,8 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
     merge_field!(prompt);
     merge_field!(worktree);
     merge_field!(done_at);
+    merge_field!(pruned_at);
+    merge_field!(setup_ran);
     merge_field!(linear_links);
     merge_field!(github_pr_links);
     merge_field!(linked_issues);
@@ -1267,14 +1269,22 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
     // `sessions` merges entry-wise: per-agent entries are independent, so a
     // concurrent write to one agent's session (e.g. `bork issue start` from a
     // spawned agent) must not clobber another agent's entry held in memory.
-    for agent in AgentKind::ALL {
-        if memory.sessions.get(&agent) == base.sessions.get(&agent)
-            && file.sessions.get(&agent) != base.sessions.get(&agent)
-        {
-            match file.sessions.get(&agent) {
-                Some(sid) => memory.sessions.insert(agent, sid.clone()),
-                None => memory.sessions.remove(&agent),
-            };
+    // Exception: a memory-side crossing of the orchestrator boundary cleared
+    // the whole map, and that clear must win over concurrent file-side
+    // inserts — resuming any pre-conversion session would skip the new
+    // kind's prompt.
+    let memory_crossed_boundary =
+        (memory.kind == IssueKind::Orchestrator) != (base.kind == IssueKind::Orchestrator);
+    if !memory_crossed_boundary {
+        for agent in AgentKind::ALL {
+            if memory.sessions.get(&agent) == base.sessions.get(&agent)
+                && file.sessions.get(&agent) != base.sessions.get(&agent)
+            {
+                match file.sessions.get(&agent) {
+                    Some(sid) => memory.sessions.insert(agent, sid.clone()),
+                    None => memory.sessions.remove(&agent),
+                };
+            }
         }
     }
 
@@ -5152,6 +5162,39 @@ mod tests {
             Some("ses_external"),
             "file-side entry merges in"
         );
+    }
+
+    #[test]
+    fn merge_memory_side_conversion_rejects_file_session_insert() {
+        // TUI converts to orchestrator (clears sessions) while an external
+        // `bork issue start` writes a brand-new session entry to disk. The
+        // in-memory clear is part of the conversion and must win.
+        let base = test_issue_titled("a", "Original", Column::Todo);
+        let mut memory = base.clone();
+        let _ = memory.set_kind(IssueKind::Orchestrator);
+        let mut file = base.clone();
+        file.sessions
+            .insert(AgentKind::OpenCode, "ses_external".to_string());
+
+        merge_issue_fields(&mut memory, &base, &file);
+        assert_eq!(memory.kind, IssueKind::Orchestrator);
+        assert!(
+            memory.sessions.is_empty(),
+            "conversion's clear must not adopt concurrent file-side sessions"
+        );
+    }
+
+    #[test]
+    fn merge_pruned_at_and_setup_ran_adopt_file_changes() {
+        let base = test_issue_titled("a", "Original", Column::Todo);
+        let mut memory = base.clone();
+        let mut file = base.clone();
+        file.pruned_at = Some(1_700_000_000);
+        file.setup_ran = true;
+
+        merge_issue_fields(&mut memory, &base, &file);
+        assert_eq!(memory.pruned_at, Some(1_700_000_000));
+        assert!(memory.setup_ran);
     }
 
     #[test]

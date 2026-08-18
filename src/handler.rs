@@ -1,4 +1,3 @@
-use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
@@ -7,7 +6,7 @@ use crate::app::{
     ActionContext, App, ConfirmAction, ImportSource, InputMode, LinearPickerContext, MessageKind,
     Project, ProjectId,
 };
-use crate::config::{self, AppConfig};
+use crate::config::AppConfig;
 use crate::external::{github, opencode, tmux, tuicr};
 use crate::global_config::ReloadResult;
 use crate::input::Action;
@@ -40,6 +39,10 @@ pub struct ActionResult {
     pub session_to_open: Option<String>,
     pub popup_title: Option<String>,
     pub launched_session: Option<LaunchedSession>,
+    /// True when this launch's command included the one-time worktree setup
+    /// prefix, so the issue's `setup_ran` flag must be persisted even if
+    /// session-id detection failed.
+    pub launched_setup_ran: bool,
     /// Set (on success *and* failure) when this result completes a session
     /// launch, so the main loop can clear the in-flight guard for the issue.
     pub launched_issue_id: Option<String>,
@@ -773,6 +776,30 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
     let proj_id = ctx.project_id.clone();
 
     if dialog.editing_index.is_some() {
+        // An in-flight launch is still detecting its session id; killing the
+        // session out from under it makes the detector adopt whatever
+        // session is globally newest (OpenCode/Codex fallbacks), storing a
+        // foreign id. Block the destructive edits until the launch settles.
+        if let Some(p) = app.find_project(&proj_id) {
+            let editing = dialog.editing_issue_id.as_deref().and_then(|id| {
+                let lower = id.to_lowercase();
+                p.issues.iter().find(|i| i.id.to_lowercase() == lower)
+            });
+            if let Some(issue) = editing {
+                let switches_agent = dialog.agent_kind != issue.agent_kind
+                    && dialog.agent_kind != dialog.initial_agent_kind;
+                let crosses_boundary = (issue.kind == IssueKind::Orchestrator)
+                    != (dialog.kind == IssueKind::Orchestrator);
+                if (switches_agent || crosses_boundary)
+                    && app.launches_in_flight.contains(&issue.id)
+                {
+                    app.set_warning(
+                        "Launch in progress; wait for it before switching agent or kind",
+                    );
+                    return;
+                }
+            }
+        }
         let Some(p) = app.find_project_mut(&proj_id) else {
             app.set_warning("Project no longer available");
             return;
@@ -805,15 +832,14 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
             let updated_id = p.issues[idx].id.clone();
             p.mark_dirty();
 
+            let mut teardown_failed = false;
             if crossed_orchestrator_boundary || agent_changed {
                 // A live session would otherwise be re-attached with the old
-                // kind's prompt and cwd, or the old agent's process. Drop the
-                // status file too so the card doesn't show the dead agent,
-                // and the cached liveness so relaunch works before the next
+                // kind's prompt and cwd, or the old agent's process. Also
+                // drop the cached liveness so relaunch works before the next
                 // 2s tmux poll.
-                let _ = tmux::kill_session(&session_name);
-                let _ =
-                    std::fs::remove_file(agent_status_file(&p.config.project_root, &session_name));
+                teardown_failed =
+                    !opencode::terminate_session(&p.config.project_root, &session_name);
                 p.live.active_sessions.remove(&session_name);
             }
 
@@ -832,6 +858,12 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
                 ));
             } else {
                 app.set_message(format!("Updated {}", updated_id));
+            }
+            if teardown_failed {
+                app.set_warning(format!(
+                    "Old session '{}' is still alive; the next launch would re-attach it",
+                    session_name
+                ));
             }
         } else {
             app.set_warning("Issue no longer exists");
@@ -1377,24 +1409,26 @@ fn handle_confirm(
                             app.set_warning("Project no longer available");
                             return;
                         };
-                        let status_file =
-                            agent_status_file(&project.config.project_root, &session_name);
+                        let project_root = project.config.project_root.clone();
                         app.begin_busy();
                         let tx = action_tx.clone();
 
                         thread::spawn(move || {
-                            let (message, message_kind) = match tmux::kill_session(&session_name) {
-                                Ok(()) => {
-                                    let _ = std::fs::remove_file(&status_file);
+                            let (message, message_kind) =
+                                if opencode::terminate_session(&project_root, &session_name) {
                                     (
                                         format!("Session '{}' killed", session_name),
                                         MessageKind::Info,
                                     )
-                                }
-                                Err(e) => {
-                                    (format!("Failed to kill session: {e}"), MessageKind::Error)
-                                }
-                            };
+                                } else {
+                                    (
+                                        format!(
+                                            "Session '{}' is still alive after kill",
+                                            session_name
+                                        ),
+                                        MessageKind::Error,
+                                    )
+                                };
                             let _ = tx.send(ActionResult {
                                 message,
                                 message_kind,
@@ -1420,23 +1454,26 @@ fn handle_confirm(
                         let issue = &p.issues[issue_index];
                         let session_name = issue.session_name(&p.config.project_name);
                         let id = issue.id.clone();
-                        let status_file = agent_status_file(&p.config.project_root, &session_name);
+                        let project_root = p.config.project_root.clone();
 
                         if p.is_session_alive(&session_name) {
                             let tx = action_tx.clone();
                             let sn = session_name.clone();
                             thread::spawn(move || {
-                                let _ = tmux::kill_session(&sn);
-                                let _ = std::fs::remove_file(&status_file);
+                                let message = if opencode::terminate_session(&project_root, &sn) {
+                                    format!("Deleted {} and killed session", id)
+                                } else {
+                                    format!("Deleted {}, but its session is still alive", id)
+                                };
                                 let _ = tx.send(ActionResult {
-                                    message: format!("Deleted {} and killed session", id),
+                                    message,
                                     message_kind: MessageKind::Info,
                                     ..Default::default()
                                 });
                             });
                             app.begin_busy();
                         } else {
-                            let _ = std::fs::remove_file(&status_file);
+                            let _ = opencode::terminate_session(&project_root, &session_name);
                             app.set_message(format!("Deleted {}", id));
                         }
 
@@ -1467,7 +1504,8 @@ fn handle_confirm(
 
 fn launch_and_report(issue: Issue, config: AppConfig) -> ActionResult {
     match opencode::launch_session(&issue, &config) {
-        Ok((session_name, agent_sid)) => ActionResult {
+        Ok((session_name, agent_sid, setup_ran)) => ActionResult {
+            launched_setup_ran: setup_ran,
             message: format!("Session '{}' started", session_name),
             session_to_open: Some(session_name),
             launched_session: agent_sid.map(|sid| LaunchedSession {
@@ -1485,10 +1523,6 @@ fn launch_and_report(issue: Issue, config: AppConfig) -> ActionResult {
             ..Default::default()
         },
     }
-}
-
-fn agent_status_file(project_root: &Path, session_name: &str) -> PathBuf {
-    config::agent_status_dir(project_root).join(format!("{}.json", session_name))
 }
 
 #[cfg(test)]

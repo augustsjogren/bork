@@ -27,8 +27,6 @@ pub struct DialogState {
     pub title_cursor: usize,
     pub prompt: TextArea<'static>,
     pub available_agents: Vec<AgentKind>,
-    /// Agents with a resumable session on the issue being edited.
-    pub session_agents: Vec<AgentKind>,
     pub agent_mode: AgentMode,
     pub agent_kind: AgentKind,
     /// The agent shown when the dialog opened (post-normalization). Submit
@@ -86,7 +84,6 @@ impl DialogState {
             title_cursor: 0,
             prompt: make_prompt_textarea(""),
             available_agents,
-            session_agents: Vec::new(),
             agent_mode: Self::normalize_mode_for_agent(AgentMode::Plan, resolved_agent),
             agent_kind: resolved_agent,
             initial_agent_kind: resolved_agent,
@@ -159,7 +156,6 @@ impl DialogState {
             title_cursor: issue.title.chars().count(),
             prompt,
             available_agents,
-            session_agents: issue.sessions.keys().copied().collect(),
             agent_mode: Self::normalize_mode_for_agent(issue.agent_mode, resolved_agent),
             agent_kind: resolved_agent,
             initial_agent_kind: resolved_agent,

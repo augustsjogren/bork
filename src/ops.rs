@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config;
-use crate::external::tmux;
+use crate::external::{opencode, tmux};
 use crate::types::{AgentKind, AgentMode, Column, Issue, IssueKind};
 use crate::ui::styles::truncate;
 use crate::worktree;
@@ -248,15 +248,13 @@ pub fn update_issue(
 
     if session_stale {
         // Kill any live session so it isn't re-attached with the old kind's
-        // prompt and cwd, or the old agent's process, and drop its status
-        // file so cards don't show the dead agent. Best effort; the session
-        // may not exist.
+        // prompt and cwd, or the old agent's process. Best effort; a session
+        // that survives the kill is surfaced but doesn't block the update.
         let config = config::load_config_from(project_root);
         let session_name = issue.session_name(&config.project_name);
-        let _ = tmux::kill_session(&session_name);
-        let _ = std::fs::remove_file(
-            config::agent_status_dir(project_root).join(format!("{session_name}.json")),
-        );
+        if !opencode::terminate_session(project_root, &session_name) {
+            eprintln!("Warning: session '{session_name}' is still alive after kill");
+        }
     }
 
     let updated = issue.clone();
@@ -594,9 +592,9 @@ pub fn archive_issue(
 
     let session_name = issue.session_name(&app_config.project_name);
     let session_killed = tmux::session_exists(&session_name);
-    if session_killed {
-        let _ = tmux::kill_session(&session_name);
-    }
+    // Also removes the transient status file, which the old inline kill here
+    // forgot — leaving cards showing a dead agent after archive.
+    let _ = opencode::terminate_session(project_root, &session_name);
 
     let worktree_removed = match issue.worktree.as_deref() {
         Some(dir) => {

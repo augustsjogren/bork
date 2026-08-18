@@ -298,6 +298,11 @@ pub struct Issue {
     /// Cleared when a new worktree is assigned.
     #[serde(default)]
     pub pruned_at: Option<u64>,
+    /// Whether the worktree setup script has run for this issue. Set when a
+    /// launch command that included the setup prefix was sent — independent
+    /// of session-id capture, which is best effort and can miss.
+    #[serde(default)]
+    pub setup_ran: bool,
 
     // --- New multi-link fields ---
     #[serde(default)]
@@ -351,6 +356,7 @@ impl Issue {
             done_at: None,
             sessions: BTreeMap::new(),
             pruned_at: None,
+            setup_ran: false,
             linear_links: Vec::new(),
             github_pr_links: Vec::new(),
             linked_issues: Vec::new(),
@@ -375,12 +381,12 @@ impl Issue {
         self.sessions.get(&self.agent_kind).map(String::as_str)
     }
 
-    /// Whether any agent session id has been recorded for this issue.
-    /// Best-effort gate for one-time work like the worktree setup script:
-    /// session detection can miss, and orchestrator conversions clear the
-    /// map, so "recorded" is an approximation of "has launched".
+    /// Whether any agent has ever launched for this issue. Gates one-time
+    /// work like the worktree setup script. `setup_ran` covers launches
+    /// whose best-effort session-id capture failed and left `sessions`
+    /// empty; the map covers pre-`setup_ran` state files.
     pub fn has_ever_launched(&self) -> bool {
-        !self.sessions.is_empty()
+        self.setup_ran || !self.sessions.is_empty()
     }
 
     /// Attach a worktree to this issue. Also clears the `pruned_at` marker so
@@ -411,6 +417,12 @@ impl Issue {
             if let Some(owner) = owner {
                 self.sessions.entry(owner).or_insert(sid);
             }
+            // Whoever owned it, a legacy id proves a launch happened, so the
+            // one-time worktree setup must not run again.
+            self.setup_ran = true;
+        }
+        if !self.sessions.is_empty() {
+            self.setup_ran = true;
         }
 
         if self.linear_links.is_empty() {

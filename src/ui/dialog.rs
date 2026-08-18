@@ -99,9 +99,25 @@ pub fn render_dialog(frame: &mut Frame, app: &App) {
     if dialog.kind.is_agentic() {
         if !dialog.available_agents.is_empty() {
             let agent_area = Rect::new(inner.x + 1, inner.y + next_row, inner.width - 2, 1);
+            // Resume markers come from the live issue, not a dialog-open
+            // snapshot: background launch results and external merges can
+            // change the sessions map while the dialog is up.
+            let session_agents: Vec<AgentKind> = dialog
+                .editing_issue_id
+                .as_deref()
+                .and_then(|id| {
+                    let lower = id.to_lowercase();
+                    app.active_project()
+                        .issues
+                        .iter()
+                        .find(|issue| issue.id.to_lowercase() == lower)
+                })
+                .map(|issue| issue.sessions.keys().copied().collect())
+                .unwrap_or_default();
             render_agent_field(
                 frame,
                 dialog,
+                &session_agents,
                 agent_area,
                 dialog.current_field() == DialogField::Agent,
                 label_width,
@@ -424,6 +440,7 @@ fn render_kind_field(
 fn render_agent_field(
     frame: &mut Frame,
     dialog: &DialogState,
+    session_agents: &[AgentKind],
     area: Rect,
     focused: bool,
     label_width: usize,
@@ -446,7 +463,7 @@ fn render_agent_field(
         }
         let selected = *kind == dialog.agent_kind;
         // ↺ = this agent has a session to resume.
-        let resume_marker = if dialog.session_agents.contains(kind) {
+        let resume_marker = if session_agents.contains(kind) {
             " \u{21ba}"
         } else {
             ""

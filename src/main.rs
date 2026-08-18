@@ -1332,8 +1332,9 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
     };
 
     let launched_agent = issue.agent_kind;
-    let (session_name, agent_session_id) = external::opencode::launch_session(&issue, &config)
-        .map_err(|e| anyhow::anyhow!("Failed to launch agent: {e}"))?;
+    let (session_name, agent_session_id, setup_ran) =
+        external::opencode::launch_session(&issue, &config)
+            .map_err(|e| anyhow::anyhow!("Failed to launch agent: {e}"))?;
 
     // Resolve the link target: explicit --link wins, else the spawning agent's
     // issue from BORK_ISSUE_ID. Only link when the target exists in this same
@@ -1349,6 +1350,9 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
     if let Some(saved) = state.issues.iter_mut().find(|i| i.id == issue.id) {
         if saved.column == Column::Todo {
             saved.column = Column::InProgress;
+        }
+        if setup_ran {
+            saved.setup_ran = true;
         }
         if let Some(sid) = agent_session_id {
             saved.sessions.insert(launched_agent, sid);
@@ -1913,6 +1917,20 @@ fn run_tui() -> anyhow::Result<()> {
             }
 
             if let Some(launch_id) = result.launched_issue_id {
+                if result.launched_setup_ran {
+                    // Recorded independently of session detection: the setup
+                    // script ran even when the session id was never captured,
+                    // and it must not run a second time.
+                    for project in &mut app.projects {
+                        if let Some(issue) = project.issues.iter_mut().find(|i| i.id == launch_id) {
+                            if !issue.setup_ran {
+                                issue.setup_ran = true;
+                                project.mark_dirty();
+                            }
+                            break;
+                        }
+                    }
+                }
                 if let Some(launched) = result.launched_session {
                     for project in &mut app.projects {
                         if let Some(issue) = project.issues.iter_mut().find(|i| i.id == launch_id) {
@@ -2049,13 +2067,11 @@ fn run_tui() -> anyhow::Result<()> {
             needs_redraw = true;
             let session_name =
                 app.project().issues[idx].session_name(&app.project().config.project_name);
-            let status_file = config::agent_status_dir(&app.project().config.project_root)
-                .join(format!("{}.json", session_name));
+            let project_root = app.project().config.project_root.clone();
             let sn = session_name.clone();
             app.project_mut().live.active_sessions.remove(&session_name);
             thread::spawn(move || {
-                let _ = external::tmux::kill_session(&sn);
-                let _ = std::fs::remove_file(&status_file);
+                let _ = external::opencode::terminate_session(&project_root, &sn);
             });
             app.set_message(format!("Auto-killed session '{}' (done TTL)", session_name));
         }
