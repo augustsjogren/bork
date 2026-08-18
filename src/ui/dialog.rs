@@ -6,7 +6,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{App, DialogField};
+use crate::app::{App, DialogField, DialogState};
 use crate::external::linear::LinearIssue;
 use crate::types::{AgentKind, AgentMode, IssueKind, PrStatus};
 use crate::ui::styles;
@@ -101,9 +101,7 @@ pub fn render_dialog(frame: &mut Frame, app: &App) {
             let agent_area = Rect::new(inner.x + 1, inner.y + next_row, inner.width - 2, 1);
             render_agent_field(
                 frame,
-                dialog.agent_kind,
-                &dialog.available_agents,
-                &dialog.session_agents,
+                dialog,
                 agent_area,
                 dialog.current_field() == DialogField::Agent,
                 label_width,
@@ -425,9 +423,7 @@ fn render_kind_field(
 
 fn render_agent_field(
     frame: &mut Frame,
-    agent_kind: AgentKind,
-    available: &[AgentKind],
-    session_agents: &[AgentKind],
+    dialog: &DialogState,
     area: Rect,
     focused: bool,
     label_width: usize,
@@ -444,13 +440,13 @@ fn render_agent_field(
         label_style,
     )];
 
-    for (i, kind) in available.iter().enumerate() {
+    for (i, kind) in dialog.available_agents.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw("  "));
         }
-        let selected = *kind == agent_kind;
+        let selected = *kind == dialog.agent_kind;
         // ↺ = this agent has a session to resume.
-        let resume_marker = if session_agents.contains(kind) {
+        let resume_marker = if dialog.session_agents.contains(kind) {
             " \u{21ba}"
         } else {
             ""

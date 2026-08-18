@@ -1331,6 +1331,7 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
         Some(result.worktree_dir)
     };
 
+    let launched_agent = issue.agent_kind;
     let (session_name, agent_session_id) = external::opencode::launch_session(&issue, &config)
         .map_err(|e| anyhow::anyhow!("Failed to launch agent: {e}"))?;
 
@@ -1350,7 +1351,7 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
             saved.column = Column::InProgress;
         }
         if let Some(sid) = agent_session_id {
-            saved.sessions.insert(issue.agent_kind, sid);
+            saved.sessions.insert(launched_agent, sid);
         }
     }
     config::save_state(&state, project_root)?;
@@ -1900,20 +1901,6 @@ fn run_tui() -> anyhow::Result<()> {
             app.busy_count = app.busy_count.saturating_sub(1);
             app.show_message(result.message, result.message_kind);
 
-            if let Some(launched) = result.launched_session {
-                for project in &mut app.projects {
-                    if let Some(issue) = project
-                        .issues
-                        .iter_mut()
-                        .find(|i| i.id == launched.issue_id)
-                    {
-                        issue.sessions.insert(launched.agent, launched.session_id);
-                        project.mark_dirty();
-                        break;
-                    }
-                }
-            }
-
             if let Some((project_id, outcome)) = result.prune_outcome {
                 if let Some(project) = app.find_project_mut(&project_id) {
                     let now = app::unix_now();
@@ -1926,6 +1913,15 @@ fn run_tui() -> anyhow::Result<()> {
             }
 
             if let Some(launch_id) = result.launched_issue_id {
+                if let Some(launched) = result.launched_session {
+                    for project in &mut app.projects {
+                        if let Some(issue) = project.issues.iter_mut().find(|i| i.id == launch_id) {
+                            issue.sessions.insert(launched.agent, launched.session_id);
+                            project.mark_dirty();
+                            break;
+                        }
+                    }
+                }
                 app.launches_in_flight.remove(&launch_id);
                 let pending = pending_popup_for_launch.remove(&launch_id);
                 // Only act on a successful launch; failures already surfaced

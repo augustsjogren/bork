@@ -23,15 +23,15 @@ pub struct ActionChannels<'a> {
     pub reload_tx: &'a mpsc::Sender<ReloadResult>,
 }
 
-/// A detected agent session id, keyed by the agent captured at launch time so
-/// it is stored under the agent that minted it, even if the user switches
-/// agents before this result lands.
+/// A detected agent session id for the issue named by `launched_issue_id`,
+/// keyed by the agent captured at launch time so it is stored under the agent
+/// that minted it, even if the user switches agents before this result lands.
 pub struct LaunchedSession {
-    pub issue_id: String,
     pub agent: AgentKind,
     pub session_id: String,
 }
 
+#[derive(Default)]
 pub struct ActionResult {
     pub message: String,
     pub message_kind: MessageKind,
@@ -43,20 +43,6 @@ pub struct ActionResult {
     pub launched_issue_id: Option<String>,
     /// If set, apply this prune outcome to the issues of `project_id`.
     pub prune_outcome: Option<(crate::app::ProjectId, crate::prune::PruneOutcome)>,
-}
-
-impl Default for ActionResult {
-    fn default() -> Self {
-        Self {
-            message: String::new(),
-            message_kind: MessageKind::Info,
-            session_to_open: None,
-            popup_title: None,
-            launched_session: None,
-            launched_issue_id: None,
-            prune_outcome: None,
-        }
-    }
 }
 
 pub enum PostAction {
@@ -372,7 +358,6 @@ fn handle_normal(
                 let result = match tmux::create_session(&session_name, &project_root) {
                     Ok(()) => ActionResult {
                         message: format!("Terminal session '{}' ready", session_name),
-                        message_kind: MessageKind::Info,
                         session_to_open: Some(session_name),
                         popup_title: Some(popup_title),
                         ..Default::default()
@@ -496,7 +481,6 @@ fn handle_normal(
                 let result = match outcome {
                     Ok(()) => ActionResult {
                         message: "tuicr ready".to_string(),
-                        message_kind: MessageKind::Info,
                         session_to_open: Some(session_name),
                         popup_title: Some(popup_title),
                         ..Default::default()
@@ -809,8 +793,11 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
 
             if crossed_orchestrator_boundary || agent_changed {
                 // A live session would otherwise be re-attached with the old
-                // kind's prompt and cwd, or the old agent's process.
+                // kind's prompt and cwd, or the old agent's process. Drop the
+                // status file too so the card doesn't show the dead agent.
                 let _ = tmux::kill_session(&session_name);
+                let _ =
+                    std::fs::remove_file(agent_status_file(&p.config.project_root, &session_name));
             }
 
             if crossed_orchestrator_boundary {
@@ -1463,15 +1450,12 @@ fn launch_and_report(issue: Issue, config: AppConfig) -> ActionResult {
     match opencode::launch_session(&issue, &config) {
         Ok((session_name, agent_sid)) => ActionResult {
             message: format!("Session '{}' started", session_name),
-            message_kind: MessageKind::Info,
             session_to_open: Some(session_name),
-            popup_title: None,
             launched_session: agent_sid.map(|sid| LaunchedSession {
-                issue_id: issue.id.clone(),
                 agent: issue.agent_kind,
                 session_id: sid,
             }),
-            launched_issue_id: Some(issue.id.clone()),
+            launched_issue_id: Some(issue.id),
             ..Default::default()
         },
         Err(e) => ActionResult {

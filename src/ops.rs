@@ -162,6 +162,7 @@ fn format_issue_table(issues: &[&Issue], _project_name: &str) -> anyhow::Result<
     Ok(out.trim_end().to_string())
 }
 
+#[derive(Default)]
 pub struct CreateOptions {
     pub title: String,
     pub column: Option<Column>,
@@ -199,6 +200,7 @@ pub fn create_issue(project_root: &Path, opts: CreateOptions) -> anyhow::Result<
     Ok(issue)
 }
 
+#[derive(Default)]
 pub struct UpdateOptions {
     pub title: Option<String>,
     pub column: Option<Column>,
@@ -246,10 +248,15 @@ pub fn update_issue(
 
     if session_stale {
         // Kill any live session so it isn't re-attached with the old kind's
-        // prompt and cwd, or the old agent's process. Best effort; the
-        // session may not exist.
+        // prompt and cwd, or the old agent's process, and drop its status
+        // file so cards don't show the dead agent. Best effort; the session
+        // may not exist.
         let config = config::load_config_from(project_root);
-        let _ = tmux::kill_session(&issue.session_name(&config.project_name));
+        let session_name = issue.session_name(&config.project_name);
+        let _ = tmux::kill_session(&session_name);
+        let _ = std::fs::remove_file(
+            config::agent_status_dir(project_root).join(format!("{session_name}.json")),
+        );
     }
 
     let updated = issue.clone();
@@ -926,45 +933,35 @@ mod tests {
             root,
             CreateOptions {
                 title: "Switch me".into(),
-                column: None,
-                agent_kind: None,
-                agent_mode: None,
-                prompt: None,
-                kind: None,
+                agent_kind: Some(AgentKind::OpenCode),
+                ..Default::default()
             },
         )
         .unwrap();
 
         let mut state = config::load_state(root);
-        let original_agent = state.issues[0].agent_kind;
         state.issues[0]
             .sessions
-            .insert(original_agent, "ses_abc".into());
+            .insert(AgentKind::OpenCode, "ses_abc".into());
         config::save_state(&state, root).unwrap();
 
-        let new_agent = if original_agent == AgentKind::Claude {
-            AgentKind::OpenCode
-        } else {
-            AgentKind::Claude
-        };
         let updated = update_issue(
             root,
             "test-1",
             UpdateOptions {
-                title: None,
-                column: None,
-                agent_kind: Some(new_agent),
-                agent_mode: None,
-                prompt: None,
-                kind: None,
+                agent_kind: Some(AgentKind::Claude),
+                ..Default::default()
             },
         )
         .unwrap();
 
-        assert_eq!(updated.agent_kind, new_agent);
+        assert_eq!(updated.agent_kind, AgentKind::Claude);
         // The old agent's session survives the switch and resumes on switch-back.
         assert_eq!(
-            updated.sessions.get(&original_agent).map(String::as_str),
+            updated
+                .sessions
+                .get(&AgentKind::OpenCode)
+                .map(String::as_str),
             Some("ses_abc")
         );
         // The new agent has no session yet, so the next launch starts fresh.

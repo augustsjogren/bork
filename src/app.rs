@@ -1260,14 +1260,28 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
     merge_field!(prompt);
     merge_field!(worktree);
     merge_field!(done_at);
-    merge_field!(sessions);
     merge_field!(linear_links);
     merge_field!(github_pr_links);
     merge_field!(linked_issues);
+
+    // `sessions` merges entry-wise: per-agent entries are independent, so a
+    // concurrent write to one agent's session (e.g. `bork issue start` from a
+    // spawned agent) must not clobber another agent's entry held in memory.
+    for agent in AgentKind::ALL {
+        if memory.sessions.get(&agent) == base.sessions.get(&agent)
+            && file.sessions.get(&agent) != base.sessions.get(&agent)
+        {
+            match file.sessions.get(&agent) {
+                Some(sid) => memory.sessions.insert(agent, sid.clone()),
+                None => memory.sessions.remove(&agent),
+            };
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MessageKind {
+    #[default]
     Info,
     Warning,
     Error,

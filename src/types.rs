@@ -433,6 +433,7 @@ impl Issue {
     /// Returns `true` when the orchestrator boundary was crossed. Callers
     /// should then kill any live tmux session, since re-attaching it would
     /// silently resume the old agent with the previous kind's prompt.
+    #[must_use]
     pub fn set_kind(&mut self, kind: IssueKind) -> bool {
         let previous = self.kind;
         self.kind = kind;
@@ -450,13 +451,10 @@ impl Issue {
         true
     }
 
-    /// Change the selected agent. Stored sessions are kept — each agent
-    /// resumes its own on the next launch — but any live tmux session is
-    /// still running the old agent's process.
-    ///
-    /// Returns `true` when the agent actually changed. Callers should then
-    /// kill any live tmux session, since re-attaching it would silently
-    /// continue the old agent.
+    /// Change the selected agent, keeping every agent's stored session
+    /// resumable. Returns `true` when it changed; callers must then kill any
+    /// live tmux session, which is still running the old agent's process.
+    #[must_use]
     pub fn set_agent_kind(&mut self, kind: AgentKind) -> bool {
         let changed = kind != self.agent_kind;
         self.agent_kind = kind;
@@ -975,11 +973,9 @@ mod tests {
         issue
             .sessions
             .insert(AgentKind::OpenCode, "ses_abc123xyz".to_string());
-        issue.sessions.insert(
-            AgentKind::Claude,
-            "0b5deb44-92b7-4a53-b1e1-000000000000".to_string(),
-        );
         let json = serde_json::to_string(&issue).unwrap();
+        // On-disk shape: a map keyed by agent variant name.
+        assert!(json.contains(r#""sessions":{"OpenCode":"ses_abc123xyz"}"#));
         let roundtrip: Issue = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtrip.sessions, issue.sessions);
     }
@@ -1002,28 +998,6 @@ mod tests {
         // Legacy field never serializes back out.
         let out = serde_json::to_string(&issue).unwrap();
         assert!(!out.contains("\"session_id\""));
-    }
-
-    #[test]
-    fn current_session_id_follows_agent_kind() {
-        let mut issue = test_issue("bork-1", Column::InProgress);
-        issue.agent_kind = AgentKind::OpenCode;
-        issue
-            .sessions
-            .insert(AgentKind::OpenCode, "ses_abc".to_string());
-        assert_eq!(issue.current_session_id(), Some("ses_abc"));
-
-        // Switching agents hides the other agent's session but keeps it stored.
-        issue.agent_kind = AgentKind::Claude;
-        assert_eq!(issue.current_session_id(), None);
-        assert_eq!(
-            issue.sessions.get(&AgentKind::OpenCode).map(String::as_str),
-            Some("ses_abc")
-        );
-
-        // Switching back resumes the original session.
-        issue.agent_kind = AgentKind::OpenCode;
-        assert_eq!(issue.current_session_id(), Some("ses_abc"));
     }
 
     // --- AgentStatus ---
