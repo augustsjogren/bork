@@ -23,11 +23,13 @@ pub struct ActionChannels<'a> {
     pub reload_tx: &'a mpsc::Sender<ReloadResult>,
 }
 
-/// A detected agent session id for the issue named by `launched_issue_id`,
-/// keyed by the agent captured at launch time so it is stored under the agent
-/// that minted it, even if the user switches agents before this result lands.
+/// A detected agent session id for the issue named by `launched_issue_id`.
+/// Agent and kind are captured at launch time: the id is stored under the
+/// agent that minted it, and a kind change while detection was still polling
+/// means the session was invalidated and must not be recorded.
 pub struct LaunchedSession {
     pub agent: AgentKind,
+    pub kind: IssueKind,
     pub session_id: String,
 }
 
@@ -770,18 +772,30 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
 
     let proj_id = ctx.project_id.clone();
 
-    if let Some(idx) = dialog.editing_index {
+    if dialog.editing_index.is_some() {
         let Some(p) = app.find_project_mut(&proj_id) else {
             app.set_warning("Project no longer available");
             return;
         };
-        if idx < p.issues.len() {
+        // Resolve by ID, not the index captured at dialog-open: background
+        // merges can reorder or remove issues while the dialog is up, and a
+        // stale index would edit (and kill the session of) the wrong issue.
+        let idx = dialog.editing_issue_id.as_deref().and_then(|id| {
+            let lower = id.to_lowercase();
+            p.issues.iter().position(|i| i.id.to_lowercase() == lower)
+        });
+        if let Some(idx) = idx {
             let session_name = p.issues[idx].session_name(&p.config.project_name);
             let detached_worktree = p.issues[idx].worktree.clone();
 
             p.issues[idx].title = title;
             p.issues[idx].prompt = prompt;
-            let agent_changed = p.issues[idx].set_agent_kind(dialog.agent_kind);
+            // A kill is only warranted when the user actually moved the
+            // picker: an unavailable stored agent gets silently normalized
+            // to `dialog.initial_agent_kind` at open, and submitting that
+            // untouched dialog must not count as a switch.
+            let agent_changed = p.issues[idx].set_agent_kind(dialog.agent_kind)
+                && dialog.agent_kind != dialog.initial_agent_kind;
             p.issues[idx].agent_mode = dialog.agent_mode;
             let crossed_orchestrator_boundary = p.issues[idx].set_kind(dialog.kind);
 
@@ -794,10 +808,13 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
             if crossed_orchestrator_boundary || agent_changed {
                 // A live session would otherwise be re-attached with the old
                 // kind's prompt and cwd, or the old agent's process. Drop the
-                // status file too so the card doesn't show the dead agent.
+                // status file too so the card doesn't show the dead agent,
+                // and the cached liveness so relaunch works before the next
+                // 2s tmux poll.
                 let _ = tmux::kill_session(&session_name);
                 let _ =
                     std::fs::remove_file(agent_status_file(&p.config.project_root, &session_name));
+                p.live.active_sessions.remove(&session_name);
             }
 
             if crossed_orchestrator_boundary {
@@ -816,6 +833,8 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
             } else {
                 app.set_message(format!("Updated {}", updated_id));
             }
+        } else {
+            app.set_warning("Issue no longer exists");
         }
         return;
     }
@@ -1453,6 +1472,7 @@ fn launch_and_report(issue: Issue, config: AppConfig) -> ActionResult {
             session_to_open: Some(session_name),
             launched_session: agent_sid.map(|sid| LaunchedSession {
                 agent: issue.agent_kind,
+                kind: issue.kind,
                 session_id: sid,
             }),
             launched_issue_id: Some(issue.id),

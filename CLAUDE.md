@@ -156,7 +156,7 @@ The binary is symlinked to `/opt/homebrew/bin/bork`.
 
 ## Agent Sessions
 
-Each `Issue` stores agent session IDs in `sessions: BTreeMap<AgentKind, String>`, keyed by the agent that created them; launch/resume only reads the current agent's entry, so switching agents starts fresh while other agents' sessions stay resumable on switch-back. Agent changes go through `Issue::set_agent_kind()`, which (like `set_kind()`) tells the caller to kill the live tmux session but never clears the map. The worktree setup script runs only on the issue's first launch ever (`Issue::has_ever_launched()`); the edit dialog marks resumable agents with `↺`.
+Each `Issue` stores agent session IDs in `sessions: BTreeMap<AgentKind, String>`, keyed by the agent that created them; launch/resume only reads the current agent's entry, so switching agents starts fresh while other agents' sessions stay resumable on switch-back. Agent changes go through `Issue::set_agent_kind()`, which (like `set_kind()`) tells the caller to kill the live tmux session but never clears the map. The worktree setup script is skipped once any session id is recorded (`Issue::has_ever_launched()`, a best-effort first-launch gate); the edit dialog marks resumable agents with `↺`.
 
 ## Integration Data Model
 

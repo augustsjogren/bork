@@ -375,8 +375,10 @@ impl Issue {
         self.sessions.get(&self.agent_kind).map(String::as_str)
     }
 
-    /// Whether any agent has ever launched for this issue. Gates one-time
-    /// work like the worktree setup script.
+    /// Whether any agent session id has been recorded for this issue.
+    /// Best-effort gate for one-time work like the worktree setup script:
+    /// session detection can miss, and orchestrator conversions clear the
+    /// map, so "recorded" is an approximation of "has launched".
     pub fn has_ever_launched(&self) -> bool {
         !self.sessions.is_empty()
     }
@@ -393,7 +395,22 @@ impl Issue {
     /// Called once after deserialization from old state.json format.
     pub fn migrate_legacy_fields(&mut self) {
         if let Some(sid) = self.session_id.take() {
-            self.sessions.entry(self.agent_kind).or_insert(sid);
+            // The legacy field could hold another agent's id — the exact
+            // pre-map mismatch this map fixes (bork-147), since the old code
+            // never cleared it on agent switch. OpenCode ids are "ses_"-
+            // prefixed, every other agent's are UUIDs: re-key an opencode-
+            // shaped id, keep a UUID under a UUID-based agent, and drop an
+            // id that can't be attributed.
+            let owner = if sid.starts_with("ses_") {
+                Some(AgentKind::OpenCode)
+            } else if self.agent_kind != AgentKind::OpenCode {
+                Some(self.agent_kind)
+            } else {
+                None
+            };
+            if let Some(owner) = owner {
+                self.sessions.entry(owner).or_insert(sid);
+            }
         }
 
         if self.linear_links.is_empty() {
@@ -998,6 +1015,32 @@ mod tests {
         // Legacy field never serializes back out.
         let out = serde_json::to_string(&issue).unwrap();
         assert!(!out.contains("\"session_id\""));
+    }
+
+    #[test]
+    fn legacy_mismatched_opencode_id_rekeys_to_opencode() {
+        // The pre-map bug: agent switched to claude while session_id still
+        // held an opencode id. Migration must not hand it to claude.
+        let mut issue = test_issue("bork-1", Column::InProgress);
+        issue.agent_kind = AgentKind::Claude;
+        issue.session_id = Some("ses_abc123".to_string());
+        issue.migrate_legacy_fields();
+        assert_eq!(issue.current_session_id(), None);
+        assert_eq!(
+            issue.sessions.get(&AgentKind::OpenCode).map(String::as_str),
+            Some("ses_abc123")
+        );
+    }
+
+    #[test]
+    fn legacy_mismatched_uuid_under_opencode_is_dropped() {
+        // A UUID can belong to claude, codex, or pi — unattributable when the
+        // current agent is opencode, so it must not resurface anywhere.
+        let mut issue = test_issue("bork-1", Column::InProgress);
+        issue.agent_kind = AgentKind::OpenCode;
+        issue.session_id = Some("0b5deb44-92b7-4a53-b1e1-000000000000".to_string());
+        issue.migrate_legacy_fields();
+        assert!(issue.sessions.is_empty());
     }
 
     // --- AgentStatus ---

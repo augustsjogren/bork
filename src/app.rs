@@ -1277,6 +1277,17 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
             };
         }
     }
+
+    // A file-side crossing of the orchestrator boundary clears sessions
+    // atomically with the kind (`set_kind`). When that kind change won the
+    // merge, its session clear must win too — otherwise a concurrent
+    // memory-side session write survives and resumes the pre-conversion
+    // conversation on the next launch.
+    let file_crossed_boundary =
+        (file.kind == IssueKind::Orchestrator) != (base.kind == IssueKind::Orchestrator);
+    if file_crossed_boundary && memory.kind == file.kind {
+        memory.sessions = file.sessions.clone();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -5114,6 +5125,53 @@ mod tests {
 
         merge_issue_fields(&mut memory, &base, &file);
         assert_eq!(memory.title, "Same");
+    }
+
+    #[test]
+    fn merge_sessions_entrywise_keeps_both_sides() {
+        let base = test_issue_titled("a", "Original", Column::Todo);
+        let mut memory = base.clone();
+        memory
+            .sessions
+            .insert(AgentKind::Claude, "uuid-local".to_string());
+        let mut file = base.clone();
+        file.sessions
+            .insert(AgentKind::OpenCode, "ses_external".to_string());
+
+        merge_issue_fields(&mut memory, &base, &file);
+        assert_eq!(
+            memory.sessions.get(&AgentKind::Claude).map(String::as_str),
+            Some("uuid-local"),
+            "memory-side entry survives"
+        );
+        assert_eq!(
+            memory
+                .sessions
+                .get(&AgentKind::OpenCode)
+                .map(String::as_str),
+            Some("ses_external"),
+            "file-side entry merges in"
+        );
+    }
+
+    #[test]
+    fn merge_orchestrator_conversion_clears_memory_sessions() {
+        // File side converted to orchestrator (set_kind cleared sessions);
+        // a concurrent memory-side session write must not survive the merge.
+        let base = test_issue_titled("a", "Original", Column::Todo);
+        let mut memory = base.clone();
+        memory
+            .sessions
+            .insert(AgentKind::OpenCode, "ses_stale".to_string());
+        let mut file = base.clone();
+        file.kind = IssueKind::Orchestrator;
+
+        merge_issue_fields(&mut memory, &base, &file);
+        assert_eq!(memory.kind, IssueKind::Orchestrator);
+        assert!(
+            memory.sessions.is_empty(),
+            "conversion's session clear wins over the concurrent write"
+        );
     }
 
     #[test]

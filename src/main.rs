@@ -1916,8 +1916,15 @@ fn run_tui() -> anyhow::Result<()> {
                 if let Some(launched) = result.launched_session {
                     for project in &mut app.projects {
                         if let Some(issue) = project.issues.iter_mut().find(|i| i.id == launch_id) {
-                            issue.sessions.insert(launched.agent, launched.session_id);
-                            project.mark_dirty();
+                            // A kind change while session detection was still
+                            // polling means set_kind invalidated this session;
+                            // recording it would resurrect the old
+                            // conversation. Agent switches are fine — the id
+                            // is keyed to the agent that minted it.
+                            if issue.kind == launched.kind {
+                                issue.sessions.insert(launched.agent, launched.session_id);
+                                project.mark_dirty();
+                            }
                             break;
                         }
                     }
