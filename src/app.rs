@@ -1218,6 +1218,7 @@ impl PruneDialogState {
 pub enum ConfirmAction {
     KillSession {
         session_name: String,
+        issue_id: String,
         project_id: ProjectId,
     },
     DeleteIssue {
@@ -1245,6 +1246,13 @@ pub use crate::dialog_state::{DialogField, DialogState};
 /// 3-way field merge: for each field, if file diverged from base but memory didn't,
 /// take the file value. If both diverged, memory wins.
 fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
+    // Memory's own orchestrator-boundary crossing, captured before
+    // merge_field!(kind) can overwrite memory.kind with the file's value —
+    // afterwards a file-side crossing is indistinguishable from a memory-side
+    // one.
+    let memory_crossed_boundary =
+        (memory.kind == IssueKind::Orchestrator) != (base.kind == IssueKind::Orchestrator);
+
     macro_rules! merge_field {
         ($field:ident) => {
             if memory.$field == base.$field && file.$field != base.$field {
@@ -1273,8 +1281,6 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
     // the whole map, and that clear must win over concurrent file-side
     // inserts — resuming any pre-conversion session would skip the new
     // kind's prompt.
-    let memory_crossed_boundary =
-        (memory.kind == IssueKind::Orchestrator) != (base.kind == IssueKind::Orchestrator);
     if !memory_crossed_boundary {
         for agent in AgentKind::ALL {
             if memory.sessions.get(&agent) == base.sessions.get(&agent)
@@ -1295,7 +1301,10 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
     // conversation on the next launch.
     let file_crossed_boundary =
         (file.kind == IssueKind::Orchestrator) != (base.kind == IssueKind::Orchestrator);
-    if file_crossed_boundary && memory.kind == file.kind {
+    // Skip when memory crossed too: its own set_kind already cleared the
+    // pre-conversion sessions, and anything it recorded since (e.g. the new
+    // orchestrator's session) is newer than the file's empty map.
+    if file_crossed_boundary && !memory_crossed_boundary && memory.kind == file.kind {
         memory.sessions = file.sessions.clone();
     }
 }
@@ -1331,6 +1340,10 @@ pub struct App {
     /// Issue IDs with a session launch currently in flight. Guards against
     /// double-launch races from repeated keypresses.
     pub launches_in_flight: HashSet<String>,
+    /// Issue IDs whose in-flight launch was invalidated (session killed
+    /// mid-detection). The landing result's session id and setup flag are
+    /// discarded — the pane the detectors were watching is gone.
+    pub launches_invalidated: HashSet<String>,
     pub linear_picker: Option<LinearPickerState>,
     pub linear_picker_context: LinearPickerContext,
     pub picker_tab: ImportSource,
@@ -1362,6 +1375,7 @@ impl App {
             busy_visible_since: None,
             spinner_tick: 0,
             launches_in_flight: HashSet::new(),
+            launches_invalidated: HashSet::new(),
             linear_picker: None,
             linear_picker_context: LinearPickerContext::Import,
             picker_tab: ImportSource::Linear,
@@ -5214,6 +5228,32 @@ mod tests {
         assert!(
             memory.sessions.is_empty(),
             "conversion's session clear wins over the concurrent write"
+        );
+    }
+
+    #[test]
+    fn merge_double_crossing_keeps_memory_post_conversion_session() {
+        // Both sides converted to orchestrator; memory then launched it and
+        // recorded the new orchestrator's session. The file's empty map is
+        // older than that write and must not wipe it.
+        let base = test_issue_titled("a", "Original", Column::Todo);
+        let mut memory = base.clone();
+        let _ = memory.set_kind(IssueKind::Orchestrator);
+        memory
+            .sessions
+            .insert(AgentKind::OpenCode, "ses_orch".to_string());
+        let mut file = base.clone();
+        let _ = file.set_kind(IssueKind::Orchestrator);
+
+        merge_issue_fields(&mut memory, &base, &file);
+        assert_eq!(memory.kind, IssueKind::Orchestrator);
+        assert_eq!(
+            memory
+                .sessions
+                .get(&AgentKind::OpenCode)
+                .map(String::as_str),
+            Some("ses_orch"),
+            "memory's post-conversion session survives a concurrent file-side conversion"
         );
     }
 

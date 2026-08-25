@@ -503,7 +503,9 @@ pub fn try_load_state(project_root: &Path) -> Option<AppState> {
         }
     };
     for issue in &mut state.issues {
-        issue.migrate_legacy_fields();
+        issue.migrate_legacy_fields(|sid, current| {
+            crate::external::opencode::attribute_legacy_uuid(sid, current, project_root)
+        });
     }
     Some(state)
 }

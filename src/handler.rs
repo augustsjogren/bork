@@ -239,6 +239,7 @@ fn handle_normal(
                 format!("Kill session '{}'? (y/n)", session_name),
                 ConfirmAction::KillSession {
                     session_name,
+                    issue_id: issue.id.clone(),
                     project_id: ctx.project_id.clone(),
                 },
             );
@@ -777,9 +778,9 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
 
     if dialog.editing_index.is_some() {
         // An in-flight launch is still detecting its session id; killing the
-        // session out from under it makes the detector adopt whatever
-        // session is globally newest (OpenCode/Codex fallbacks), storing a
-        // foreign id. Block the destructive edits until the launch settles.
+        // session out from under it wastes the launch and leaves its result
+        // describing a dead pane. Block the destructive edits until the
+        // launch settles.
         if let Some(p) = app.find_project(&proj_id) {
             let editing = dialog.editing_issue_id.as_deref().and_then(|id| {
                 let lower = id.to_lowercase();
@@ -817,12 +818,15 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
 
             p.issues[idx].title = title;
             p.issues[idx].prompt = prompt;
-            // A kill is only warranted when the user actually moved the
-            // picker: an unavailable stored agent gets silently normalized
-            // to `dialog.initial_agent_kind` at open, and submitting that
-            // untouched dialog must not count as a switch.
-            let agent_changed = p.issues[idx].set_agent_kind(dialog.agent_kind)
-                && dialog.agent_kind != dialog.initial_agent_kind;
+            // Only apply the dialog's agent when the user actually moved the
+            // picker. An untouched picker's value can be wrong two ways: a
+            // normalized fallback for an unavailable stored agent, or stale
+            // against a concurrent CLI agent change — silently writing it
+            // back would flip the issue while the live session keeps running
+            // the real agent's process. Short-circuit keeps the issue's
+            // agent untouched in both cases.
+            let agent_changed = dialog.agent_kind != dialog.initial_agent_kind
+                && p.issues[idx].set_agent_kind(dialog.agent_kind);
             p.issues[idx].agent_mode = dialog.agent_mode;
             let crossed_orchestrator_boundary = p.issues[idx].set_kind(dialog.kind);
 
@@ -1403,6 +1407,7 @@ fn handle_confirm(
                 match confirm_action {
                     ConfirmAction::KillSession {
                         session_name,
+                        issue_id,
                         project_id,
                     } => {
                         let Some(project) = app.find_project(&project_id) else {
@@ -1410,6 +1415,12 @@ fn handle_confirm(
                             return;
                         };
                         let project_root = project.config.project_root.clone();
+                        if app.launches_in_flight.contains(&issue_id) {
+                            // The launch's session detection is still polling;
+                            // its result was minted for a pane that's about to
+                            // die, so drop it when it lands.
+                            app.launches_invalidated.insert(issue_id);
+                        }
                         app.begin_busy();
                         let tx = action_tx.clone();
 
@@ -2023,6 +2034,39 @@ mod tests {
         handle_action(&mut app, Action::DialogSubmit, &ctx, &test_channels());
         assert_eq!(app.input_mode, crate::app::InputMode::Normal);
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn untouched_dialog_keeps_concurrent_agent_change() {
+        let mut app = test_app();
+        app.project_mut()
+            .issues
+            .push(test_issue_titled("bork-1", "Test issue", Column::Todo));
+
+        let ctx = app.action_context();
+        let issue = app.project().issues[0].clone();
+        app.open_edit_dialog(&issue, 0, &ctx);
+
+        // While the dialog is open, a CLI edit lands via the state merge and
+        // switches the issue's agent to something else.
+        let concurrent_agent = if issue.agent_kind == AgentKind::Claude {
+            AgentKind::OpenCode
+        } else {
+            AgentKind::Claude
+        };
+        let _ = app.project_mut().issues[0].set_agent_kind(concurrent_agent);
+        app.project_mut().issues[0]
+            .sessions
+            .insert(concurrent_agent, "ses_live".to_string());
+
+        // Submitting the untouched dialog must not write its stale agent
+        // back over the concurrent change (or kill the live session).
+        handle_action(&mut app, Action::DialogSubmit, &ctx, &test_channels());
+        assert_eq!(app.project().issues[0].agent_kind, concurrent_agent);
+        assert_eq!(
+            app.project().issues[0].current_session_id(),
+            Some("ses_live")
+        );
     }
 
     // ================================================================

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -68,6 +68,16 @@ pub fn launch_session(
         None => agent_cmd,
     };
 
+    // Snapshot opencode's visible sessions before the agent starts, so the
+    // post-launch detector only ever adopts a genuinely new id — the newest
+    // global session could belong to any concurrent opencode run.
+    let opencode_before =
+        if pre_assigned_session_id.is_none() && issue.agent_kind == AgentKind::OpenCode {
+            list_opencode_session_ids()
+        } else {
+            HashSet::new()
+        };
+
     tmux::send_keys(&session_name, &agent_cmd)?;
 
     // Second window: bare terminal for ad-hoc commands
@@ -77,7 +87,7 @@ pub fn launch_session(
     let agent_session_id = match pre_assigned_session_id {
         Some(id) => Some(id),
         None => match issue.agent_kind {
-            AgentKind::OpenCode => detect_opencode_session_id(),
+            AgentKind::OpenCode => detect_opencode_session_id(&opencode_before),
             AgentKind::Claude => None,
             AgentKind::Codex => detect_codex_session_id(),
             AgentKind::Pi => detect_pi_session_id(&config.project_root),
@@ -101,13 +111,16 @@ pub fn terminate_session(project_root: &Path, session_name: &str) -> bool {
 }
 
 /// Build the setup-script prefix for a launch command, if applicable.
-/// Only first launches (no agent has ever run for this issue) for issues with
-/// an assigned worktree run the setup script; switching to a different agent
-/// later must not re-run it. The script itself is user-authored shell and is
-/// inserted verbatim; the worktree dir is escaped. The tmux session's cwd is
-/// the project root, so the relative worktree dir resolves correctly.
+/// The setup script runs once per worktree: `setup_ran` is set when a launch
+/// command including this prefix is sent and cleared by `attach_worktree`,
+/// so a fresh checkout (re-attach after prune or an orchestrator round-trip)
+/// runs it again, while agent switches within the same worktree don't.
+/// Deliberately not derived from `sessions` — recorded ids outlive the
+/// worktree they were created in. The script itself is user-authored shell
+/// and is inserted verbatim; the worktree dir is escaped. The tmux session's
+/// cwd is the project root, so the relative worktree dir resolves correctly.
 fn setup_prefix(issue: &Issue, config: &AppConfig) -> Option<String> {
-    if issue.has_ever_launched() {
+    if issue.setup_ran {
         return None;
     }
     let worktree = issue.worktree.as_deref()?;
@@ -383,14 +396,19 @@ fn generate_uuid() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Poll `opencode session list` to detect a newly created session.
-/// Returns the session ID if found within ~5 seconds, otherwise None.
-fn detect_opencode_session_id() -> Option<String> {
+/// Poll `opencode session list` until an id appears that wasn't in the
+/// pre-launch snapshot. Returns it if found within ~5 seconds, otherwise
+/// None — the newest global session could belong to any concurrent
+/// opencode run, so only a genuinely new id is trusted.
+fn detect_opencode_session_id(before: &HashSet<String>) -> Option<String> {
     // Give OpenCode a moment to create its session before polling
     std::thread::sleep(Duration::from_millis(800));
 
     for _ in 0..9 {
-        if let Some(sid) = newest_opencode_session() {
+        if let Some(sid) = list_opencode_session_ids()
+            .into_iter()
+            .find(|id| !before.contains(id))
+        {
             return Some(sid);
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -398,11 +416,60 @@ fn detect_opencode_session_id() -> Option<String> {
     None
 }
 
+/// Attribute a legacy (pre-map) UUID session id to the agent that minted it.
+/// Codex and Pi transcripts are enumerable on disk, so an id found there is
+/// re-keyed even when the issue pointed at a different agent (the pre-map
+/// bug left such mismatches behind). Claude has no cheap index, so it is
+/// assumed only when the issue already pointed at Claude. `None` = drop.
+pub fn attribute_legacy_uuid(
+    sid: &str,
+    current: AgentKind,
+    project_root: &Path,
+) -> Option<AgentKind> {
+    let codex_ids = codex_sessions_root()
+        .map(|root| collect_codex_session_ids(&root))
+        .unwrap_or_default();
+    let pi_ids = pi_sessions_dir(project_root)
+        .map(|dir| collect_pi_session_ids(&dir))
+        .unwrap_or_default();
+    attribute_uuid_against_stores(sid, current, &codex_ids, &pi_ids)
+}
+
+fn attribute_uuid_against_stores(
+    sid: &str,
+    current: AgentKind,
+    codex_ids: &HashMap<String, SystemTime>,
+    pi_ids: &HashMap<String, SystemTime>,
+) -> Option<AgentKind> {
+    if !is_uuid_like(sid) {
+        return None;
+    }
+    if codex_ids.contains_key(sid) {
+        return Some(AgentKind::Codex);
+    }
+    if pi_ids.contains_key(sid) {
+        return Some(AgentKind::Pi);
+    }
+    // Not in an enumerable store: trust Claude ownership only when the issue
+    // already pointed at Claude. Under Codex/Pi the id is evicted or foreign,
+    // and under OpenCode a UUID can't be attributed at all — resuming a
+    // foreign id is worse than starting fresh once.
+    if current == AgentKind::Claude {
+        Some(AgentKind::Claude)
+    } else {
+        None
+    }
+}
+
+fn codex_sessions_root() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join(".codex").join("sessions"))
+}
+
 /// Detect a newly created Codex session UUID by scanning ~/.codex/sessions.
 /// Snapshots existing sessions before waiting, then polls for a new one.
 fn detect_codex_session_id() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let sessions_root = PathBuf::from(home).join(".codex").join("sessions");
+    let sessions_root = codex_sessions_root()?;
 
     let before = collect_codex_session_ids(&sessions_root);
 
@@ -418,8 +485,11 @@ fn detect_codex_session_id() -> Option<String> {
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    // Fallback: return the newest session if no new one appeared
-    newest_codex_session_id(&sessions_root)
+    // No new session appeared — the launch may have failed or been killed
+    // mid-flight. The globally newest id here could be any unrelated
+    // conversation, so give up; a missed id just means the next launch
+    // starts fresh instead of resuming a foreign session.
+    None
 }
 
 /// Collect all Codex session IDs and their modification times.
@@ -451,13 +521,6 @@ fn collect_codex_session_ids(sessions_root: &Path) -> HashMap<String, SystemTime
     }
 
     sessions
-}
-
-fn newest_codex_session_id(sessions_root: &Path) -> Option<String> {
-    collect_codex_session_ids(sessions_root)
-        .into_iter()
-        .max_by_key(|(_, modified)| *modified)
-        .map(|(id, _)| id)
 }
 
 fn parse_codex_session_id_from_filename(file_name: &str) -> Option<String> {
@@ -507,11 +570,9 @@ fn detect_pi_session_id(project_root: &Path) -> Option<String> {
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    // Fallback: return the newest session if no new one appeared.
-    collect_pi_session_ids(&sessions_dir)
-        .into_iter()
-        .max_by_key(|(_, modified)| *modified)
-        .map(|(id, _)| id)
+    // No new session appeared — same reasoning as the Codex detector: the
+    // newest pre-existing id could be a foreign conversation, so give up.
+    None
 }
 
 /// Resolve Pi's session directory for a given working directory.
@@ -572,29 +633,31 @@ fn parse_pi_session_id_from_filename(file_name: &str) -> Option<String> {
     }
 }
 
-/// Run `opencode session list` and return the first (newest) session ID found.
-/// Session IDs start with "ses_".
-fn newest_opencode_session() -> Option<String> {
-    let output = Command::new("opencode")
-        .args(["session", "list"])
-        .output()
-        .ok()?;
+/// Run `opencode session list` and return every session ID found.
+/// Session IDs start with "ses_", one per line, newest first.
+fn list_opencode_session_ids() -> HashSet<String> {
+    let Ok(output) = Command::new("opencode").args(["session", "list"]).output() else {
+        return HashSet::new();
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_newest_session_id(&stdout)
+    parse_all_session_ids(&stdout)
 }
 
-/// Parse the newest session ID from `opencode session list` output.
+/// Parse every session ID from `opencode session list` output.
 /// Expected format: each line starts with the session ID (ses_xxx).
-fn parse_newest_session_id(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        let token = line.split_whitespace().next()?;
-        if token.starts_with("ses_") {
-            Some(token.to_string())
-        } else {
-            None
-        }
-    })
+fn parse_all_session_ids(output: &str) -> HashSet<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let token = line.split_whitespace().next()?;
+            if token.starts_with("ses_") {
+                Some(token.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Build the full prompt sent to the agent.
@@ -1515,26 +1578,30 @@ mod tests {
     }
 
     #[test]
-    fn setup_prefix_skipped_on_resume() {
+    fn setup_prefix_skipped_after_setup_ran() {
+        // Setup ran on the first launch in this worktree; resumes and agent
+        // switches within the same worktree must not re-run it.
         let mut issue = resumable_issue(AgentKind::OpenCode, AgentMode::Build, "ses_abc123");
         issue.worktree = Some("bork-1-fix-bug".to_string());
+        issue.setup_ran = true;
         let mut config = test_config();
         config.setup_script = Some("npm install".to_string());
         assert_eq!(setup_prefix(&issue, &config), None);
     }
 
     #[test]
-    fn setup_prefix_skipped_when_another_agent_ran() {
-        // Setup ran on the very first launch; switching agents afterwards
-        // must not re-run it even though the new agent has no session yet.
-        let mut issue = test_issue(AgentKind::Claude, AgentMode::Build);
-        issue.worktree = Some("bork-1-fix-bug".to_string());
-        issue
-            .sessions
-            .insert(AgentKind::OpenCode, "ses_abc123".to_string());
+    fn setup_prefix_runs_in_fresh_worktree_despite_recorded_sessions() {
+        // Recorded session ids outlive the worktree they were created in:
+        // after a prune + re-attach (attach_worktree clears setup_ran), the
+        // fresh checkout needs the setup script even though sessions exist.
+        let mut issue = resumable_issue(AgentKind::OpenCode, AgentMode::Build, "ses_abc123");
+        issue.attach_worktree("bork-1-fix-bug".to_string());
         let mut config = test_config();
         config.setup_script = Some("npm install".to_string());
-        assert_eq!(setup_prefix(&issue, &config), None);
+        assert_eq!(
+            setup_prefix(&issue, &config),
+            Some("(cd 'bork-1-fix-bug' && npm install)".to_string())
+        );
     }
 
     #[test]
@@ -1695,23 +1762,88 @@ mod tests {
     }
 
     #[test]
-    fn parse_newest_session_id_finds_first_ses_entry() {
+    fn parse_all_session_ids_finds_every_ses_entry() {
         let output = "ses_abc123   My session title   2024-01-15\nses_def456   Another session   2024-01-14\n";
-        assert_eq!(
-            parse_newest_session_id(output),
-            Some("ses_abc123".to_string())
-        );
+        let ids = parse_all_session_ids(output);
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("ses_abc123"));
+        assert!(ids.contains("ses_def456"));
     }
 
     #[test]
-    fn parse_newest_session_id_returns_none_for_empty_output() {
-        assert_eq!(parse_newest_session_id(""), None);
+    fn parse_all_session_ids_empty_for_empty_output() {
+        assert!(parse_all_session_ids("").is_empty());
     }
 
     #[test]
-    fn parse_newest_session_id_ignores_non_ses_lines() {
+    fn parse_all_session_ids_ignores_non_ses_lines() {
         let output = "No sessions found\n";
-        assert_eq!(parse_newest_session_id(output), None);
+        assert!(parse_all_session_ids(output).is_empty());
+    }
+
+    // --- legacy UUID attribution ---
+
+    fn store_with(id: &str) -> HashMap<String, SystemTime> {
+        let mut store = HashMap::new();
+        store.insert(id.to_string(), UNIX_EPOCH);
+        store
+    }
+
+    const LEGACY_UUID: &str = "019d76ad-9734-77c0-8169-a727a5524013";
+
+    #[test]
+    fn legacy_uuid_in_codex_store_rekeys_to_codex() {
+        // The pre-map bug could leave a codex-minted id under agent claude.
+        let owner = attribute_uuid_against_stores(
+            LEGACY_UUID,
+            AgentKind::Claude,
+            &store_with(LEGACY_UUID),
+            &HashMap::new(),
+        );
+        assert_eq!(owner, Some(AgentKind::Codex));
+    }
+
+    #[test]
+    fn legacy_uuid_in_pi_store_rekeys_to_pi() {
+        let owner = attribute_uuid_against_stores(
+            LEGACY_UUID,
+            AgentKind::Codex,
+            &HashMap::new(),
+            &store_with(LEGACY_UUID),
+        );
+        assert_eq!(owner, Some(AgentKind::Pi));
+    }
+
+    #[test]
+    fn legacy_uuid_not_in_stores_trusted_only_under_claude() {
+        let owner = attribute_uuid_against_stores(
+            LEGACY_UUID,
+            AgentKind::Claude,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(owner, Some(AgentKind::Claude));
+
+        for current in [AgentKind::OpenCode, AgentKind::Codex, AgentKind::Pi] {
+            let owner = attribute_uuid_against_stores(
+                LEGACY_UUID,
+                current,
+                &HashMap::new(),
+                &HashMap::new(),
+            );
+            assert_eq!(owner, None, "unattributable id must drop under {current}");
+        }
+    }
+
+    #[test]
+    fn legacy_non_uuid_is_dropped() {
+        let owner = attribute_uuid_against_stores(
+            "not-a-uuid",
+            AgentKind::Claude,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(owner, None);
     }
 
     #[test]

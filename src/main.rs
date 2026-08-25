@@ -1327,7 +1327,7 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
             None,
             opts.base_branch.as_deref(),
         )?;
-        issue.worktree = Some(result.worktree_dir.clone());
+        issue.attach_worktree(result.worktree_dir.clone());
         Some(result.worktree_dir)
     };
 
@@ -1351,11 +1351,21 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
         if saved.column == Column::Todo {
             saved.column = Column::InProgress;
         }
-        if setup_ran {
-            saved.setup_ran = true;
-        }
-        if let Some(sid) = agent_session_id {
-            saved.sessions.insert(launched_agent, sid);
+        // A kind change during the launch (issue converted from the TUI
+        // while session detection was polling) invalidated everything this
+        // launch produced — recording it would resurrect the pre-conversion
+        // session and suppress the next setup run. Agent changes likewise
+        // make the detected id suspect (the kill-on-switch may have landed
+        // mid-detection, tripping the detectors' fallbacks).
+        if saved.kind == issue.kind {
+            if setup_ran {
+                saved.setup_ran = true;
+            }
+            if saved.agent_kind == launched_agent {
+                if let Some(sid) = agent_session_id {
+                    saved.sessions.insert(launched_agent, sid);
+                }
+            }
         }
     }
     config::save_state(&state, project_root)?;
@@ -1917,7 +1927,11 @@ fn run_tui() -> anyhow::Result<()> {
             }
 
             if let Some(launch_id) = result.launched_issue_id {
-                if result.launched_setup_ran {
+                // A kill during the detection window (x, delete) invalidated
+                // whatever this launch produced: the setup may have been
+                // interrupted and any detected id belongs to a dead pane.
+                let invalidated = app.launches_invalidated.remove(&launch_id);
+                if result.launched_setup_ran && !invalidated {
                     // Recorded independently of session detection: the setup
                     // script ran even when the session id was never captured,
                     // and it must not run a second time.
@@ -1931,15 +1945,16 @@ fn run_tui() -> anyhow::Result<()> {
                         }
                     }
                 }
-                if let Some(launched) = result.launched_session {
+                if let Some(launched) = result.launched_session.filter(|_| !invalidated) {
                     for project in &mut app.projects {
                         if let Some(issue) = project.issues.iter_mut().find(|i| i.id == launch_id) {
                             // A kind change while session detection was still
                             // polling means set_kind invalidated this session;
                             // recording it would resurrect the old
-                            // conversation. Agent switches are fine — the id
-                            // is keyed to the agent that minted it.
-                            if issue.kind == launched.kind {
+                            // conversation. An agent change means the switch's
+                            // kill may have landed mid-detection, so the
+                            // detected id is suspect — drop it too.
+                            if issue.kind == launched.kind && issue.agent_kind == launched.agent {
                                 issue.sessions.insert(launched.agent, launched.session_id);
                                 project.mark_dirty();
                             }
@@ -2069,6 +2084,10 @@ fn run_tui() -> anyhow::Result<()> {
                 app.project().issues[idx].session_name(&app.project().config.project_name);
             let project_root = app.project().config.project_root.clone();
             let sn = session_name.clone();
+            let issue_id = app.project().issues[idx].id.clone();
+            if app.launches_in_flight.contains(&issue_id) {
+                app.launches_invalidated.insert(issue_id);
+            }
             app.project_mut().live.active_sessions.remove(&session_name);
             thread::spawn(move || {
                 let _ = external::opencode::terminate_session(&project_root, &sn);
