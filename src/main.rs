@@ -1351,21 +1351,16 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
         if saved.column == Column::Todo {
             saved.column = Column::InProgress;
         }
-        // A kind change during the launch (issue converted from the TUI
-        // while session detection was polling) invalidated everything this
-        // launch produced — recording it would resurrect the pre-conversion
-        // session and suppress the next setup run. Agent changes likewise
-        // make the detected id suspect (the kill-on-switch may have landed
-        // mid-detection, tripping the detectors' fallbacks).
-        if saved.kind == issue.kind {
-            if setup_ran {
-                saved.setup_ran = true;
-            }
-            if saved.agent_kind == launched_agent {
-                if let Some(sid) = agent_session_id {
-                    saved.sessions.insert(launched_agent, sid);
-                }
-            }
+        // A kind change during the launch detached what it produced (see
+        // Issue::accepts_launch_result); setup_ran additionally ignores
+        // agent changes since the setup script is agent-independent.
+        if setup_ran && saved.kind == issue.kind {
+            saved.setup_ran = true;
+        }
+        if let Some(sid) =
+            agent_session_id.filter(|_| saved.accepts_launch_result(issue.kind, launched_agent))
+        {
+            saved.sessions.insert(launched_agent, sid);
         }
     }
     config::save_state(&state, project_root)?;
@@ -1927,40 +1922,33 @@ fn run_tui() -> anyhow::Result<()> {
             }
 
             if let Some(launch_id) = result.launched_issue_id {
-                // A kill during the detection window (x, delete) invalidated
-                // whatever this launch produced: the setup may have been
-                // interrupted and any detected id belongs to a dead pane.
+                // A kill during the detection window (x kill, done-TTL)
+                // invalidated whatever this launch produced: the setup may
+                // have been interrupted and any detected id belongs to a
+                // dead pane.
                 let invalidated = app.launches_invalidated.remove(&launch_id);
-                if result.launched_setup_ran && !invalidated {
-                    // Recorded independently of session detection: the setup
-                    // script ran even when the session id was never captured,
-                    // and it must not run a second time.
-                    for project in &mut app.projects {
-                        if let Some(issue) = project.issues.iter_mut().find(|i| i.id == launch_id) {
-                            if !issue.setup_ran {
-                                issue.setup_ran = true;
-                                project.mark_dirty();
-                            }
-                            break;
+                for project in &mut app.projects {
+                    let Some(issue) = project.issues.iter_mut().find(|i| i.id == launch_id) else {
+                        continue;
+                    };
+                    let mut dirty = false;
+                    // setup_ran is recorded independently of session
+                    // detection: the setup script ran even when the id was
+                    // never captured, and it must not run a second time.
+                    if result.launched_setup_ran && !invalidated && !issue.setup_ran {
+                        issue.setup_ran = true;
+                        dirty = true;
+                    }
+                    if let Some(launched) = result.launched_session.filter(|_| !invalidated) {
+                        if issue.accepts_launch_result(launched.kind, launched.agent) {
+                            issue.sessions.insert(launched.agent, launched.session_id);
+                            dirty = true;
                         }
                     }
-                }
-                if let Some(launched) = result.launched_session.filter(|_| !invalidated) {
-                    for project in &mut app.projects {
-                        if let Some(issue) = project.issues.iter_mut().find(|i| i.id == launch_id) {
-                            // A kind change while session detection was still
-                            // polling means set_kind invalidated this session;
-                            // recording it would resurrect the old
-                            // conversation. An agent change means the switch's
-                            // kill may have landed mid-detection, so the
-                            // detected id is suspect — drop it too.
-                            if issue.kind == launched.kind && issue.agent_kind == launched.agent {
-                                issue.sessions.insert(launched.agent, launched.session_id);
-                                project.mark_dirty();
-                            }
-                            break;
-                        }
+                    if dirty {
+                        project.mark_dirty();
                     }
+                    break;
                 }
                 app.launches_in_flight.remove(&launch_id);
                 let pending = pending_popup_for_launch.remove(&launch_id);
@@ -2085,9 +2073,7 @@ fn run_tui() -> anyhow::Result<()> {
             let project_root = app.project().config.project_root.clone();
             let sn = session_name.clone();
             let issue_id = app.project().issues[idx].id.clone();
-            if app.launches_in_flight.contains(&issue_id) {
-                app.launches_invalidated.insert(issue_id);
-            }
+            app.invalidate_inflight_launch(&issue_id);
             app.project_mut().live.active_sessions.remove(&session_name);
             thread::spawn(move || {
                 let _ = external::opencode::terminate_session(&project_root, &sn);

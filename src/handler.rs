@@ -777,31 +777,15 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
     let proj_id = ctx.project_id.clone();
 
     if dialog.editing_index.is_some() {
-        // An in-flight launch is still detecting its session id; killing the
-        // session out from under it wastes the launch and leaves its result
-        // describing a dead pane. Block the destructive edits until the
-        // launch settles.
-        if let Some(p) = app.find_project(&proj_id) {
-            let editing = dialog.editing_issue_id.as_deref().and_then(|id| {
-                let lower = id.to_lowercase();
-                p.issues.iter().find(|i| i.id.to_lowercase() == lower)
-            });
-            if let Some(issue) = editing {
-                let switches_agent = dialog.agent_kind != issue.agent_kind
-                    && dialog.agent_kind != dialog.initial_agent_kind;
-                let crosses_boundary = (issue.kind == IssueKind::Orchestrator)
-                    != (dialog.kind == IssueKind::Orchestrator);
-                if (switches_agent || crosses_boundary)
-                    && app.launches_in_flight.contains(&issue.id)
-                {
-                    app.set_warning(
-                        "Launch in progress; wait for it before switching agent or kind",
-                    );
-                    return;
-                }
-            }
-        }
-        let Some(p) = app.find_project_mut(&proj_id) else {
+        // Only apply the dialog's agent when the user actually moved the
+        // picker. An untouched picker's value can be wrong two ways: a
+        // normalized fallback for an unavailable stored agent, or stale
+        // against a concurrent CLI agent change — silently writing it back
+        // would flip the issue while the live session keeps running the real
+        // agent's process.
+        let picker_moved = dialog.agent_kind != dialog.initial_agent_kind;
+
+        let Some(p) = app.find_project(&proj_id) else {
             app.set_warning("Project no longer available");
             return;
         };
@@ -812,21 +796,33 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
             let lower = id.to_lowercase();
             p.issues.iter().position(|i| i.id.to_lowercase() == lower)
         });
+
+        // An in-flight launch is still detecting its session id; killing the
+        // session out from under it wastes the launch and leaves its result
+        // describing a dead pane. Block the destructive edits until the
+        // launch settles.
+        if let Some(idx) = idx {
+            let issue = &p.issues[idx];
+            let switches_agent = picker_moved && dialog.agent_kind != issue.agent_kind;
+            let crosses_boundary =
+                (issue.kind == IssueKind::Orchestrator) != (dialog.kind == IssueKind::Orchestrator);
+            if (switches_agent || crosses_boundary) && app.launches_in_flight.contains(&issue.id) {
+                app.set_warning("Launch in progress; wait for it before switching agent or kind");
+                return;
+            }
+        }
+
+        let Some(p) = app.find_project_mut(&proj_id) else {
+            app.set_warning("Project no longer available");
+            return;
+        };
         if let Some(idx) = idx {
             let session_name = p.issues[idx].session_name(&p.config.project_name);
             let detached_worktree = p.issues[idx].worktree.clone();
 
             p.issues[idx].title = title;
             p.issues[idx].prompt = prompt;
-            // Only apply the dialog's agent when the user actually moved the
-            // picker. An untouched picker's value can be wrong two ways: a
-            // normalized fallback for an unavailable stored agent, or stale
-            // against a concurrent CLI agent change — silently writing it
-            // back would flip the issue while the live session keeps running
-            // the real agent's process. Short-circuit keeps the issue's
-            // agent untouched in both cases.
-            let agent_changed = dialog.agent_kind != dialog.initial_agent_kind
-                && p.issues[idx].set_agent_kind(dialog.agent_kind);
+            let agent_changed = picker_moved && p.issues[idx].set_agent_kind(dialog.agent_kind);
             p.issues[idx].agent_mode = dialog.agent_mode;
             let crossed_orchestrator_boundary = p.issues[idx].set_kind(dialog.kind);
 
@@ -1415,12 +1411,7 @@ fn handle_confirm(
                             return;
                         };
                         let project_root = project.config.project_root.clone();
-                        if app.launches_in_flight.contains(&issue_id) {
-                            // The launch's session detection is still polling;
-                            // its result was minted for a pane that's about to
-                            // die, so drop it when it lands.
-                            app.launches_invalidated.insert(issue_id);
-                        }
+                        app.invalidate_inflight_launch(&issue_id);
                         app.begin_busy();
                         let tx = action_tx.clone();
 

@@ -1245,13 +1245,13 @@ pub use crate::dialog_state::{DialogField, DialogState};
 
 /// 3-way field merge: for each field, if file diverged from base but memory didn't,
 /// take the file value. If both diverged, memory wins.
+fn crossed_orchestrator_boundary(issue: &Issue, base: &Issue) -> bool {
+    (issue.kind == IssueKind::Orchestrator) != (base.kind == IssueKind::Orchestrator)
+}
+
 fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
-    // Memory's own orchestrator-boundary crossing, captured before
-    // merge_field!(kind) can overwrite memory.kind with the file's value —
-    // afterwards a file-side crossing is indistinguishable from a memory-side
-    // one.
-    let memory_crossed_boundary =
-        (memory.kind == IssueKind::Orchestrator) != (base.kind == IssueKind::Orchestrator);
+    // Must be captured before merge_field!(kind) overwrites memory.kind.
+    let memory_crossed_boundary = crossed_orchestrator_boundary(memory, base);
 
     macro_rules! merge_field {
         ($field:ident) => {
@@ -1299,8 +1299,7 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
     // merge, its session clear must win too — otherwise a concurrent
     // memory-side session write survives and resumes the pre-conversion
     // conversation on the next launch.
-    let file_crossed_boundary =
-        (file.kind == IssueKind::Orchestrator) != (base.kind == IssueKind::Orchestrator);
+    let file_crossed_boundary = crossed_orchestrator_boundary(file, base);
     // Skip when memory crossed too: its own set_kind already cleared the
     // pre-conversion sessions, and anything it recorded since (e.g. the new
     // orchestrator's session) is newer than the file's empty map.
@@ -1568,6 +1567,17 @@ impl App {
             self.busy_visible_since = Some(Instant::now());
         }
         self.busy_count += 1;
+    }
+
+    /// Mark an issue's in-flight launch as invalidated (its session was
+    /// killed mid-detection), so the landing handler drops the result's
+    /// session id and setup flag. Guarded on the launch actually being in
+    /// flight — an unconditional insert would leave a stale entry that
+    /// poisons the issue's next launch.
+    pub fn invalidate_inflight_launch(&mut self, issue_id: &str) {
+        if self.launches_in_flight.contains(issue_id) {
+            self.launches_invalidated.insert(issue_id.to_string());
+        }
     }
 
     /// Whether the spinner should currently be drawn. True while any

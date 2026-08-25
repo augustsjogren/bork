@@ -381,6 +381,18 @@ impl Issue {
         self.sessions.get(&self.agent_kind).map(String::as_str)
     }
 
+    /// Whether a landed launch result's detected session id still applies to
+    /// this issue. A kind change while detection was polling means `set_kind`
+    /// invalidated everything the launch produced; an agent change means the
+    /// switch's kill may have landed mid-detection, making the id suspect.
+    pub fn accepts_launch_result(
+        &self,
+        launched_kind: IssueKind,
+        launched_agent: AgentKind,
+    ) -> bool {
+        self.kind == launched_kind && self.agent_kind == launched_agent
+    }
+
     /// Attach a worktree to this issue. Clears the `pruned_at` marker so the
     /// "pruned" card indicator disappears, and `setup_ran` because the setup
     /// script is scoped to a worktree — a fresh checkout (re-attach after a
@@ -396,32 +408,17 @@ impl Issue {
     /// Migrate legacy singular fields into the new Vec fields.
     /// Called once after deserialization from old state.json format.
     ///
-    /// `uuid_owner` attributes a legacy UUID session id (given the id and the
-    /// issue's current agent) to the agent that minted it — the legacy field
-    /// could hold another agent's id, the exact pre-map mismatch this map
-    /// fixes (bork-147). The lookup needs filesystem access to the agents'
-    /// transcript stores, which doesn't belong in this module; callers pass
-    /// `opencode::attribute_legacy_uuid`. Returning `None` drops the id.
-    pub fn migrate_legacy_fields(
-        &mut self,
-        uuid_owner: impl Fn(&str, AgentKind) -> Option<AgentKind>,
-    ) {
-        if let Some(sid) = self.session_id.take() {
-            let owner = if sid.starts_with("ses_") {
-                // OpenCode ids are "ses_"-prefixed; every other agent's are
-                // UUIDs, which the resolver tells apart.
-                Some(AgentKind::OpenCode)
-            } else {
-                uuid_owner(&sid, self.agent_kind)
-            };
-            if let Some(owner) = owner {
-                self.sessions.entry(owner).or_insert(sid);
-            }
-            // Whoever owned it, a legacy id proves a launch happened, so the
+    /// Returns the legacy session id, if any, for the caller to attribute
+    /// and file into `sessions` — the legacy field could hold another
+    /// agent's id (the pre-map mismatch this map fixes, bork-147), and
+    /// telling the owners apart needs the agents' on-disk transcript stores
+    /// (`opencode::LegacySessionStores`), which this module can't touch.
+    #[must_use]
+    pub fn migrate_legacy_fields(&mut self) -> Option<String> {
+        let legacy_session = self.session_id.take();
+        if legacy_session.is_some() || !self.sessions.is_empty() {
+            // A recorded or legacy id proves a launch happened, so the
             // one-time worktree setup must not run again.
-            self.setup_ran = true;
-        }
-        if !self.sessions.is_empty() {
             self.setup_ran = true;
         }
 
@@ -451,6 +448,8 @@ impl Issue {
             }
         }
         self.pr_imported = false;
+
+        legacy_session
     }
 
     /// Change the issue kind, clearing state the new kind invalidates.
@@ -1023,7 +1022,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_session_id_migrates_under_current_agent() {
+    fn migration_yields_legacy_session_id_for_attribution() {
+        // Keying is the caller's job (opencode::LegacySessionStores); types
+        // only surrenders the id, marks the launch, and clears the field.
         let json = r#"{
             "id": "bork-1",
             "title": "Test",
@@ -1034,38 +1035,14 @@ mod tests {
             "session_id": "ses_legacy"
         }"#;
         let mut issue: Issue = serde_json::from_str(json).unwrap();
-        issue.migrate_legacy_fields(|_, _| None);
-        assert_eq!(issue.current_session_id(), Some("ses_legacy"));
+        let legacy = issue.migrate_legacy_fields();
+        assert_eq!(legacy.as_deref(), Some("ses_legacy"));
         assert_eq!(issue.session_id, None);
+        // A legacy id proves a launch happened, so setup must not re-run.
+        assert!(issue.setup_ran);
         // Legacy field never serializes back out.
         let out = serde_json::to_string(&issue).unwrap();
         assert!(!out.contains("\"session_id\""));
-    }
-
-    #[test]
-    fn legacy_mismatched_opencode_id_rekeys_to_opencode() {
-        // The pre-map bug: agent switched to claude while session_id still
-        // held an opencode id. Migration must not hand it to claude.
-        let mut issue = test_issue("bork-1", Column::InProgress);
-        issue.agent_kind = AgentKind::Claude;
-        issue.session_id = Some("ses_abc123".to_string());
-        issue.migrate_legacy_fields(|_, _| None);
-        assert_eq!(issue.current_session_id(), None);
-        assert_eq!(
-            issue.sessions.get(&AgentKind::OpenCode).map(String::as_str),
-            Some("ses_abc123")
-        );
-    }
-
-    #[test]
-    fn legacy_mismatched_uuid_under_opencode_is_dropped() {
-        // A UUID can belong to claude, codex, or pi — unattributable when the
-        // current agent is opencode, so it must not resurface anywhere.
-        let mut issue = test_issue("bork-1", Column::InProgress);
-        issue.agent_kind = AgentKind::OpenCode;
-        issue.session_id = Some("0b5deb44-92b7-4a53-b1e1-000000000000".to_string());
-        issue.migrate_legacy_fields(|_, _| None);
-        assert!(issue.sessions.is_empty());
     }
 
     // --- AgentStatus ---
@@ -1115,7 +1092,7 @@ mod tests {
             "linear_imported": true
         }"#;
         let mut issue: Issue = serde_json::from_str(json).unwrap();
-        issue.migrate_legacy_fields(|_, _| None);
+        let _ = issue.migrate_legacy_fields();
         assert_eq!(issue.linear_links.len(), 1);
         assert_eq!(issue.linear_links[0].id, "uuid-abc");
         assert_eq!(issue.linear_links[0].identifier, "VIL-123");
@@ -1136,7 +1113,7 @@ mod tests {
             "pr_import_source": "Authored"
         }"#;
         let mut issue: Issue = serde_json::from_str(json).unwrap();
-        issue.migrate_legacy_fields(|_, _| None);
+        let _ = issue.migrate_legacy_fields();
         assert_eq!(issue.github_pr_links.len(), 1);
         assert_eq!(issue.github_pr_links[0].number, 42);
         assert!(issue.github_pr_links[0].imported);
@@ -1161,7 +1138,7 @@ mod tests {
             "linear_url": "https://b"
         }"#;
         let mut issue: Issue = serde_json::from_str(json).unwrap();
-        issue.migrate_legacy_fields(|_, _| None);
+        let _ = issue.migrate_legacy_fields();
         assert_eq!(issue.linear_links.len(), 1);
         assert_eq!(issue.linear_links[0].identifier, "VIL-1");
     }

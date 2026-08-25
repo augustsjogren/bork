@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::config::{self, AppConfig};
 use crate::error::AppError;
@@ -70,13 +70,13 @@ pub fn launch_session(
 
     // Snapshot opencode's visible sessions before the agent starts, so the
     // post-launch detector only ever adopts a genuinely new id — the newest
-    // global session could belong to any concurrent opencode run.
-    let opencode_before =
-        if pre_assigned_session_id.is_none() && issue.agent_kind == AgentKind::OpenCode {
-            list_opencode_session_ids()
-        } else {
-            HashSet::new()
-        };
+    // global session could belong to any concurrent opencode run. (OpenCode
+    // never pre-assigns an id, so agent kind alone gates the snapshot.)
+    let opencode_before = if issue.agent_kind == AgentKind::OpenCode {
+        list_opencode_session_ids()
+    } else {
+        HashSet::new()
+    };
 
     tmux::send_keys(&session_name, &agent_cmd)?;
 
@@ -111,14 +111,10 @@ pub fn terminate_session(project_root: &Path, session_name: &str) -> bool {
 }
 
 /// Build the setup-script prefix for a launch command, if applicable.
-/// The setup script runs once per worktree: `setup_ran` is set when a launch
-/// command including this prefix is sent and cleared by `attach_worktree`,
-/// so a fresh checkout (re-attach after prune or an orchestrator round-trip)
-/// runs it again, while agent switches within the same worktree don't.
-/// Deliberately not derived from `sessions` — recorded ids outlive the
-/// worktree they were created in. The script itself is user-authored shell
-/// and is inserted verbatim; the worktree dir is escaped. The tmux session's
-/// cwd is the project root, so the relative worktree dir resolves correctly.
+/// Skipped once `setup_ran` is set — see `Issue::attach_worktree` for the
+/// once-per-worktree rule. The script itself is user-authored shell and is
+/// inserted verbatim; the worktree dir is escaped. The tmux session's cwd is
+/// the project root, so the relative worktree dir resolves correctly.
 fn setup_prefix(issue: &Issue, config: &AppConfig) -> Option<String> {
     if issue.setup_ran {
         return None;
@@ -416,38 +412,60 @@ fn detect_opencode_session_id(before: &HashSet<String>) -> Option<String> {
     None
 }
 
-/// Attribute a legacy (pre-map) UUID session id to the agent that minted it.
-/// Codex and Pi transcripts are enumerable on disk, so an id found there is
-/// re-keyed even when the issue pointed at a different agent (the pre-map
-/// bug left such mismatches behind). Claude has no cheap index, so it is
-/// assumed only when the issue already pointed at Claude. `None` = drop.
-pub fn attribute_legacy_uuid(
-    sid: &str,
-    current: AgentKind,
-    project_root: &Path,
-) -> Option<AgentKind> {
-    let codex_ids = codex_sessions_root()
-        .map(|root| collect_codex_session_ids(&root))
-        .unwrap_or_default();
-    let pi_ids = pi_sessions_dir(project_root)
-        .map(|dir| collect_pi_session_ids(&dir))
-        .unwrap_or_default();
-    attribute_uuid_against_stores(sid, current, &codex_ids, &pi_ids)
+/// Attributes legacy (pre-map) session ids to the agent that minted them,
+/// snapshotting the enumerable transcript stores at most once — collection
+/// walks `~/.codex/sessions` and the Pi session dir, so it only happens if a
+/// legacy UUID actually needs attributing.
+pub struct LegacySessionStores {
+    project_root: PathBuf,
+    stores: Option<(HashSet<String>, HashSet<String>)>,
+}
+
+impl LegacySessionStores {
+    pub fn new(project_root: &Path) -> Self {
+        LegacySessionStores {
+            project_root: project_root.to_path_buf(),
+            stores: None,
+        }
+    }
+
+    /// Attribute a legacy session id to the agent that minted it. OpenCode
+    /// ids are "ses_"-prefixed; the UUID agents are told apart via their
+    /// on-disk transcript stores — an id found there is re-keyed even when
+    /// the issue pointed at a different agent (the pre-map bug left such
+    /// mismatches behind). Claude has no cheap index, so it is assumed only
+    /// when the issue already pointed at Claude. `None` = drop the id.
+    pub fn attribute(&mut self, sid: &str, current: AgentKind) -> Option<AgentKind> {
+        if sid.starts_with("ses_") {
+            return Some(AgentKind::OpenCode);
+        }
+        if !is_uuid_like(sid) {
+            return None;
+        }
+        let (codex_ids, pi_ids) = self.stores.get_or_insert_with(|| {
+            (
+                codex_sessions_root()
+                    .map(|root| collect_codex_session_ids(&root))
+                    .unwrap_or_default(),
+                pi_sessions_dir(&self.project_root)
+                    .map(|dir| collect_pi_session_ids(&dir))
+                    .unwrap_or_default(),
+            )
+        });
+        attribute_uuid_against_stores(sid, current, codex_ids, pi_ids)
+    }
 }
 
 fn attribute_uuid_against_stores(
     sid: &str,
     current: AgentKind,
-    codex_ids: &HashMap<String, SystemTime>,
-    pi_ids: &HashMap<String, SystemTime>,
+    codex_ids: &HashSet<String>,
+    pi_ids: &HashSet<String>,
 ) -> Option<AgentKind> {
-    if !is_uuid_like(sid) {
-        return None;
-    }
-    if codex_ids.contains_key(sid) {
+    if codex_ids.contains(sid) {
         return Some(AgentKind::Codex);
     }
-    if pi_ids.contains_key(sid) {
+    if pi_ids.contains(sid) {
         return Some(AgentKind::Pi);
     }
     // Not in an enumerable store: trust Claude ownership only when the issue
@@ -466,35 +484,37 @@ fn codex_sessions_root() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".codex").join("sessions"))
 }
 
-/// Detect a newly created Codex session UUID by scanning ~/.codex/sessions.
-/// Snapshots existing sessions before waiting, then polls for a new one.
-fn detect_codex_session_id() -> Option<String> {
-    let sessions_root = codex_sessions_root()?;
-
-    let before = collect_codex_session_ids(&sessions_root);
-
+/// Sleep 800ms for the agent to create its session, then poll ~5s for an id
+/// the pre-launch snapshot lacks. Only a genuinely new id is trusted: the
+/// globally newest one could be any unrelated conversation (concurrent runs,
+/// or a launch that failed or was killed mid-flight), and returning None
+/// just means the next launch starts fresh instead of resuming a foreign
+/// session.
+fn poll_for_new_session_id(
+    before: &HashSet<String>,
+    snapshot: impl Fn() -> HashSet<String>,
+) -> Option<String> {
     std::thread::sleep(Duration::from_millis(800));
 
     for _ in 0..9 {
-        let after = collect_codex_session_ids(&sessions_root);
-        for id in after.keys() {
-            if !before.contains_key(id) {
-                return Some(id.clone());
-            }
+        if let Some(id) = snapshot().into_iter().find(|id| !before.contains(id)) {
+            return Some(id);
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-
-    // No new session appeared — the launch may have failed or been killed
-    // mid-flight. The globally newest id here could be any unrelated
-    // conversation, so give up; a missed id just means the next launch
-    // starts fresh instead of resuming a foreign session.
     None
 }
 
-/// Collect all Codex session IDs and their modification times.
-fn collect_codex_session_ids(sessions_root: &Path) -> HashMap<String, SystemTime> {
-    let mut sessions = HashMap::new();
+/// Detect a newly created Codex session UUID by scanning ~/.codex/sessions.
+fn detect_codex_session_id() -> Option<String> {
+    let sessions_root = codex_sessions_root()?;
+    let before = collect_codex_session_ids(&sessions_root);
+    poll_for_new_session_id(&before, || collect_codex_session_ids(&sessions_root))
+}
+
+/// Collect all Codex session IDs.
+fn collect_codex_session_ids(sessions_root: &Path) -> HashSet<String> {
+    let mut sessions = HashSet::new();
     let mut stack = vec![sessions_root.to_path_buf()];
 
     while let Some(dir) = stack.pop() {
@@ -513,10 +533,7 @@ fn collect_codex_session_ids(sessions_root: &Path) -> HashMap<String, SystemTime
             let Some(session_id) = parse_codex_session_id_from_filename(file_name) else {
                 continue;
             };
-            let modified = fs::metadata(&path)
-                .and_then(|meta| meta.modified())
-                .unwrap_or(UNIX_EPOCH);
-            sessions.insert(session_id, modified);
+            sessions.insert(session_id);
         }
     }
 
@@ -550,29 +567,12 @@ fn is_uuid_like(value: &str) -> bool {
 }
 
 /// Detect a newly created Pi session UUID by scanning Pi's per-cwd session
-/// directory. Snapshots existing sessions before waiting, then polls for a new
-/// one. Pi stores sessions under `<sessions_root>/--<cwd>--/` as
+/// directory. Pi stores sessions under `<sessions_root>/--<cwd>--/` as
 /// `<timestamp>_<uuid>.jsonl`, where `<cwd>` has `/` replaced by `-`.
 fn detect_pi_session_id(project_root: &Path) -> Option<String> {
     let sessions_dir = pi_sessions_dir(project_root)?;
-
     let before = collect_pi_session_ids(&sessions_dir);
-
-    std::thread::sleep(Duration::from_millis(800));
-
-    for _ in 0..9 {
-        let after = collect_pi_session_ids(&sessions_dir);
-        for id in after.keys() {
-            if !before.contains_key(id) {
-                return Some(id.clone());
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    // No new session appeared — same reasoning as the Codex detector: the
-    // newest pre-existing id could be a foreign conversation, so give up.
-    None
+    poll_for_new_session_id(&before, || collect_pi_session_ids(&sessions_dir))
 }
 
 /// Resolve Pi's session directory for a given working directory.
@@ -597,9 +597,9 @@ fn pi_sessions_dir(project_root: &Path) -> Option<PathBuf> {
     )
 }
 
-/// Collect Pi session UUIDs and their modification times from a session dir.
-fn collect_pi_session_ids(sessions_dir: &Path) -> HashMap<String, SystemTime> {
-    let mut sessions = HashMap::new();
+/// Collect Pi session UUIDs from a session dir.
+fn collect_pi_session_ids(sessions_dir: &Path) -> HashSet<String> {
+    let mut sessions = HashSet::new();
     let Ok(entries) = fs::read_dir(sessions_dir) else {
         return sessions;
     };
@@ -614,10 +614,7 @@ fn collect_pi_session_ids(sessions_dir: &Path) -> HashMap<String, SystemTime> {
         let Some(session_id) = parse_pi_session_id_from_filename(file_name) else {
             continue;
         };
-        let modified = fs::metadata(&path)
-            .and_then(|meta| meta.modified())
-            .unwrap_or(UNIX_EPOCH);
-        sessions.insert(session_id, modified);
+        sessions.insert(session_id);
     }
     sessions
 }
@@ -634,7 +631,7 @@ fn parse_pi_session_id_from_filename(file_name: &str) -> Option<String> {
 }
 
 /// Run `opencode session list` and return every session ID found.
-/// Session IDs start with "ses_", one per line, newest first.
+/// Session IDs start with "ses_", one per line.
 fn list_opencode_session_ids() -> HashSet<String> {
     let Ok(output) = Command::new("opencode").args(["session", "list"]).output() else {
         return HashSet::new();
@@ -1781,69 +1778,54 @@ mod tests {
         assert!(parse_all_session_ids(output).is_empty());
     }
 
-    // --- legacy UUID attribution ---
-
-    fn store_with(id: &str) -> HashMap<String, SystemTime> {
-        let mut store = HashMap::new();
-        store.insert(id.to_string(), UNIX_EPOCH);
-        store
-    }
+    // --- legacy session attribution ---
 
     const LEGACY_UUID: &str = "019d76ad-9734-77c0-8169-a727a5524013";
 
-    #[test]
-    fn legacy_uuid_in_codex_store_rekeys_to_codex() {
-        // The pre-map bug could leave a codex-minted id under agent claude.
-        let owner = attribute_uuid_against_stores(
-            LEGACY_UUID,
-            AgentKind::Claude,
-            &store_with(LEGACY_UUID),
-            &HashMap::new(),
-        );
-        assert_eq!(owner, Some(AgentKind::Codex));
+    /// Attribution of LEGACY_UUID with each store either holding it or empty.
+    fn owner_of(current: AgentKind, in_codex: bool, in_pi: bool) -> Option<AgentKind> {
+        let store = |present: bool| -> HashSet<String> {
+            if present {
+                HashSet::from([LEGACY_UUID.to_string()])
+            } else {
+                HashSet::new()
+            }
+        };
+        attribute_uuid_against_stores(LEGACY_UUID, current, &store(in_codex), &store(in_pi))
     }
 
     #[test]
-    fn legacy_uuid_in_pi_store_rekeys_to_pi() {
-        let owner = attribute_uuid_against_stores(
-            LEGACY_UUID,
-            AgentKind::Codex,
-            &HashMap::new(),
-            &store_with(LEGACY_UUID),
+    fn legacy_uuid_attribution_follows_stores_then_claude() {
+        // The pre-map bug could leave another agent's id under any current
+        // agent; the transcript stores decide, claude is the only fallback.
+        assert_eq!(
+            owner_of(AgentKind::Claude, true, false),
+            Some(AgentKind::Codex)
         );
-        assert_eq!(owner, Some(AgentKind::Pi));
-    }
-
-    #[test]
-    fn legacy_uuid_not_in_stores_trusted_only_under_claude() {
-        let owner = attribute_uuid_against_stores(
-            LEGACY_UUID,
-            AgentKind::Claude,
-            &HashMap::new(),
-            &HashMap::new(),
+        assert_eq!(owner_of(AgentKind::Codex, false, true), Some(AgentKind::Pi));
+        assert_eq!(
+            owner_of(AgentKind::Claude, false, false),
+            Some(AgentKind::Claude)
         );
-        assert_eq!(owner, Some(AgentKind::Claude));
-
         for current in [AgentKind::OpenCode, AgentKind::Codex, AgentKind::Pi] {
-            let owner = attribute_uuid_against_stores(
-                LEGACY_UUID,
-                current,
-                &HashMap::new(),
-                &HashMap::new(),
+            assert_eq!(
+                owner_of(current, false, false),
+                None,
+                "unattributable id must drop under {current}"
             );
-            assert_eq!(owner, None, "unattributable id must drop under {current}");
         }
     }
 
     #[test]
-    fn legacy_non_uuid_is_dropped() {
-        let owner = attribute_uuid_against_stores(
-            "not-a-uuid",
-            AgentKind::Claude,
-            &HashMap::new(),
-            &HashMap::new(),
+    fn legacy_attribution_shape_checks_precede_store_lookups() {
+        // ses_ ids and non-uuid garbage resolve without touching the stores
+        // (a nonexistent project root would otherwise collect empty sets).
+        let mut stores = LegacySessionStores::new(Path::new("/nonexistent"));
+        assert_eq!(
+            stores.attribute("ses_abc123", AgentKind::Claude),
+            Some(AgentKind::OpenCode)
         );
-        assert_eq!(owner, None);
+        assert_eq!(stores.attribute("not-a-uuid", AgentKind::Claude), None);
     }
 
     #[test]
