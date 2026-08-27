@@ -175,19 +175,6 @@ impl Project {
         self.state_dirty = true;
     }
 
-    /// Names of all known worktrees other than `main/`, deduped across the
-    /// live and frozen git poll caches. This is the single definition of
-    /// "a prunable worktree" — the prune dialog and the auto-prune prompt
-    /// both count from here.
-    pub fn prunable_worktree_names(&self) -> HashSet<&String> {
-        self.live
-            .worktree_branches
-            .keys()
-            .chain(self.live.frozen_worktree_branches.keys())
-            .filter(|n| n.as_str() != "main")
-            .collect()
-    }
-
     pub fn to_state(&self) -> AppState {
         AppState {
             issues: self.issues.clone(),
@@ -5592,7 +5579,15 @@ mod tests {
 
     // Orphan + clean => seeded action is Remove.
     fn make_candidate(name: &str) -> PruneCandidate {
-        PruneCandidate::new(name.to_string(), None, None, false)
+        PruneCandidate::new(
+            name.to_string(),
+            Some(crate::types::WorktreeStatus {
+                staged: 0,
+                unstaged: 0,
+            }),
+            None,
+            false,
+        )
     }
 
     // Dirty => seeded action is Keep.
@@ -5712,88 +5707,67 @@ mod tests {
     }
 
     // ================================================================
-    // scan_candidates
+    // build_candidates (name discovery itself is disk-based and tested
+    // in prune.rs; these cover the live-cache enrichment)
     // ================================================================
 
     #[test]
-    fn scan_candidates_excludes_main() {
-        let mut app = test_app(vec![]);
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("main".into(), "main".into());
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("wt-1".into(), "feature/x".into());
-        let candidates = crate::prune::scan_candidates(app.project());
+    fn build_candidates_without_poll_data_defaults_keep() {
+        let app = test_app(vec![]);
+        let candidates = crate::prune::build_candidates(app.project(), vec!["wt-1".into()]);
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].worktree, "wt-1");
+        // Status unknown (poll hasn't reached it) => never pre-selected.
+        assert!(candidates[0].status.is_none());
+        assert_eq!(candidates[0].action, PruneAction::Keep);
     }
 
     #[test]
-    fn scan_candidates_dedups_live_and_frozen() {
+    fn build_candidates_reads_status_from_live_cache() {
         let mut app = test_app(vec![]);
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("wt-1".into(), "b1".into());
-        // Same worktree also appears as frozen (e.g. issue moved to Done).
-        app.project_mut()
-            .live
-            .frozen_worktree_branches
-            .insert("wt-1".into(), "b1".into());
-        let candidates = crate::prune::scan_candidates(app.project());
-        assert_eq!(candidates.len(), 1, "dup should be collapsed");
-    }
-
-    #[test]
-    fn scan_candidates_includes_frozen_only_entries() {
-        let mut app = test_app(vec![]);
-        app.project_mut()
-            .live
-            .frozen_worktree_branches
-            .insert("wt-frozen".into(), "old/branch".into());
-        let candidates = crate::prune::scan_candidates(app.project());
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].worktree, "wt-frozen");
-    }
-
-    #[test]
-    fn scan_candidates_links_to_matching_issue() {
-        let mut issue = test_issue("bork-1", Column::Done);
-        issue.worktree = Some("wt-1".into());
-        let mut app = test_app(vec![issue]);
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("wt-1".into(), "feature/x".into());
-        let candidates = crate::prune::scan_candidates(app.project());
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].issue_id.as_deref(), Some("bork-1"));
-        assert_eq!(candidates[0].issue_column, Some(Column::Done));
-        // Done + clean + no session => default Remove
+        app.project_mut().live.worktree_statuses.insert(
+            "wt-1".into(),
+            WorktreeStatus {
+                staged: 0,
+                unstaged: 0,
+            },
+        );
+        let candidates = crate::prune::build_candidates(app.project(), vec!["wt-1".into()]);
+        // Known-clean orphan => pre-selected for removal.
         assert_eq!(candidates[0].action, PruneAction::Remove);
     }
 
     #[test]
-    fn scan_candidates_sorts_by_worktree_name() {
+    fn build_candidates_falls_back_to_frozen_status() {
         let mut app = test_app(vec![]);
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("zebra".into(), "z".into());
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("alpha".into(), "a".into());
-        app.project_mut()
-            .live
-            .worktree_branches
-            .insert("mango".into(), "m".into());
-        let candidates = crate::prune::scan_candidates(app.project());
-        let names: Vec<&str> = candidates.iter().map(|c| c.worktree.as_str()).collect();
-        assert_eq!(names, vec!["alpha", "mango", "zebra"]);
+        app.project_mut().live.frozen_worktree_statuses.insert(
+            "wt-frozen".into(),
+            WorktreeStatus {
+                staged: 0,
+                unstaged: 2,
+            },
+        );
+        let candidates = crate::prune::build_candidates(app.project(), vec!["wt-frozen".into()]);
+        assert!(candidates[0].is_dirty());
+        assert_eq!(candidates[0].action, PruneAction::Keep);
+    }
+
+    #[test]
+    fn build_candidates_links_to_matching_issue() {
+        let mut issue = test_issue("bork-1", Column::Done);
+        issue.worktree = Some("wt-1".into());
+        let mut app = test_app(vec![issue]);
+        app.project_mut().live.worktree_statuses.insert(
+            "wt-1".into(),
+            WorktreeStatus {
+                staged: 0,
+                unstaged: 0,
+            },
+        );
+        let candidates = crate::prune::build_candidates(app.project(), vec!["wt-1".into()]);
+        assert_eq!(candidates[0].issue_id.as_deref(), Some("bork-1"));
+        assert_eq!(candidates[0].issue_column, Some(Column::Done));
+        // Done + clean + no session => default Remove
+        assert_eq!(candidates[0].action, PruneAction::Remove);
     }
 
     fn linked_issue(id: &str, links: &[&str]) -> Issue {

@@ -463,12 +463,9 @@ impl Issue {
     /// silently resume the old agent with the previous kind's prompt.
     #[must_use]
     pub fn set_kind(&mut self, kind: IssueKind) -> bool {
-        let previous = self.kind;
+        let resets_session = self.kind_change_resets_session(kind);
         self.kind = kind;
-        if kind == previous {
-            return false;
-        }
-        if kind != IssueKind::Orchestrator && previous != IssueKind::Orchestrator {
+        if !resets_session {
             return false;
         }
         self.sessions.clear();
@@ -487,6 +484,15 @@ impl Issue {
         let changed = kind != self.agent_kind;
         self.agent_kind = kind;
         changed
+    }
+
+    /// Whether changing to `kind` crosses the orchestrator boundary, i.e. the
+    /// issue's live session must be killed before committing the change (a
+    /// re-attached session would resume the old agent with the previous
+    /// kind's prompt and cwd). Single owner of the rule `set_kind` and its
+    /// callers act on.
+    pub fn kind_change_resets_session(&self, kind: IssueKind) -> bool {
+        (self.kind == IssueKind::Orchestrator) != (kind == IssueKind::Orchestrator)
     }
 
     pub fn has_linear(&self) -> bool {

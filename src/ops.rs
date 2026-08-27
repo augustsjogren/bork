@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config;
-use crate::external::{opencode, tmux};
+use crate::external::opencode;
 use crate::types::{AgentKind, AgentMode, Column, Issue, IssueKind};
 use crate::ui::styles::truncate;
 use crate::worktree;
@@ -248,13 +248,11 @@ pub fn update_issue(
 
     if session_stale {
         // Kill any live session so it isn't re-attached with the old kind's
-        // prompt and cwd, or the old agent's process. Best effort; a session
-        // that survives the kill is surfaced but doesn't block the update.
+        // prompt and cwd, or the old agent's process. A failed cleanup
+        // aborts here, before the state is persisted below, so it cannot
+        // leave an untracked old agent running against saved changes.
         let config = config::load_config_from(project_root);
-        let session_name = issue.session_name(&config.project_name);
-        if !opencode::terminate_session(project_root, &session_name) {
-            eprintln!("Warning: session '{session_name}' is still alive after kill");
-        }
+        opencode::terminate_session(project_root, &issue.session_name(&config.project_name))?;
     }
 
     let updated = issue.clone();
@@ -268,6 +266,10 @@ pub fn delete_issue(project_root: &Path, issue_id: &str) -> anyhow::Result<Issue
 
     let idx = find_issue_index(&state.issues, issue_id)
         .ok_or_else(|| anyhow::anyhow!("Issue '{}' not found", issue_id))?;
+
+    let config = config::load_config_from(project_root);
+    let session_name = state.issues[idx].session_name(&config.project_name);
+    opencode::terminate_session(project_root, &session_name)?;
 
     let removed = state.issues.remove(idx);
     remove_link_references(&mut state.issues, &removed.id);
@@ -591,10 +593,7 @@ pub fn archive_issue(
     let issue = state.issues[idx].clone();
 
     let session_name = issue.session_name(&app_config.project_name);
-    let session_killed = tmux::session_exists(&session_name);
-    // Also removes the transient status file, which the old inline kill here
-    // forgot — leaving cards showing a dead agent after archive.
-    let _ = opencode::terminate_session(project_root, &session_name);
+    let session_killed = opencode::terminate_session(project_root, &session_name)?;
 
     let worktree_removed = match issue.worktree.as_deref() {
         Some(dir) => {
@@ -1010,8 +1009,17 @@ mod tests {
         )
         .unwrap();
 
+        let status_dir = config::agent_status_dir(root);
+        fs::create_dir_all(&status_dir).unwrap();
+        let status_file = status_dir.join("test-test-1.json");
+        let prompt_file = status_dir.join("prompt-test-test-1.txt");
+        fs::write(&status_file, "{}").unwrap();
+        fs::write(&prompt_file, "prompt").unwrap();
+
         let deleted = delete_issue(root, "test-1").unwrap();
         assert_eq!(deleted.title, "Delete me");
+        assert!(!status_file.exists());
+        assert!(!prompt_file.exists());
 
         let output = list_issues(
             root,

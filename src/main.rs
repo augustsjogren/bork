@@ -17,6 +17,12 @@ mod ui;
 mod update;
 mod worktree;
 
+/// Serializes tests (global_config, init) that mutate the process-global
+/// `XDG_CONFIG_HOME`. One lock per module would not exclude the other
+/// module's tests, so the env races and the assertions flake.
+#[cfg(test)]
+pub(crate) static XDG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -1921,6 +1927,10 @@ fn run_tui() -> anyhow::Result<()> {
                 }
             }
 
+            if let Some((project_id, issue_id)) = result.issue_to_delete {
+                handler::delete_issue_from_app(&mut app, &project_id, &issue_id);
+            }
+
             if let Some(launch_id) = result.launched_issue_id {
                 // A kill during the detection window (x kill, done-TTL)
                 // invalidated whatever this launch produced: the setup may
@@ -2071,14 +2081,18 @@ fn run_tui() -> anyhow::Result<()> {
             let session_name =
                 app.project().issues[idx].session_name(&app.project().config.project_name);
             let project_root = app.project().config.project_root.clone();
-            let sn = session_name.clone();
             let issue_id = app.project().issues[idx].id.clone();
             app.invalidate_inflight_launch(&issue_id);
+            let tx = action_tx.clone();
             app.project_mut().live.active_sessions.remove(&session_name);
             thread::spawn(move || {
-                let _ = external::opencode::terminate_session(&project_root, &sn);
+                let _ = tx.send(handler::terminate_to_result(
+                    &project_root,
+                    &session_name,
+                    format!("Auto-killed session '{}' (done TTL)", session_name),
+                    format!("Session '{}' was already stopped", session_name),
+                ));
             });
-            app.set_message(format!("Auto-killed session '{}' (done TTL)", session_name));
         }
 
         let mut git_data_changed = false;
@@ -2459,7 +2473,7 @@ fn maybe_auto_prune_message(app: &mut app::App) -> Option<String> {
             }
         }
         project.last_auto_prune_check = Some(now_inst);
-        let count = project.prunable_worktree_names().len();
+        let count = prune::discover_worktree_names(&project.config.project_root).len();
         if (count as u64) < project.config.prune_threshold {
             continue;
         }
