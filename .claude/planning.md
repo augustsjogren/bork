@@ -1,59 +1,44 @@
-# Current Work
+# bork-146: clean up zsh and other processes when killing an issue
 
 > Last updated: 2026-08-26
 
-## Active Task
+## Findings
 
-**Task:** bork-148 — Error handling for integrations missing
-**Status:** Implementation complete, reviewed, verified (787 tests + clippy), uncommitted
+- zsh itself is not leaking: the apparent PID 1 children belong to active
+  pane TTYs and exit when tmux closes the pane.
+- Codex, OpenCode, and self-daemonizing commands can outlive the tmux session.
+- `bork issue delete` did not terminate its issue session.
+- `tmux::kill_session` discarded failures and always reported success.
 
-## Problem
+## Implementation
 
-Pressing `o` (open PR) / `O` (open Linear) gave no feedback when the underlying
-command failed (gh missing, unauthenticated, PR gone, no URL handler). The old
-code discarded the `Command` output entirely.
+- Snapshot the POSIX session ID for every tmux pane before teardown, then kill
+  survivors that retain those IDs after the pane closes.
+- On Linux, also identify survivors through the inherited `BORK_SESSION`
+  environment marker so descendants that call `setsid` remain discoverable.
+- Escalate survivor cleanup from SIGTERM to SIGKILL after a grace period.
+- Route issue kill, delete, archive, kind-change, and TTL cleanup through one
+  cleanup function.
+- Validate tmux exit status and clean transient status/prompt files.
+- Preserve issues when teardown fails: CLI delete/archive now return the
+  failure, and TUI delete waits for successful asynchronous cleanup before
+  removing the card.
 
-## Design
+## Status
 
-- New `src/external/browser.rs` with `open_url(url) -> Result<(), String>` —
-  `open` on macOS, `xdg-open` elsewhere; the error is the first non-empty
-  stderr line so it fits the one-row status bar.
-- `Action::OpenPR` / `Action::OpenLinear` in `src/handler.rs` now use the
-  established async-report pattern (`begin_busy()` + `set_message` + spawned
-  thread sends `ActionResult` over `action_tx`), same shape as
-  `OpenTerminal`/`OpenReview`.
-- PRs open via `github::pr_url` (cached repo identity) instead of
-  `gh pr view --web`: no gh network round trip per PR, no `$GH_BROWSER`
-  blocking risk. `github::open_pr_in_browser` deleted.
-- Shared pure `summarize_open_links(noun, total, first_label, failures)` builds
-  the status message: "Opened PR #42" / "Opened 3 PRs" /
-  "Opened 2 of 3 PRs; #2: <err> (+1 more failed)" /
-  "Failed to open PR #42: <err>". Partial failures name what failed so the
-  user knows not to retry the links that worked.
+- [x] Investigation and isolated reproduction
+- [x] Initial implementation and unit tests
+- [x] Sync worktree with current `origin/main`
+- [x] Review cleanup safety and portability
+- [x] Code-review and simplification pass
+- [x] Formatting, clippy, and all 787 tests pass
+- [x] End-to-end test: detached `nohup` processes from two tmux windows are
+      both terminated by `bork issue delete`
 
-## Files
+## Limitation
 
-- `src/external/browser.rs` (new) — `open_url`
-- `src/external/mod.rs` — register module
-- `src/external/github.rs` — remove `open_pr_in_browser`
-- `src/handler.rs` — rewritten OpenPR/OpenLinear arms, `summarize_open_links`
-  + 5 tests on the summarizer
-
-## Progress
-
-- [x] Implementation
-- [x] /code-review: 6 findings, all addressed (partial-failure reporting,
-      stderr first-line only, no real subprocesses in tests, pr_url instead of
-      gh pr view, dedup via shared summarizer)
-- [x] /simplify (4-angle): browser.rs module split, xdg-open fallback, pure
-      summarizer instead of fn-pointer test seam, single ActionResult build
-- [x] cargo build + 787 tests + clippy clean (verified before worktree move)
-- [ ] Commit + PR
-
-## Out of scope (candidate follow-up issues)
-
-- Background polls swallow errors: gh graphql polls return an empty Vec on
-  failure (indistinguishable from "no PRs") and `main.rs` discards Linear poll
-  errors with `unwrap_or_default()`. Needs debouncing to avoid nagging every
-  poll cycle.
-- Unifying stderr-first-line extraction with the inline copy in `prune.rs`.
+On macOS, a process that deliberately calls `setsid` before tmux teardown can
+escape the pane's POSIX session, and the OS does not expose detached-process
+environments to recover the `BORK_SESSION` marker. Such fully daemonized
+services still require the project's `teardown_script`. Normal background and
+`nohup` jobs, agent subprocesses, zsh helpers, and every tmux window are covered.
