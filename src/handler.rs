@@ -10,7 +10,9 @@ use crate::config::AppConfig;
 use crate::external::{browser, github, opencode, tmux, tuicr};
 use crate::global_config::ReloadResult;
 use crate::input::Action;
-use crate::types::{Column, Issue, IssueKind, LinkedGithubPr, LinkedLinear, PrImportSource};
+use crate::types::{
+    AgentKind, Column, Issue, IssueKind, LinkedGithubPr, LinkedLinear, PrImportSource,
+};
 
 pub struct ActionChannels<'a> {
     pub action_tx: &'a mpsc::Sender<ActionResult>,
@@ -20,12 +22,27 @@ pub struct ActionChannels<'a> {
     pub reload_tx: &'a mpsc::Sender<ReloadResult>,
 }
 
+/// A detected agent session id for the issue named by `launched_issue_id`.
+/// Agent and kind are captured at launch time: the id is stored under the
+/// agent that minted it, and a kind change while detection was still polling
+/// means the session was invalidated and must not be recorded.
+pub struct LaunchedSession {
+    pub agent: AgentKind,
+    pub kind: IssueKind,
+    pub session_id: String,
+}
+
+#[derive(Default)]
 pub struct ActionResult {
     pub message: String,
     pub message_kind: MessageKind,
     pub session_to_open: Option<String>,
     pub popup_title: Option<String>,
-    pub session_id: Option<(String, String)>,
+    pub launched_session: Option<LaunchedSession>,
+    /// True when this launch's command included the one-time worktree setup
+    /// prefix, so the issue's `setup_ran` flag must be persisted even if
+    /// session-id detection failed.
+    pub launched_setup_ran: bool,
     /// Set (on success *and* failure) when this result completes a session
     /// launch, so the main loop can clear the in-flight guard for the issue.
     pub launched_issue_id: Option<String>,
@@ -33,21 +50,6 @@ pub struct ActionResult {
     pub prune_outcome: Option<(crate::app::ProjectId, crate::prune::PruneOutcome)>,
     /// Remove this issue only after its asynchronous session teardown succeeds.
     pub issue_to_delete: Option<(ProjectId, String)>,
-}
-
-impl Default for ActionResult {
-    fn default() -> Self {
-        Self {
-            message: String::new(),
-            message_kind: MessageKind::Info,
-            session_to_open: None,
-            popup_title: None,
-            session_id: None,
-            launched_issue_id: None,
-            prune_outcome: None,
-            issue_to_delete: None,
-        }
-    }
 }
 
 pub enum PostAction {
@@ -276,6 +278,7 @@ fn handle_normal(
                 format!("Kill session '{}'? (y/n)", session_name),
                 ConfirmAction::KillSession {
                     session_name,
+                    issue_id: issue.id.clone(),
                     project_id: ctx.project_id.clone(),
                 },
             );
@@ -849,29 +852,73 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
 
     let proj_id = ctx.project_id.clone();
 
-    if let Some(idx) = dialog.editing_index {
+    if dialog.editing_index.is_some() {
+        // Only apply the dialog's agent when the user actually moved the
+        // picker. An untouched picker's value can be wrong two ways: a
+        // normalized fallback for an unavailable stored agent, or stale
+        // against a concurrent CLI agent change — silently writing it back
+        // would flip the issue while the live session keeps running the real
+        // agent's process.
+        let picker_moved = dialog.agent_kind != dialog.initial_agent_kind;
+
+        let Some(p) = app.find_project(&proj_id) else {
+            app.set_warning("Project no longer available");
+            return;
+        };
+        // Resolve by ID, not the index captured at dialog-open: background
+        // merges can reorder or remove issues while the dialog is up, and a
+        // stale index would edit (and kill the session of) the wrong issue.
+        let idx = dialog.editing_issue_id.as_deref().and_then(|id| {
+            let lower = id.to_lowercase();
+            p.issues.iter().position(|i| i.id.to_lowercase() == lower)
+        });
+
+        // An in-flight launch is still detecting its session id; killing the
+        // session out from under it wastes the launch and leaves its result
+        // describing a dead pane. Block the destructive edits until the
+        // launch settles.
+        if let Some(idx) = idx {
+            let issue = &p.issues[idx];
+            let switches_agent = picker_moved && dialog.agent_kind != issue.agent_kind;
+            let crosses_boundary =
+                (issue.kind == IssueKind::Orchestrator) != (dialog.kind == IssueKind::Orchestrator);
+            if (switches_agent || crosses_boundary) && app.launches_in_flight.contains(&issue.id) {
+                app.set_warning("Launch in progress; wait for it before switching agent or kind");
+                return;
+            }
+        }
+
         let Some(p) = app.find_project_mut(&proj_id) else {
             app.set_warning("Project no longer available");
             return;
         };
-        if idx < p.issues.len() {
+        if let Some(idx) = idx {
             let session_name = p.issues[idx].session_name(&p.config.project_name);
             let detached_worktree = p.issues[idx].worktree.clone();
             let crossed_orchestrator_boundary =
                 p.issues[idx].kind_change_resets_session(dialog.kind);
+            let agent_changed = picker_moved && dialog.agent_kind != p.issues[idx].agent_kind;
 
-            if crossed_orchestrator_boundary {
+            if crossed_orchestrator_boundary || agent_changed {
+                // A live session would otherwise be re-attached with the old
+                // kind's prompt and cwd, or the old agent's process. Kill it
+                // before committing the edit so a failed cleanup can't leave
+                // an untracked old agent running, and drop the cached
+                // liveness so relaunch works before the next 2s tmux poll.
                 if let Err(e) = opencode::terminate_session(&p.config.project_root, &session_name) {
                     app.set_error(format!("Failed to reset session: {e}"));
                     return;
                 }
+                p.live.active_sessions.remove(&session_name);
             }
 
             p.issues[idx].title = title;
             p.issues[idx].prompt = prompt;
-            p.issues[idx].agent_kind = dialog.agent_kind;
+            if picker_moved {
+                let _ = p.issues[idx].set_agent_kind(dialog.agent_kind);
+            }
             p.issues[idx].agent_mode = dialog.agent_mode;
-            p.issues[idx].set_kind(dialog.kind);
+            let _ = p.issues[idx].set_kind(dialog.kind);
 
             apply_linear_fields(&mut p.issues[idx], &dialog);
             apply_pr_fields(&mut p.issues[idx], &dialog);
@@ -887,9 +934,16 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
                     )),
                     None => app.set_message(format!("Updated {} (session reset)", updated_id)),
                 }
+            } else if agent_changed {
+                app.set_message(format!(
+                    "Updated {} (switched to {}, other sessions kept)",
+                    updated_id, dialog.agent_kind
+                ));
             } else {
                 app.set_message(format!("Updated {}", updated_id));
             }
+        } else {
+            app.set_warning("Issue no longer exists");
         }
         return;
     }
@@ -1426,6 +1480,7 @@ fn handle_confirm(
                 match confirm_action {
                     ConfirmAction::KillSession {
                         session_name,
+                        issue_id,
                         project_id,
                     } => {
                         let Some(project) = app.find_project(&project_id) else {
@@ -1433,6 +1488,7 @@ fn handle_confirm(
                             return;
                         };
                         let project_root = project.config.project_root.clone();
+                        app.invalidate_inflight_launch(&issue_id);
                         app.begin_busy();
                         let tx = action_tx.clone();
 
@@ -1465,6 +1521,7 @@ fn handle_confirm(
                         let id = issue.id.clone();
                         let project_root = p.config.project_root.clone();
 
+                        app.invalidate_inflight_launch(&issue_id);
                         app.begin_busy();
                         let tx = action_tx.clone();
                         thread::spawn(move || {
@@ -1520,11 +1577,16 @@ pub fn delete_issue_from_app(app: &mut App, project_id: &ProjectId, issue_id: &s
 
 fn launch_and_report(issue: Issue, config: AppConfig) -> ActionResult {
     match opencode::launch_session(&issue, &config) {
-        Ok((session_name, agent_sid)) => ActionResult {
+        Ok((session_name, agent_sid, setup_ran)) => ActionResult {
+            launched_setup_ran: setup_ran,
             message: format!("Session '{}' started", session_name),
             session_to_open: Some(session_name),
-            session_id: agent_sid.map(|sid| (issue.id.clone(), sid)),
-            launched_issue_id: Some(issue.id.clone()),
+            launched_session: agent_sid.map(|sid| LaunchedSession {
+                agent: issue.agent_kind,
+                kind: issue.kind,
+                session_id: sid,
+            }),
+            launched_issue_id: Some(issue.id),
             ..Default::default()
         },
         Err(e) => ActionResult {
@@ -2058,6 +2120,39 @@ mod tests {
         handle_action(&mut app, Action::DialogSubmit, &ctx, &test_channels());
         assert_eq!(app.input_mode, crate::app::InputMode::Normal);
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn untouched_dialog_keeps_concurrent_agent_change() {
+        let mut app = test_app();
+        app.project_mut()
+            .issues
+            .push(test_issue_titled("bork-1", "Test issue", Column::Todo));
+
+        let ctx = app.action_context();
+        let issue = app.project().issues[0].clone();
+        app.open_edit_dialog(&issue, 0, &ctx);
+
+        // While the dialog is open, a CLI edit lands via the state merge and
+        // switches the issue's agent to something else.
+        let concurrent_agent = if issue.agent_kind == AgentKind::Claude {
+            AgentKind::OpenCode
+        } else {
+            AgentKind::Claude
+        };
+        let _ = app.project_mut().issues[0].set_agent_kind(concurrent_agent);
+        app.project_mut().issues[0]
+            .sessions
+            .insert(concurrent_agent, "ses_live".to_string());
+
+        // Submitting the untouched dialog must not write its stale agent
+        // back over the concurrent change (or kill the live session).
+        handle_action(&mut app, Action::DialogSubmit, &ctx, &test_channels());
+        assert_eq!(app.project().issues[0].agent_kind, concurrent_agent);
+        assert_eq!(
+            app.project().issues[0].current_session_id(),
+            Some("ses_live")
+        );
     }
 
     // ================================================================
