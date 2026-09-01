@@ -35,6 +35,7 @@ pub struct LinearPollResult {
 /// Linear publishes no CLI, so a personal API key is the path most users have.
 /// A `linear` binary is still preferred when one is on PATH, so anyone who
 /// wrote or installed one keeps their existing setup and its own auth.
+#[derive(Debug, PartialEq, Eq)]
 enum Transport {
     Cli,
     Api(String),
@@ -57,10 +58,17 @@ fn api_key() -> Option<String> {
 }
 
 fn transport() -> Option<Transport> {
-    if cli_available() {
+    select_transport(cli_available(), api_key())
+}
+
+/// A `linear` command wins over the API, so an existing wrapper keeps its own
+/// auth and behaviour. Split from [`transport`] so the precedence is testable
+/// without spawning a process.
+fn select_transport(cli_present: bool, key: Option<String>) -> Option<Transport> {
+    if cli_present {
         return Some(Transport::Cli);
     }
-    api_key().map(Transport::Api)
+    key.map(Transport::Api)
 }
 
 pub fn check_available() -> bool {
@@ -116,6 +124,10 @@ fn run_via_cli(query: &str) -> Result<String, AppError> {
 /// The request is fed to curl as a config file on stdin: an `-H` argument would
 /// put the API key in the process table for anything running `ps` to read.
 ///
+/// Deliberately no `--fail`: Linear returns auth and scope failures as a 4xx
+/// whose body still carries the GraphQL `errors` array, and `--fail` would
+/// discard that body, turning a precise message into an exit code.
+///
 /// The timeouts are load-bearing. One poll worker serves Linear for the whole
 /// session, so an unbounded request that never returns stops every later poll
 /// with the thread still alive and nothing on screen to say so.
@@ -164,6 +176,10 @@ fn run_via_api(key: &str, query: &str) -> Result<String, AppError> {
 
 /// A curl config file for one POST. Values are double-quoted, so backslashes
 /// and quotes inside the JSON body have to be escaped or curl truncates it.
+///
+/// The key goes in `Authorization` raw, with no `Bearer` prefix: that is the
+/// format Linear personal API keys use. OAuth tokens need `Bearer`, so this
+/// looks like an omission and is not.
 fn curl_config(key: &str, body: &str) -> String {
     format!(
         concat!(
@@ -179,6 +195,9 @@ fn curl_config(key: &str, body: &str) -> String {
     )
 }
 
+/// Escapes for curl's double-quoted config values. Assumes single-line input:
+/// a literal newline would end the value early. Safe here because the body is
+/// built by `serde_json`, which escapes newlines as `\n`.
 fn escape_for_config(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -197,11 +216,19 @@ fn parse_issues(body: &str) -> Result<Vec<LinearIssue>, AppError> {
     })?;
 
     if let Some(errors) = value.get("errors").and_then(|e| e.as_array()) {
-        let messages: Vec<&str> = errors
-            .iter()
-            .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
-            .collect();
-        if !messages.is_empty() {
+        if !errors.is_empty() {
+            let messages: Vec<&str> = errors
+                .iter()
+                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                .collect();
+            // Errors without an extractable message still mean failure. Falling
+            // through would deserialize a null `data` and report a shape
+            // mismatch, which is the confusion this function exists to prevent.
+            if messages.is_empty() {
+                return Err(AppError::Linear(
+                    "Linear returned errors with no message".to_string(),
+                ));
+            }
             return Err(AppError::Linear(messages.join("; ")));
         }
     }
@@ -281,6 +308,48 @@ struct IssueTeam {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cli_wins_over_a_configured_key() {
+        // The precedence is the contract the fallback hinges on: someone with a
+        // wrapper keeps their own auth even after setting a key.
+        assert_eq!(
+            select_transport(true, Some("lin_api_key".into())),
+            Some(Transport::Cli)
+        );
+    }
+
+    #[test]
+    fn the_key_is_used_when_no_cli_exists() {
+        assert_eq!(
+            select_transport(false, Some("lin_api_key".into())),
+            Some(Transport::Api("lin_api_key".into()))
+        );
+    }
+
+    #[test]
+    fn neither_configured_is_unavailable() {
+        assert_eq!(select_transport(false, None), None);
+    }
+
+    #[test]
+    fn parse_reports_errors_that_carry_no_message() {
+        // A non-empty errors array is a failure even when nothing readable can
+        // be pulled out of it; falling through would blame the response shape.
+        let err = parse_issues(r#"{"errors":[{"extensions":{"code":"X"}}],"data":null}"#)
+            .expect_err("a non-empty errors array is a failure");
+
+        assert!(err.to_string().contains("no message"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_ignores_an_empty_errors_array() {
+        let body = r#"{"errors":[],"data":{"viewer":{"assignedIssues":{"nodes":[]}}}}"#;
+
+        assert!(parse_issues(body)
+            .expect("empty errors is not a failure")
+            .is_empty());
+    }
 
     #[test]
     fn config_escapes_the_json_body() {
