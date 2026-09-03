@@ -58,6 +58,9 @@ pub struct AppConfig {
     pub debug: bool,
     /// Auto-create issues from PRs the user has been requested to review.
     pub auto_import_reviews: bool,
+    /// Import open draft PRs too. They land in In Progress rather than Code
+    /// Review: a draft is work in flight, not something to review.
+    pub auto_import_draft_prs: bool,
     /// Auto-create issues from PRs the user has authored.
     pub auto_import_authored_prs: bool,
     /// Allowed agents for this project, if explicitly configured.
@@ -183,6 +186,7 @@ impl Default for AppConfig {
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             auto_import_reviews: true,
+            auto_import_draft_prs: false,
             auto_import_authored_prs: true,
             agents_allowlist: None,
             prune_threshold: DEFAULT_PRUNE_THRESHOLD,
@@ -302,6 +306,7 @@ pub struct PartialConfig {
     pub done_session_ttl: Option<u64>,
     pub debug: Option<bool>,
     pub auto_import_reviews: Option<bool>,
+    pub auto_import_draft_prs: Option<bool>,
     pub auto_import_authored_prs: Option<bool>,
     pub agents_allowlist: Option<Vec<AgentKind>>,
     pub prune_threshold: Option<u64>,
@@ -369,6 +374,7 @@ impl PartialConfig {
             done_session_ttl: other.done_session_ttl.or(self.done_session_ttl),
             debug: other.debug.or(self.debug),
             auto_import_reviews: other.auto_import_reviews.or(self.auto_import_reviews),
+            auto_import_draft_prs: other.auto_import_draft_prs.or(self.auto_import_draft_prs),
             auto_import_authored_prs: other
                 .auto_import_authored_prs
                 .or(self.auto_import_authored_prs),
@@ -429,6 +435,7 @@ fn materialize(merged: PartialConfig, project_root: &Path) -> AppConfig {
         done_session_ttl: merged.done_session_ttl.unwrap_or(DEFAULT_DONE_SESSION_TTL),
         debug: merged.debug.unwrap_or(false),
         auto_import_reviews: merged.auto_import_reviews.unwrap_or(true),
+        auto_import_draft_prs: merged.auto_import_draft_prs.unwrap_or(false),
         auto_import_authored_prs: merged.auto_import_authored_prs.unwrap_or(true),
         agents_allowlist: merged.agents_allowlist,
         prune_threshold: merged.prune_threshold.unwrap_or(DEFAULT_PRUNE_THRESHOLD),
@@ -549,6 +556,7 @@ fn partial_from_table(table: &Table) -> PartialConfig {
     let done_session_ttl = table.get("done_session_ttl").and_then(|v| v.as_u64());
     let debug = table.get("debug").and_then(|v| v.as_bool());
     let auto_import_reviews = table.get("auto_import_reviews").and_then(|v| v.as_bool());
+    let auto_import_draft_prs = table.get("auto_import_draft_prs").and_then(|v| v.as_bool());
     let auto_import_authored_prs = table
         .get("auto_import_authored_prs")
         .and_then(|v| v.as_bool());
@@ -585,6 +593,7 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         done_session_ttl,
         debug,
         auto_import_reviews,
+        auto_import_draft_prs,
         auto_import_authored_prs,
         agents_allowlist,
         prune_threshold,
