@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 
+use crate::config::AppConfig;
 use crate::types::WorktreeStatus;
+use crate::worktrees;
 
 /// How a worktree is classified for adaptive polling. `Hot` worktrees back an
 /// in-progress issue and are refreshed every cycle; `Cold` worktrees (code
@@ -103,7 +105,7 @@ struct WorktreeState {
 /// status so unchanged/cold worktrees don't pay a subprocess every cycle.
 /// One instance lives on each git worker thread.
 pub struct GitPoller {
-    project_root: std::path::PathBuf,
+    config: AppConfig,
     pool: GitStatusPool,
     /// Monotonic cycle counter driving cold-worktree scheduling.
     cycle: u32,
@@ -116,9 +118,9 @@ pub struct GitPoller {
 }
 
 impl GitPoller {
-    pub fn new(project_root: std::path::PathBuf, pool: GitStatusPool) -> Self {
+    pub fn new(config: AppConfig, pool: GitStatusPool) -> Self {
         GitPoller {
-            project_root,
+            config,
             pool,
             cycle: 0,
             worktrees: HashMap::new(),
@@ -129,34 +131,26 @@ impl GitPoller {
     /// Run one poll cycle. `classify` maps a worktree directory name to its
     /// poll class; `force_all` refreshes every non-skipped worktree regardless
     /// of cadence (used after a wake so user actions get an immediate refresh).
+    ///
+    /// Worktrees come from `worktrees::enumerate`, not a `project_root` scan:
+    /// an external provider's worktrees live outside `project_root`, and that
+    /// abstraction already knows how to list them (`worktree_list_cmd`) or
+    /// fall back to a directory scan when there is no provider.
     pub fn poll(&mut self, classify: &dyn Fn(&str) -> PollClass, force_all: bool) -> GitPollResult {
         self.cycle = self.cycle.wrapping_add(1);
 
         let mut statuses = HashMap::new();
         let mut branches = HashMap::new();
 
-        let Ok(entries) = std::fs::read_dir(&self.project_root) else {
-            return GitPollResult { statuses, branches };
-        };
-
         // One `git worktree list --porcelain` resolves every worktree's branch,
         // instead of a `git rev-parse` subprocess per directory per poll.
-        let mut batched_branches = list_worktree_branches(&self.project_root);
+        let mut batched_branches = list_worktree_branches(&self.config.main_dir());
 
         let mut seen: HashSet<String> = HashSet::new();
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-
-            let Ok(dir_name) = entry.file_name().into_string() else {
-                continue;
-            };
-            if dir_name.starts_with('.') || !path.join(".git").exists() {
-                continue;
-            }
+        for entry in worktrees::enumerate(&self.config) {
+            let dir_name = entry.name;
+            let path = entry.path;
 
             let class = classify(&dir_name);
             if class == PollClass::Skip {
@@ -179,7 +173,7 @@ impl GitPoller {
             }
 
             if let Some(status) = self.status_for(&dir_name, &path, due) {
-                statuses.insert(dir_name.clone(), status);
+                statuses.insert(dir_name, status);
             }
         }
 
@@ -259,12 +253,12 @@ fn is_due(class: PollClass, cycle: u32, cold_multiplier: u32) -> bool {
     }
 }
 
-/// One-shot poll of every worktree under `project_root`, for CLI paths (e.g.
-/// prune) that don't run the adaptive worker. Runs `git status` on each
-/// discovered worktree once with no caching or concurrency bound.
-pub fn poll_all_worktrees(project_root: &Path, skip: &HashSet<String>) -> GitPollResult {
+/// One-shot poll of every worktree, for CLI paths (e.g. prune) that don't run
+/// the adaptive worker. Runs `git status` on each discovered worktree once
+/// with no caching or concurrency bound.
+pub fn poll_all_worktrees(config: &AppConfig, skip: &HashSet<String>) -> GitPollResult {
     let pool = GitStatusPool::new(1);
-    let mut poller = GitPoller::new(project_root.to_path_buf(), pool);
+    let mut poller = GitPoller::new(config.clone(), pool);
     let classify = |name: &str| {
         if skip.contains(name) {
             PollClass::Skip
@@ -275,9 +269,8 @@ pub fn poll_all_worktrees(project_root: &Path, skip: &HashSet<String>) -> GitPol
     poller.poll(&classify, true)
 }
 
-fn list_worktree_branches(project_root: &Path) -> HashMap<String, String> {
-    let main_dir = project_root.join("main");
-    let Some(stdout) = git_output(&main_dir, &["worktree", "list", "--porcelain"]) else {
+fn list_worktree_branches(main_dir: &Path) -> HashMap<String, String> {
+    let Some(stdout) = git_output(main_dir, &["worktree", "list", "--porcelain"]) else {
         return HashMap::new();
     };
     parse_worktree_list(&stdout)
@@ -587,7 +580,11 @@ detached
     #[test]
     fn test_poll_skips_classified_worktrees() {
         let pool = GitStatusPool::new(2);
-        let mut poller = GitPoller::new(std::path::PathBuf::from("/nonexistent"), pool);
+        let config = AppConfig {
+            project_root: std::path::PathBuf::from("/nonexistent"),
+            ..AppConfig::for_tests()
+        };
+        let mut poller = GitPoller::new(config, pool);
         let result = poller.poll(&|_| PollClass::Skip, false);
         assert!(result.statuses.is_empty());
         assert!(result.branches.is_empty());
@@ -596,7 +593,11 @@ detached
     #[test]
     fn test_poll_all_worktrees_missing_root() {
         let skip: HashSet<String> = ["done-worktree".to_string()].into_iter().collect();
-        let result = poll_all_worktrees(std::path::Path::new("/nonexistent"), &skip);
+        let config = AppConfig {
+            project_root: std::path::PathBuf::from("/nonexistent"),
+            ..AppConfig::for_tests()
+        };
+        let result = poll_all_worktrees(&config, &skip);
         assert!(result.statuses.is_empty());
     }
 
