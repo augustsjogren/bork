@@ -48,6 +48,15 @@ pub struct AppConfig {
     /// alongside `worktree_create_cmd`, because worktrees outside the project
     /// root cannot be discovered by scanning it.
     pub worktree_list_cmd: Option<String>,
+    /// Shell command that enumerates the targets a card may be pointed at, one
+    /// JSON object per line: `{"target": "a", "label": "..."}`. Unset means
+    /// the target picker has nothing to offer, so targets can only be set from
+    /// the CLI.
+    pub worktree_targets_cmd: Option<String>,
+    /// How a target is written in the UI. `{target}` is replaced with the
+    /// target itself, so a provider whose targets are bare letters can render
+    /// them as something a reader recognises. Defaults to the target alone.
+    pub worktree_target_label: Option<String>,
     /// Total worktrees the external provider can hand out. `None` means
     /// unbounded. A provider that allocates from a fixed pool of ports or
     /// databases has a hard ceiling well below the number of cards a board
@@ -125,6 +134,14 @@ impl AppConfig {
         self.project_root.join("main")
     }
 
+    /// Render `target` for display, via `worktree_target_label`.
+    pub fn target_label(&self, target: &str) -> String {
+        match self.worktree_target_label.as_deref() {
+            Some(template) if template.contains("{target}") => template.replace("{target}", target),
+            _ => target.to_string(),
+        }
+    }
+
     /// Whether worktree creation, removal and discovery are delegated to
     /// external commands.
     pub fn uses_external_worktrees(&self) -> bool {
@@ -180,6 +197,8 @@ impl Default for AppConfig {
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,
+            worktree_targets_cmd: None,
+            worktree_target_label: None,
             worktree_pool_size: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
@@ -296,6 +315,8 @@ pub struct PartialConfig {
     pub worktree_create_cmd: Option<String>,
     pub worktree_remove_cmd: Option<String>,
     pub worktree_list_cmd: Option<String>,
+    pub worktree_targets_cmd: Option<String>,
+    pub worktree_target_label: Option<String>,
     pub worktree_pool_size: Option<u64>,
     pub done_session_ttl: Option<u64>,
     pub debug: Option<bool>,
@@ -363,6 +384,8 @@ impl PartialConfig {
             worktree_create_cmd: other.worktree_create_cmd.or(self.worktree_create_cmd),
             worktree_remove_cmd: other.worktree_remove_cmd.or(self.worktree_remove_cmd),
             worktree_list_cmd: other.worktree_list_cmd.or(self.worktree_list_cmd),
+            worktree_targets_cmd: other.worktree_targets_cmd.or(self.worktree_targets_cmd),
+            worktree_target_label: other.worktree_target_label.or(self.worktree_target_label),
             worktree_pool_size: other.worktree_pool_size.or(self.worktree_pool_size),
             done_session_ttl: other.done_session_ttl.or(self.done_session_ttl),
             debug: other.debug.or(self.debug),
@@ -423,6 +446,8 @@ fn materialize(merged: PartialConfig, project_root: &Path) -> AppConfig {
         worktree_create_cmd: merged.worktree_create_cmd,
         worktree_remove_cmd: merged.worktree_remove_cmd,
         worktree_list_cmd: merged.worktree_list_cmd,
+        worktree_targets_cmd: merged.worktree_targets_cmd,
+        worktree_target_label: merged.worktree_target_label,
         worktree_pool_size: merged.worktree_pool_size,
         done_session_ttl: merged.done_session_ttl.unwrap_or(DEFAULT_DONE_SESSION_TTL),
         debug: merged.debug.unwrap_or(false),
@@ -540,6 +565,16 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
+    let worktree_targets_cmd = table
+        .get("worktree_targets_cmd")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let worktree_target_label = table
+        .get("worktree_target_label")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
     let worktree_pool_size = table.get("worktree_pool_size").and_then(|v| v.as_u64());
 
     let done_session_ttl = table.get("done_session_ttl").and_then(|v| v.as_u64());
@@ -577,6 +612,8 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         worktree_create_cmd,
         worktree_remove_cmd,
         worktree_list_cmd,
+        worktree_targets_cmd,
+        worktree_target_label,
         worktree_pool_size,
         done_session_ttl,
         debug,
@@ -923,6 +960,28 @@ worktree_pool_size = "4"
         );
         assert_eq!(config.worktree_pool_size, Some(4));
         assert!(config.uses_external_worktrees());
+    }
+
+    #[test]
+    fn target_label_substitutes_the_target() {
+        let config = merge_to_app("", "worktree_target_label = \"wt slot {target}\"\n");
+
+        assert_eq!(config.target_label("b"), "wt slot b");
+    }
+
+    #[test]
+    fn target_label_defaults_to_the_target_alone() {
+        let config = merge_to_app("", "");
+
+        assert_eq!(config.target_label("b"), "b");
+    }
+
+    #[test]
+    fn target_label_ignores_a_template_without_a_placeholder() {
+        // A template that drops the target would render every row alike.
+        let config = merge_to_app("", "worktree_target_label = \"slot\"\n");
+
+        assert_eq!(config.target_label("b"), "b");
     }
 
     #[test]

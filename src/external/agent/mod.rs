@@ -1555,6 +1555,8 @@ mod tests {
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,
+            worktree_targets_cmd: None,
+            worktree_target_label: None,
             worktree_pool_size: None,
             done_session_ttl: 300,
             debug: false,

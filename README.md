@@ -795,8 +795,13 @@ Each issue gets its own git worktree. Tmux sessions are named `bork-{issue-id}` 
 Worktree creation, removal and discovery can be delegated to external commands,
 so a card gets an environment a plain `git worktree add` cannot provide — its own
 ports, databases and services. Configure it with `worktree_create_cmd`,
-`worktree_remove_cmd` and `worktree_list_cmd`; leave them unset and behaviour
-is unchanged.
+`worktree_remove_cmd`, `worktree_list_cmd` and `worktree_targets_cmd`; leave them
+unset and behaviour is unchanged.
+
+A card can also be pointed at a named **target** the provider understands, so
+several cards can share a small pool of pre-provisioned worktrees instead of
+each paying full setup cost. `s` opens the target picker and attaches to the
+chosen row — a provider target, or a worktree of the card's own.
 
 Runnable example and the full script contract:
 [`contrib/example-provider/README.md`](contrib/example-provider/README.md).

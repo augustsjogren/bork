@@ -65,6 +65,17 @@ pub struct ActionResult {
     /// Archives that stopped short of removing the worktree but would go
     /// through with `--force`. The main loop asks before forcing them.
     pub force_archive_offers: Vec<(ProjectId, String, ForceRequired)>,
+    /// Targets fetched from the provider, with the card they were fetched for.
+    pub targets_for_picker: Option<(
+        ProjectId,
+        String,
+        Vec<crate::external::worktree_provider::ProvidedTarget>,
+    )>,
+    /// A worktree just attached to `issue_id`, already persisted to disk by
+    /// the background thread. The caller applies it to the in-memory issue
+    /// too — otherwise the next unrelated save flushes the stale in-memory
+    /// copy (still showing no worktree) and clobbers that write.
+    pub worktree_attached: Option<(ProjectId, String, String, Option<std::path::PathBuf>)>,
 }
 
 pub enum PostAction {
@@ -110,6 +121,10 @@ pub fn handle_action(
         InputMode::StackDetails => handle_stack_details(app, action, ch),
         InputMode::LinkPicker => {
             handle_link_picker(app, action, ctx);
+            PostAction::None
+        }
+        InputMode::TargetPicker => {
+            handle_target_picker(app, action, ch.action_tx);
             PostAction::None
         }
         InputMode::Help => {
@@ -890,6 +905,18 @@ fn handle_normal(
                 return PostAction::None;
             }
 
+            // A picked target that never landed must not silently launch
+            // into project_root: that's a different cwd than the developer
+            // chose, with no error to explain the mismatch.
+            if issue.worktree.is_none() && issue.worktree_target.is_some() {
+                app.set_warning(format!(
+                    "{} is targeted at '{}' but not attached yet — apply the target first",
+                    issue.id,
+                    issue.worktree_target.as_deref().unwrap_or_default()
+                ));
+                return PostAction::None;
+            }
+
             let session_name = issue.session_name(&app.context_project(ctx).config.project_name);
             let popup_title = issue.popup_title();
 
@@ -1085,6 +1112,100 @@ fn handle_normal(
             }
             let _ = ch.git_wake_tx.send(());
             app.context_project_mut(ctx).mark_dirty();
+            PostAction::None
+        }
+
+        // Release a worktree while keeping its card. The board holds far more
+        // issues than a provider with a fixed worktree pool can serve, so
+        // parking a card is how a slot is freed without losing its history.
+        Action::DetachWorktree => {
+            let Some(issue) = app.context_project(ctx).selected_issue(&q) else {
+                return PostAction::None;
+            };
+            let issue_id = issue.id.clone();
+            let Some(name) = issue.worktree.clone() else {
+                app.set_warning("No worktree attached to this issue");
+                return PostAction::None;
+            };
+
+            if let Some(refusal) = detach_refusal(app.context_project(ctx), &name) {
+                app.set_warning(refusal);
+                return PostAction::None;
+            }
+
+            // The provider tears down whatever it provisioned alongside the
+            // worktree, so this is confirmed rather than done on a keystroke.
+            app.start_confirm(
+                format!("Detach '{name}'? Its worktree is removed and its slot freed. (y/n)"),
+                ConfirmAction::DetachWorktree {
+                    issue_id,
+                    project_id: ctx.project_id.clone(),
+                },
+            );
+            PostAction::None
+        }
+
+        // `s` picks a target and attaches in one motion; a second attach key
+        // only created ambiguity about which of the two had acted.
+        Action::AttachWorktree => {
+            app.set_warning("'C' is retired; 's' picks a target and attaches");
+            PostAction::None
+        }
+
+        // Enumerating targets shells out, so it cannot run on the UI thread.
+        // The picker opens when the result lands.
+        Action::OpenTargetPicker => {
+            let Some(issue) = app.context_project(ctx).selected_issue(&q) else {
+                return PostAction::None;
+            };
+            // Bound to this card, not to whatever is selected when the provider
+            // answers: the board stays interactive while it is being asked.
+            let issue_id = issue.id.clone();
+            let project_id = ctx.project_id.clone();
+            let config = app.context_project(ctx).config.clone();
+            if config.worktree_targets_cmd.is_none() {
+                app.set_warning("No worktree_targets_cmd configured");
+                return PostAction::None;
+            }
+
+            app.begin_busy();
+            app.set_message("Loading targets...");
+
+            let tx = ch.action_tx.clone();
+            thread::spawn(move || {
+                let backend = crate::external::worktree_provider::WorktreeBackend::resolve(&config);
+                let crate::external::worktree_provider::WorktreeBackend::Provider(provider) =
+                    backend
+                else {
+                    // A bare return would leave begin_busy's spinner running
+                    // forever: busy only clears when an ActionResult arrives.
+                    let _ = tx.send(ActionResult {
+                        message: "worktree_targets_cmd needs worktree_create_cmd set".to_string(),
+                        message_kind: MessageKind::Warning,
+                        ..Default::default()
+                    });
+                    return;
+                };
+                let result = match provider.targets() {
+                    Ok(targets) if targets.is_empty() => ActionResult {
+                        message: "The provider reported no targets".to_string(),
+                        message_kind: MessageKind::Warning,
+                        ..Default::default()
+                    },
+                    Ok(targets) => ActionResult {
+                        message: String::new(),
+                        targets_for_picker: Some((project_id, issue_id, targets)),
+                        ..Default::default()
+                    },
+                    Err(e) => ActionResult {
+                        message: format!("Failed to load targets: {e}"),
+                        message_kind: MessageKind::Error,
+                        ..Default::default()
+                    },
+                };
+                let _ = tx.send(result);
+            });
+
             PostAction::None
         }
 
@@ -2135,6 +2256,197 @@ fn handle_prune_dialog(
     }
 }
 
+fn handle_target_picker(app: &mut App, action: Action, action_tx: &mpsc::Sender<ActionResult>) {
+    match action {
+        Action::TargetPickerClose => app.close_target_picker(),
+        Action::TargetPickerSelect => submit_target_picker(app, action_tx),
+        Action::TargetPickerUp => {
+            if let Some(picker) = app.target_picker.as_mut() {
+                picker.move_up();
+            }
+        }
+        Action::TargetPickerDown => {
+            if let Some(picker) = app.target_picker.as_mut() {
+                picker.move_down();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Branch a card's worktree should hold: a linked pull request's head branch
+/// when there is one, since such a card is work on an existing branch rather
+/// than a new one.
+fn branch_for_issue(project: &Project, issue: &Issue) -> Option<String> {
+    project.pr_for(issue).map(|pr| pr.head_branch.clone())
+}
+
+fn submit_target_picker(app: &mut App, action_tx: &mpsc::Sender<ActionResult>) {
+    let Some(picker) = app.target_picker.as_ref() else {
+        return;
+    };
+    let Some(candidate) = picker.current().cloned() else {
+        return;
+    };
+    let project_id = picker.project_id.clone();
+    let issue_id = picker.issue_id.clone();
+
+    // A target held by another card cannot serve this one, so refusing here
+    // beats letting the create fail.
+    if let Some(held_by) = candidate.held_by.as_deref() {
+        if let Some(picker) = app.target_picker.as_mut() {
+            picker.error = Some(format!("{held_by} already holds that target"));
+        }
+        return;
+    }
+
+    let Some(project) = app.find_project(&project_id) else {
+        app.close_target_picker();
+        return;
+    };
+    let Some(issue) = project
+        .issues
+        .iter()
+        .find(|issue| issue.id.eq_ignore_ascii_case(&issue_id))
+    else {
+        app.close_target_picker();
+        app.set_warning(format!("{issue_id} is no longer on the board"));
+        return;
+    };
+
+    let already_attached = issue.worktree.clone();
+
+    // Selecting the target a card already sits on is a no-op. Without this,
+    // the picker's pre-selected row turns Enter into a release-and-recreate of
+    // the same worktree.
+    if already_attached.is_some() && candidate.target == issue.worktree_target {
+        let current = issue.worktree_target.clone();
+        app.close_target_picker();
+        app.set_message(match current {
+            Some(target) => format!("{issue_id} is already on '{target}'"),
+            None => format!("{issue_id} is already on a worktree of its own"),
+        });
+        return;
+    }
+
+    let config = project.config.clone();
+    let branch = branch_for_issue(project, issue);
+    let slug = crate::worktree::slugify_title(&issue.title);
+
+    // Record the intent first: it persists whether or not the worktree lands,
+    // and a later create must pick up the same target.
+    if let Some(p) = app.find_project_mut(&project_id) {
+        if let Some(issue) = p
+            .issues
+            .iter_mut()
+            .find(|issue| issue.id.eq_ignore_ascii_case(&issue_id))
+        {
+            issue.worktree_target = candidate.target.clone();
+        }
+        p.mark_dirty();
+    }
+    app.close_target_picker();
+
+    // Moving an attached card means releasing its current worktree, which for
+    // a dedicated one drops databases. Never behind a single keystroke.
+    if let Some(current) = already_attached {
+        let destination = match candidate.target.as_deref() {
+            Some(target) => format!("'{target}'"),
+            None => "a worktree of its own".to_string(),
+        };
+        app.start_confirm(
+            format!("Move {issue_id} from '{current}' to {destination}? Its current worktree is released. (y/n)"),
+            ConfirmAction::MoveWorktree {
+                issue_id,
+                project_id,
+            },
+        );
+        return;
+    }
+
+    match candidate.target.as_deref() {
+        Some(_) => app.set_message(format!("Attaching {issue_id} to {}...", candidate.display)),
+        None => app.set_message(format!(
+            "Provisioning a worktree of its own for {issue_id}..."
+        )),
+    }
+
+    spawn_worktree_attach(
+        app,
+        action_tx,
+        AttachRequest {
+            config,
+            project_id,
+            issue_id,
+            slug,
+            branch,
+            release: None,
+        },
+    );
+}
+
+/// Everything the background attach needs, so the UI thread hands over once.
+struct AttachRequest {
+    config: AppConfig,
+    project_id: ProjectId,
+    issue_id: String,
+    slug: String,
+    branch: Option<String>,
+    /// Worktree to release before creating, when moving an attached card.
+    release: Option<String>,
+}
+
+/// Run `ops::attach_worktree` off the UI thread: it shells out to the provider,
+/// twice when moving a card.
+fn spawn_worktree_attach(
+    app: &mut App,
+    action_tx: &mpsc::Sender<ActionResult>,
+    request: AttachRequest,
+) {
+    // The caller sets the message: it knows whether this is a slot reuse or a
+    // fresh provision, which differ by minutes.
+    app.begin_busy();
+
+    let tx = action_tx.clone();
+    thread::spawn(move || {
+        let AttachRequest {
+            config,
+            project_id,
+            issue_id,
+            slug,
+            branch,
+            release,
+        } = request;
+
+        let result = crate::ops::attach_worktree(
+            &config,
+            &issue_id,
+            &slug,
+            branch.as_deref(),
+            release.as_deref(),
+        );
+
+        let _ = tx.send(match result {
+            Ok(outcome) => ActionResult {
+                message: format!("{issue_id} is on {}", outcome.worktree_dir),
+                worktree_attached: Some((
+                    project_id.clone(),
+                    issue_id.clone(),
+                    outcome.worktree_dir,
+                    outcome.worktree_path,
+                )),
+                prune_outcome: outcome.released.map(|released| (project_id, released)),
+                ..Default::default()
+            },
+            Err(e) => ActionResult {
+                message: format!("Failed to attach a worktree: {e:#}"),
+                message_kind: MessageKind::Error,
+                ..Default::default()
+            },
+        });
+    });
+}
+
 fn submit_prune_dialog(app: &mut App, action_tx: &mpsc::Sender<ActionResult>) {
     let Some(dialog) = app.prune_dialog.as_mut() else {
         return;
@@ -2247,6 +2559,27 @@ pub fn show_queued_force_prune(app: &mut App) -> bool {
         },
     );
     true
+}
+
+/// Why a worktree must not be detached, or `None` when it is safe.
+///
+/// Checked both when `X` is pressed and again on confirm: a session can start
+/// or files can change while the prompt is open.
+fn detach_refusal(project: &Project, worktree: &str) -> Option<String> {
+    let candidate = crate::prune::build_candidates(project, vec![worktree.to_string()]);
+    let candidate = candidate.first()?;
+
+    if candidate.is_dirty() {
+        return Some(format!(
+            "'{worktree}' has uncommitted changes. Commit or stash first."
+        ));
+    }
+    if candidate.session_alive {
+        return Some(format!(
+            "The session for '{worktree}' is still running. Kill it with 'x' first."
+        ));
+    }
+    None
 }
 
 fn format_prune_result(outcome: &crate::prune::PruneOutcome, verb: &str) -> (String, MessageKind) {
@@ -2545,6 +2878,94 @@ fn handle_confirm(
                             archive_issue_off_thread(config, project_id, issue, removal)
                         },
                     ),
+                    ConfirmAction::MoveWorktree {
+                        issue_id,
+                        project_id,
+                    } => {
+                        let Some(project) = app.find_project(&project_id) else {
+                            app.set_warning("Project no longer available");
+                            return;
+                        };
+                        let Some(issue) = project
+                            .issues
+                            .iter()
+                            .find(|issue| issue.id.eq_ignore_ascii_case(&issue_id))
+                        else {
+                            app.set_warning(format!("{issue_id} is no longer on the board"));
+                            return;
+                        };
+                        let Some(current) = issue.worktree.clone() else {
+                            app.set_warning("No worktree attached to this issue");
+                            return;
+                        };
+
+                        // Re-checked at confirm time: the tree may have gone
+                        // dirty or a session started while the prompt was up.
+                        if let Some(refusal) = detach_refusal(project, &current) {
+                            app.set_warning(refusal);
+                            return;
+                        }
+
+                        let config = project.config.clone();
+                        let branch = branch_for_issue(project, issue);
+                        let slug = crate::worktree::slugify_title(&issue.title);
+
+                        app.set_message(format!("Moving {issue_id} off '{current}'..."));
+                        spawn_worktree_attach(
+                            app,
+                            action_tx,
+                            AttachRequest {
+                                config,
+                                project_id,
+                                issue_id,
+                                slug,
+                                branch,
+                                release: Some(current),
+                            },
+                        );
+                    }
+                    ConfirmAction::DetachWorktree {
+                        issue_id,
+                        project_id,
+                    } => {
+                        let Some(project) = app.find_project(&project_id) else {
+                            app.set_warning("Project no longer available");
+                            return;
+                        };
+                        // Resolve by ID at confirm time: indices shift while
+                        // the prompt is open.
+                        let Some(issue) = project.issues.iter().find(|i| i.id == issue_id) else {
+                            app.set_warning(format!("{} is no longer on the board", issue_id));
+                            return;
+                        };
+                        let Some(name) = issue.worktree.clone() else {
+                            app.set_warning("No worktree attached to this issue");
+                            return;
+                        };
+
+                        // Re-checked: a session may have started, or the tree
+                        // gone dirty, since the prompt opened.
+                        if let Some(refusal) = detach_refusal(project, &name) {
+                            app.set_warning(refusal);
+                            return;
+                        }
+
+                        let config = project.config.clone();
+                        app.begin_busy();
+                        app.set_message(format!("Detaching worktree '{name}'..."));
+
+                        let tx = action_tx.clone();
+                        thread::spawn(move || {
+                            let outcome = crate::prune::execute_removals(&config, &[name]);
+                            let (message, message_kind) = format_prune_result(&outcome, "Detached");
+                            let _ = tx.send(ActionResult {
+                                message,
+                                message_kind,
+                                prune_outcome: Some((project_id, outcome)),
+                                ..Default::default()
+                            });
+                        });
+                    }
                 }
             }
         }
@@ -2923,6 +3344,8 @@ mod tests {
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,
+            worktree_targets_cmd: None,
+            worktree_target_label: None,
             worktree_pool_size: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
@@ -3855,6 +4278,271 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ================================================================
+    // Detach worktree: guards and confirmation
+    // ================================================================
+
+    fn app_with_attached_worktree() -> App {
+        let mut app = test_app();
+        // Todo, so the default column-0 selection lands on it.
+        let mut issue = test_issue("bork-1", Column::Todo);
+        issue.attach_worktree("wt-1".into());
+        app.project_mut().issues = vec![issue];
+        app.project_mut()
+            .live
+            .worktree_branches
+            .insert("wt-1".into(), "branch-1".into());
+        app
+    }
+
+    fn app_with_targeted_card(target: Option<&str>, worktree: Option<&str>) -> App {
+        let mut app = test_app();
+        let mut issue = test_issue("bork-1", Column::Todo);
+        issue.worktree_target = target.map(String::from);
+        if let Some(worktree) = worktree {
+            issue.attach_worktree(worktree.to_string());
+        }
+        app.project_mut().issues = vec![issue];
+        app
+    }
+
+    fn pick_target(app: &mut App, target: Option<&str>) -> mpsc::Receiver<ActionResult> {
+        let project_id = app.action_context().project_id;
+        app.open_target_picker(
+            &project_id,
+            "bork-1",
+            vec![crate::external::worktree_provider::ProvidedTarget {
+                target: "b".into(),
+                label: None,
+            }],
+        );
+        let picker = app.target_picker.as_mut().expect("picker open");
+        picker.selected = picker
+            .candidates
+            .iter()
+            .position(|c| c.target.as_deref() == target)
+            .expect("target row present");
+
+        let (tx, rx) = mpsc::channel();
+        submit_target_picker(app, &tx);
+        rx
+    }
+
+    #[test]
+    fn the_picker_opens_for_the_card_it_was_asked_for() {
+        // Targets are fetched off the UI thread, so the selection is free to
+        // move before they land. The picker must still be the one the user
+        // opened, not whatever the cursor drifted onto.
+        let mut app = app_with_targeted_card(Some("b"), None);
+        let mut selected = test_issue("bork-2", Column::Todo);
+        selected.worktree_target = Some("c".into());
+        // First row of the column, so it is what the selection points at.
+        app.project_mut().issues.insert(0, selected);
+
+        let project_id = app.action_context().project_id;
+        app.open_target_picker(&project_id, "bork-1", vec![]);
+
+        assert_eq!(
+            app.target_picker.as_ref().map(|p| p.issue_id.as_str()),
+            Some("bork-1")
+        );
+    }
+
+    #[test]
+    fn picking_the_current_target_does_nothing() {
+        // The picker pre-selects the card's target, so Enter must not turn into
+        // a release-and-recreate of the same worktree.
+        let mut app = app_with_targeted_card(Some("b"), Some("wt--pool-slot-b"));
+
+        let rx = pick_target(&mut app, Some("b"));
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.confirm_message.is_none(), "must not prompt a move");
+        assert!(rx.try_recv().is_err(), "must not dispatch any work");
+        assert_eq!(
+            app.project().issues[0].worktree.as_deref(),
+            Some("wt--pool-slot-b")
+        );
+    }
+
+    #[test]
+    fn picking_a_different_target_prompts_a_move() {
+        let mut app = app_with_targeted_card(Some("a"), Some("wt--pool-slot-a"));
+
+        let rx = pick_target(&mut app, Some("b"));
+
+        assert_eq!(app.input_mode, InputMode::Confirm);
+        assert!(
+            app.confirm_message
+                .as_deref()
+                .is_some_and(|m| m.contains("Move bork-1")),
+            "got: {:?}",
+            app.confirm_message
+        );
+        assert!(rx.try_recv().is_err(), "nothing runs before confirmation");
+    }
+
+    #[test]
+    fn picking_own_worktree_prompts_a_move_for_an_attached_card() {
+        let mut app = app_with_targeted_card(Some("b"), Some("wt--pool-slot-b"));
+
+        let rx = pick_target(&mut app, None);
+
+        assert_eq!(app.input_mode, InputMode::Confirm);
+        assert!(
+            app.confirm_message
+                .as_deref()
+                .is_some_and(|m| m.contains("a worktree of its own")),
+            "got: {:?}",
+            app.confirm_message
+        );
+        assert!(rx.try_recv().is_err(), "nothing runs before confirmation");
+        assert_eq!(
+            app.project().issues[0].worktree.as_deref(),
+            Some("wt--pool-slot-b"),
+            "the worktree is only released after confirmation"
+        );
+    }
+
+    fn press(app: &mut App, action: Action) -> mpsc::Receiver<ActionResult> {
+        let ctx = app.action_context();
+        let (tx, rx) = mpsc::channel();
+        let channels = ActionChannels {
+            action_tx: &tx,
+            ..test_channels()
+        };
+        handle_normal(app, action, &ctx, &channels);
+        rx
+    }
+
+    #[test]
+    fn the_attach_key_is_retired() {
+        let mut app = app_with_targeted_card(Some("b"), None);
+
+        let rx = press(&mut app, Action::AttachWorktree);
+
+        assert!(rx.try_recv().is_err(), "must not dispatch work");
+        assert!(app.project().issues[0].worktree.is_none());
+    }
+
+    #[test]
+    fn picking_a_target_attaches_an_unattached_card() {
+        let mut app = app_with_targeted_card(None, None);
+
+        let _rx = pick_target(&mut app, Some("b"));
+
+        let message = app.message.as_ref().map(|(text, _)| text.as_str());
+        assert!(
+            message.is_some_and(|m| m.contains('b')),
+            "message should name the target, got: {message:?}"
+        );
+    }
+
+    #[test]
+    fn picking_own_worktree_provisions_for_an_unattached_card() {
+        // Worth distinguishing: this path takes minutes, a slot takes seconds.
+        let mut app = app_with_targeted_card(None, None);
+
+        let _rx = pick_target(&mut app, None);
+
+        let message = app.message.as_ref().map(|(text, _)| text.as_str());
+        assert!(
+            message.is_some_and(|m| m.contains("its own")),
+            "got: {message:?}"
+        );
+    }
+
+    #[test]
+    fn detach_refuses_a_dirty_worktree() {
+        let mut app = app_with_attached_worktree();
+        app.project_mut().live.worktree_statuses.insert(
+            "wt-1".into(),
+            crate::types::WorktreeStatus {
+                staged: 0,
+                unstaged: 2,
+            },
+        );
+
+        let refusal = detach_refusal(app.project(), "wt-1").expect("dirty must refuse");
+
+        assert!(refusal.contains("uncommitted changes"), "got: {refusal}");
+    }
+
+    #[test]
+    fn detach_refuses_while_a_session_is_alive() {
+        let mut app = app_with_attached_worktree();
+        app.project_mut().live.worktree_statuses.insert(
+            "wt-1".into(),
+            crate::types::WorktreeStatus {
+                staged: 0,
+                unstaged: 0,
+            },
+        );
+        let session = app.project().issues[0].session_name("bork");
+        app.project_mut().live.active_sessions.insert(session);
+
+        let refusal = detach_refusal(app.project(), "wt-1").expect("live session must refuse");
+
+        assert!(refusal.contains("still running"), "got: {refusal}");
+    }
+
+    #[test]
+    fn detach_allows_a_clean_idle_worktree() {
+        let mut app = app_with_attached_worktree();
+        app.project_mut().live.worktree_statuses.insert(
+            "wt-1".into(),
+            crate::types::WorktreeStatus {
+                staged: 0,
+                unstaged: 0,
+            },
+        );
+
+        assert_eq!(detach_refusal(app.project(), "wt-1"), None);
+    }
+
+    #[test]
+    fn detach_key_asks_for_confirmation_instead_of_removing() {
+        let mut app = app_with_attached_worktree();
+        app.project_mut().live.worktree_statuses.insert(
+            "wt-1".into(),
+            crate::types::WorktreeStatus {
+                staged: 0,
+                unstaged: 0,
+            },
+        );
+        let ctx = app.action_context();
+        let (tx, rx) = mpsc::channel();
+        let channels = ActionChannels {
+            action_tx: &tx,
+            ..test_channels()
+        };
+
+        handle_normal(&mut app, Action::DetachWorktree, &ctx, &channels);
+
+        assert_eq!(app.input_mode, InputMode::Confirm);
+        assert!(
+            app.confirm_message
+                .as_deref()
+                .is_some_and(|m| m.contains("wt-1")),
+            "prompt should name the worktree, got: {:?}",
+            app.confirm_message
+        );
+        // Nothing may be dispatched before the user answers.
+        assert!(rx.try_recv().is_err());
+        assert_eq!(app.project().issues[0].worktree.as_deref(), Some("wt-1"));
+    }
+
+    #[test]
+    fn detach_key_warns_when_no_worktree_is_attached() {
+        let mut app = test_app();
+        app.project_mut().issues = vec![test_issue("bork-1", Column::Todo)];
+        let ctx = app.action_context();
+
+        handle_normal(&mut app, Action::DetachWorktree, &ctx, &test_channels());
+
+        assert_eq!(app.input_mode, InputMode::Normal);
     }
 
     // ================================================================
@@ -5749,6 +6437,8 @@ mod tests {
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,
+            worktree_targets_cmd: None,
+            worktree_target_label: None,
             worktree_pool_size: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,

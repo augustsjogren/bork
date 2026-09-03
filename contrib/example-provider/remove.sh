@@ -2,9 +2,14 @@
 #
 # worktree_remove_cmd for the example provider.
 #
-# Removes the worktree and frees its pool index. The git branch is left
-# intact, so a card detached and later re-attached lands back on its own
-# work.
+# Routes on whether the worktree is a slot:
+#
+#   wt--pool-slot-<letter>  ->  detach its branch, keep the worktree and its
+#                               pool index
+#   anything else           ->  remove the worktree and free its index
+#
+# Both leave the git branch intact, so a card detached and later re-attached
+# lands back on its own work.
 set -euo pipefail
 
 source "$(dirname "$0")/pool.sh"
@@ -19,6 +24,21 @@ force="${BORK_FORCE:-0}"
 if [[ ! -d $path ]]; then
   # Already gone; free the index so the pool does not leak a slot.
   registry_release "$name"
+  exit 0
+fi
+
+if [[ $name =~ ^wt--pool-slot-[a-z]$ ]]; then
+  if [[ $force == 1 ]]; then
+    git -C "$path" checkout --detach --force >&2
+  else
+    # Refuse rather than discard: a slot is shared, so uncommitted work in it
+    # does not belong to whoever is detaching.
+    if [[ -n "$(git -C "$path" status --porcelain)" ]]; then
+      echo "$name has uncommitted changes; commit them or detach with force" >&2
+      exit 1
+    fi
+    git -C "$path" checkout --detach >&2
+  fi
   exit 0
 fi
 

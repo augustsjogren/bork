@@ -227,7 +227,35 @@ fn create_via_provider(
 ) -> anyhow::Result<WorktreeResult> {
     let config = provider.config();
 
-    if let Some(limit) = config.worktree_pool_size {
+    let target = state
+        .issues
+        .iter()
+        .find(|issue| issue.id.eq_ignore_ascii_case(issue_id))
+        .and_then(|issue| issue.worktree_target.clone());
+
+    if let Some(target) = target.as_deref() {
+        // A target names a worktree that already exists and can hold one card
+        // at a time. Catching the clash here beats surfacing the provider's
+        // own error from several layers down.
+        let occupant = state.issues.iter().find(|issue| {
+            !issue.id.eq_ignore_ascii_case(issue_id)
+                && issue.worktree.is_some()
+                && issue.worktree_target.as_deref() == Some(target)
+        });
+        if let Some(occupant) = occupant {
+            bail!(
+                "Target '{}' is already held by {}. Detach that card first.",
+                target,
+                occupant.id
+            );
+        }
+    }
+
+    // The pool ceiling counts worktrees the provider allocates. A targeted
+    // create reuses one that already exists and already holds its slot, so
+    // counting it against the ceiling would refuse a create that costs
+    // nothing.
+    if let (None, Some(limit)) = (target.as_deref(), config.worktree_pool_size) {
         // Fails closed: a list command that errors must not read as an empty
         // pool and wave the create through the ceiling it exists to enforce.
         let in_use = provider
@@ -243,7 +271,13 @@ fn create_via_provider(
         }
     }
 
-    let created = provider.create(issue_id, slug, base_branch, branch_override)?;
+    let created = provider.create(
+        issue_id,
+        slug,
+        base_branch,
+        target.as_deref(),
+        branch_override,
+    )?;
     let branch_name = git_stdout(&created.path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .filter(|branch| !branch.is_empty() && branch != "HEAD")
         .unwrap_or_else(|| created.name.clone());
@@ -607,6 +641,8 @@ mod tests {
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,
+            worktree_targets_cmd: None,
+            worktree_target_label: None,
             worktree_pool_size: None,
             done_session_ttl: 300,
             debug: false,
@@ -621,18 +657,124 @@ mod tests {
         }
     }
 
+    /// Config whose provider echoes BORK_TARGET into a directory it creates,
+    /// so a test can prove the target reached the command.
+    fn targeting_config(project: &Path) -> config::AppConfig {
+        let script = format!(
+            r#"d={}/target-$BORK_TARGET; mkdir -p "$d"; printf '{{"path":"%s"}}\n' "$d""#,
+            project.display()
+        );
+        config::AppConfig {
+            worktree_create_cmd: Some(script),
+            worktree_list_cmd: Some("true".into()),
+            ..test_config(project)
+        }
+    }
+
+    #[test]
+    fn targeted_create_passes_the_target_to_the_provider() {
+        let (tmp, project, _cfg) = setup_test_project();
+        let cfg = targeting_config(&project);
+
+        let mut state = config::load_state(&project);
+        state.issues[0].worktree_target = Some("slot-a".into());
+        config::save_state(&state, &project).unwrap();
+
+        let result = create_worktree_in(&cfg, "bork-1", None, None, None).unwrap();
+
+        assert_eq!(result.worktree_dir, "target-slot-a");
+        assert_eq!(result.worktree_path, Some(project.join("target-slot-a")));
+
+        let state = config::load_state(&project);
+        let issue = state.issues.iter().find(|i| i.id == "bork-1").unwrap();
+        assert_eq!(issue.worktree.as_deref(), Some("target-slot-a"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn targeted_create_is_refused_when_another_card_holds_the_target() {
+        let (tmp, project, _cfg) = setup_test_project();
+        let cfg = targeting_config(&project);
+
+        let mut state = config::load_state(&project);
+        state.issues[0].worktree_target = Some("slot-a".into());
+        let mut holder = Issue::new("bork-9", "Holder", Column::InProgress, cfg.agent_kind);
+        holder.worktree_target = Some("slot-a".into());
+        holder.attach_worktree("target-slot-a".into());
+        state.issues.push(holder);
+        config::save_state(&state, &project).unwrap();
+
+        let err = create_worktree_in(&cfg, "bork-1", None, None, None)
+            .expect_err("a target held by another card must be refused");
+
+        assert!(err.to_string().contains("bork-9"), "got: {err}");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_create_takes_the_worktree_off_the_card_that_held_it() {
+        let (tmp, project, _cfg) = setup_test_project();
+        let cfg = targeting_config(&project);
+
+        // The holder was matched to the slot by its branch, so it carries no
+        // target and the occupancy check above cannot see it. Its branch is
+        // gone once the provider swaps in this card's, so it must not be left
+        // claiming the worktree too.
+        let mut state = config::load_state(&project);
+        state.issues[0].worktree_target = Some("slot-a".into());
+        let mut holder = Issue::new("bork-9", "Holder", Column::InProgress, cfg.agent_kind);
+        holder.attach_worktree("target-slot-a".into());
+        state.issues.push(holder);
+        config::save_state(&state, &project).unwrap();
+
+        create_worktree_in(&cfg, "bork-1", None, None, None).unwrap();
+
+        let state = config::load_state(&project);
+        let holder = state.issues.iter().find(|i| i.id == "bork-9").unwrap();
+        assert_eq!(holder.worktree, None);
+        assert_eq!(holder.worktree_path, None);
+
+        let taker = state.issues.iter().find(|i| i.id == "bork-1").unwrap();
+        assert_eq!(taker.worktree.as_deref(), Some("target-slot-a"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn targeted_create_ignores_a_full_pool() {
+        let (tmp, project, _cfg) = setup_test_project();
+        // Pool reported full: an untargeted create would be refused, but a
+        // targeted one reuses an existing worktree and costs no slot.
+        let cfg = config::AppConfig {
+            worktree_list_cmd: Some(r#"printf '{"path":"/tmp/a"}\n'"#.into()),
+            worktree_pool_size: Some(1),
+            ..targeting_config(&project)
+        };
+
+        let mut state = config::load_state(&project);
+        state.issues[0].worktree_target = Some("slot-a".into());
+        config::save_state(&state, &project).unwrap();
+
+        let result = create_worktree_in(&cfg, "bork-1", None, None, None);
+
+        assert!(result.is_ok(), "targeted create failed: {:?}", result.err());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn untargeted_create_is_refused_when_the_pool_is_full() {
         let (tmp, project, _cfg) = setup_test_project();
         let cfg = config::AppConfig {
-            worktree_create_cmd: Some("true".into()),
             worktree_list_cmd: Some(r#"printf '{"path":"/tmp/a"}\n'"#.into()),
             worktree_pool_size: Some(1),
-            ..test_config(&project)
+            ..targeting_config(&project)
         };
 
         let err = create_worktree_in(&cfg, "bork-1", None, None, None)
-            .expect_err("a full pool must refuse a create");
+            .expect_err("a full pool must refuse an untargeted create");
 
         assert!(
             err.to_string().contains("in the pool are in use"),

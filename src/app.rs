@@ -61,11 +61,49 @@ pub enum InputMode {
     LinearPicker,
     StackDetails,
     LinkPicker,
+    TargetPicker,
     Help,
     DebugInspector,
     Sidebar,
     SidebarRename,
     PruneDialog,
+}
+
+/// Fold a git poll into live state, reporting whether anything changed.
+///
+/// Statuses are merged, not replaced: a partial poll carries dirty state only
+/// for the worktrees it checked, and overwriting would blank the rest until
+/// the next full sweep — which would in turn make the prune dialog treat them
+/// as unknown and default them all to Keep. `existing` says which worktrees the
+/// poll saw, so stale entries still drop; keying that on branches instead would
+/// evict a worktree on a detached HEAD, which has no branch.
+pub fn apply_git_poll(live: &mut LiveState, result: crate::external::git::GitPollResult) -> bool {
+    let branches = result.branches;
+    let existing = result.existing;
+    let first_poll = !live.git_poll_done;
+
+    let mut changed = first_poll || live.worktree_branches != branches;
+
+    for (name, status) in result.statuses {
+        if live.worktree_statuses.insert(name, status) != Some(status) {
+            changed = true;
+        }
+    }
+
+    let before = live.worktree_statuses.len();
+    live.worktree_statuses
+        .retain(|name, _| existing.contains(name));
+    changed |= live.worktree_statuses.len() != before;
+
+    if live.worktree_labels != result.labels {
+        live.worktree_labels = result.labels;
+        changed = true;
+    }
+
+    live.worktree_branches = branches;
+    live.worktree_paths = result.paths;
+    live.git_poll_done = true;
+    changed
 }
 
 #[derive(Default)]
@@ -75,6 +113,10 @@ pub struct LiveState {
     pub listening_ports: HashMap<String, Vec<u16>>,
     pub worktree_statuses: HashMap<String, WorktreeStatus>,
     pub worktree_branches: HashMap<String, String>,
+    /// Absolute path per worktree, from the provider. See
+    /// `GitPollResult::paths`.
+    pub worktree_paths: HashMap<String, String>,
+    pub worktree_labels: HashMap<String, String>,
     pub pr_statuses: HashMap<String, PrStatus>,
     pub pr_statuses_by_number: HashMap<u32, PrStatus>,
     pub github_stacks: Vec<GithubStack>,
@@ -296,6 +338,37 @@ impl Project {
             let kind = self.available_agents.remove(index);
             self.available_agents.insert(0, kind);
         }
+    }
+
+    /// How a card's worktree placement reads: the attached worktree's own
+    /// label when the provider supplied one, else the card's target.
+    ///
+    /// Reality beats intent — the two can disagree when a worktree was created
+    /// before its card was targeted.
+    pub fn placement_label(&self, issue: &Issue) -> Option<String> {
+        if let Some(worktree) = issue.worktree.as_deref() {
+            if let Some(label) = self.live.worktree_labels.get(worktree) {
+                return Some(label.clone());
+            }
+        }
+        let target = issue.worktree_target.as_deref()?;
+        Some(self.config.target_label(target))
+    }
+
+    /// `(in use, pool size)` when the worktree provider has a fixed pool.
+    ///
+    /// Counted from the git poll cache rather than by re-enumerating, because
+    /// this feeds a per-frame render and enumeration can spawn a subprocess.
+    pub fn worktree_pool_usage(&self) -> Option<(usize, u64)> {
+        let size = self.config.worktree_pool_size?;
+        let in_use = self
+            .live
+            .worktree_branches
+            .keys()
+            .chain(self.live.frozen_worktree_branches.keys())
+            .collect::<HashSet<_>>()
+            .len();
+        Some((in_use, size))
     }
 
     pub fn default_agent(&self) -> AgentKind {
@@ -865,25 +938,60 @@ impl Project {
 
     /// Finds a worktree directory by dash-bounded substring match of the issue ID.
     /// Shortest match wins (e.g. `bork-1` preferred over `bork-1-extended`).
-    pub(crate) fn detect_worktree(&self, issue: &Issue) -> Option<String> {
-        // Never match provider worktrees: they live outside project_root, so a
-        // name match would attach the card with a fabricated
-        // `project_root/<name>` path. Provider worktrees are linked to their
-        // card when they are created.
-        if self.config.uses_external_worktrees() {
-            return None;
-        }
-
+    pub(crate) fn detect_worktree(&self, issue: &Issue) -> Option<(String, Option<PathBuf>)> {
         let live = &self.live;
         let all_keys = live
             .worktree_branches
             .keys()
             .chain(live.frozen_worktree_branches.keys());
-        match_worktree(&issue.id, all_keys).map(|s| s.to_string())
+        if let Some(dir_name) = match_worktree(&issue.id, all_keys) {
+            let path = live.worktree_paths.get(dir_name).map(PathBuf::from);
+            return Some((dir_name.to_string(), path));
+        }
+
+        self.detect_worktree_by_branch(issue)
+    }
+
+    /// Match a card to the worktree that has its branch checked out.
+    ///
+    /// The name heuristic above only fires when a worktree directory carries
+    /// the issue id, which is true of worktrees bork named itself. It misses
+    /// two cases that matter: a slot worktree, whose name is fixed and never
+    /// mentions a card, and any worktree holding a branch that came from
+    /// elsewhere, such as a pull request's head branch.
+    fn detect_worktree_by_branch(&self, issue: &Issue) -> Option<(String, Option<PathBuf>)> {
+        // Only for providers: under bork's own layout every worktree it made
+        // carries the issue id, so the name heuristic suffices and this would
+        // only add a way to claim a worktree the user never assigned.
+        if !self.config.uses_external_worktrees() {
+            return None;
+        }
+
+        let wanted = self.pr_for(issue)?.head_branch.clone();
+        if wanted.is_empty() {
+            return None;
+        }
+
+        let live = &self.live;
+        let mut matches = live
+            .worktree_branches
+            .iter()
+            .chain(live.frozen_worktree_branches.iter())
+            .filter(|(_, branch)| **branch == wanted);
+
+        let (dir_name, _) = matches.next()?;
+        // Two worktrees cannot hold one branch, but a stale frozen entry can
+        // duplicate a live one; anything else is ambiguous, so claim nothing.
+        if matches.any(|(other, _)| other != dir_name) {
+            return None;
+        }
+
+        let path = live.worktree_paths.get(dir_name).map(PathBuf::from);
+        Some((dir_name.clone(), path))
     }
 
     pub fn auto_assign_worktrees(&mut self) -> bool {
-        let assignments: Vec<(usize, String)> = (0..self.issues.len())
+        let assignments: Vec<(usize, String, Option<PathBuf>)> = (0..self.issues.len())
             .filter(|&i| {
                 self.issues[i].worktree.is_none()
                     && !matches!(
@@ -891,15 +999,18 @@ impl Project {
                         IssueKind::Orchestrator | IssueKind::Cloud
                     )
             })
-            .filter_map(|i| self.detect_worktree(&self.issues[i]).map(|wt| (i, wt)))
+            .filter_map(|i| {
+                self.detect_worktree(&self.issues[i])
+                    .map(|(wt, path)| (i, wt, path))
+            })
             .collect();
 
         if assignments.is_empty() {
             return false;
         }
 
-        for (i, wt) in assignments {
-            self.issues[i].attach_worktree(wt.clone());
+        for (i, wt, path) in assignments {
+            self.issues[i].attach_worktree_at(wt.clone(), path);
             if self.issues[i].column == Column::Done {
                 self.freeze_worktree_status(&wt);
             }
@@ -1864,6 +1975,85 @@ pub struct LinkPickerState {
     pub selected: usize,
 }
 
+/// One row in the target picker. The `(no target)` row is represented by
+/// `target: None`, so selecting it clears rather than needing its own key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetCandidate {
+    pub target: Option<String>,
+    /// `target` rendered for display, so the picker needs no opinion about
+    /// what a target means.
+    pub display: String,
+    pub label: Option<String>,
+    /// Id of another card that already holds this target with a live worktree.
+    pub held_by: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetPickerState {
+    pub project_id: ProjectId,
+    pub issue_id: String,
+    pub candidates: Vec<TargetCandidate>,
+    pub selected: usize,
+    pub error: Option<String>,
+}
+
+impl TargetPickerState {
+    pub fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        if self.selected + 1 < self.candidates.len() {
+            self.selected += 1;
+        }
+    }
+
+    pub fn current(&self) -> Option<&TargetCandidate> {
+        self.candidates.get(self.selected)
+    }
+}
+
+/// Build picker rows for `issue_id`: a clearing row, then every provider
+/// target annotated with the card currently holding it.
+///
+/// Occupancy is resolved from bork's own state rather than asked of the
+/// provider, which has no idea which card points where.
+pub fn build_target_candidates(
+    issues: &[Issue],
+    issue_id: &str,
+    provided: Vec<crate::external::worktree_provider::ProvidedTarget>,
+    config: &AppConfig,
+) -> Vec<TargetCandidate> {
+    let mut candidates = vec![TargetCandidate {
+        target: None,
+        display: "(a worktree of its own)".to_string(),
+        label: None,
+        held_by: None,
+    }];
+
+    for entry in provided {
+        let held_by = issues
+            .iter()
+            .find(|issue| {
+                !issue.id.eq_ignore_ascii_case(issue_id)
+                    && issue.worktree.is_some()
+                    && issue.worktree_target.as_deref() == Some(entry.target.as_str())
+            })
+            .map(|issue| issue.id.clone());
+
+        candidates.push(TargetCandidate {
+            display: config.target_label(&entry.target),
+            target: Some(entry.target),
+            label: entry.label,
+            held_by,
+        });
+    }
+
+    candidates
+}
+
 #[derive(Debug, Clone)]
 pub struct PruneDialogState {
     pub project_id: ProjectId,
@@ -1970,6 +2160,16 @@ pub enum ConfirmAction {
     },
     /// Unregister the project. Its files stay on disk.
     RemoveProject { project_id: ProjectId },
+    DetachWorktree {
+        issue_id: String,
+        project_id: ProjectId,
+    },
+    /// The chosen target is persisted on the issue before the prompt opens,
+    /// so it is not carried here.
+    MoveWorktree {
+        issue_id: String,
+        project_id: ProjectId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2022,6 +2222,7 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
         model: _,
         worktree: _,
         worktree_path: _,
+        worktree_target: _,
         done_at: _,
         pruned_at: _,
         setup_ran: _,
@@ -2070,9 +2271,11 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
         merge_field!(model);
     }
     merge_field!(worktree);
-    // Follows `worktree`: the path is where the provider put it, so a stale
-    // one would point a card at a directory it no longer holds.
+    // Both follow `worktree`: the path is where the provider put it, and the
+    // target is where the next create should go, so a stale one would send a
+    // card at a worktree it no longer holds.
     merge_field!(worktree_path);
+    merge_field!(worktree_target);
     merge_field!(done_at);
     merge_field!(pruned_at);
     merge_field!(setup_ran);
@@ -2225,6 +2428,7 @@ pub struct App {
     pub linear_picker_context: LinearPickerContext,
     pub picker_tab: ImportSource,
     pub link_picker: Option<LinkPickerState>,
+    pub target_picker: Option<TargetPickerState>,
     pub debug_inspector_json: Option<String>,
     pub debug_inspector_scroll: usize,
     pub update_available: bool,
@@ -2276,6 +2480,7 @@ impl App {
             linear_picker_context: LinearPickerContext::Import,
             picker_tab: ImportSource::Linear,
             link_picker: None,
+            target_picker: None,
             debug_inspector_json: None,
             debug_inspector_scroll: 0,
             update_available: false,
@@ -3136,6 +3341,49 @@ impl App {
         self.input_mode = InputMode::LinkPicker;
     }
 
+    /// Open the target picker for `issue_id`. `provided` is fetched by the
+    /// caller off the UI thread, since it shells out to the provider, so the
+    /// card is named rather than re-read from the selection — which the user is
+    /// free to move while the provider is being asked.
+    pub fn open_target_picker(
+        &mut self,
+        project_id: &ProjectId,
+        issue_id: &str,
+        provided: Vec<crate::external::worktree_provider::ProvidedTarget>,
+    ) {
+        let Some(project) = self.find_project(project_id) else {
+            return;
+        };
+        let Some(issue) = project.issues.iter().find(|issue| issue.id == issue_id) else {
+            return;
+        };
+        let issue_id = issue.id.clone();
+        let current = issue.worktree_target.clone();
+        let candidates =
+            build_target_candidates(&project.issues, &issue_id, provided, &project.config);
+
+        // Start on the card's current target, so the highlighted row reflects
+        // where the card already is and Enter changes nothing.
+        let selected = candidates
+            .iter()
+            .position(|c| c.target == current)
+            .unwrap_or(0);
+
+        self.target_picker = Some(TargetPickerState {
+            project_id: project_id.clone(),
+            issue_id,
+            candidates,
+            selected,
+            error: None,
+        });
+        self.input_mode = InputMode::TargetPicker;
+    }
+
+    pub fn close_target_picker(&mut self) {
+        self.target_picker = None;
+        self.input_mode = InputMode::Normal;
+    }
+
     pub fn close_link_picker(&mut self) {
         self.link_picker = None;
         self.input_mode = InputMode::Normal;
@@ -3222,6 +3470,8 @@ mod tests {
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,
+            worktree_targets_cmd: None,
+            worktree_target_label: None,
             worktree_pool_size: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
@@ -4406,7 +4656,8 @@ mod tests {
             .insert("bork-8".into(), "bork-8/init-cli".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             Some("bork-8".into())
         );
     }
@@ -4420,7 +4671,8 @@ mod tests {
             .insert("bork-12-pr-status".into(), "bork-12/pr-status".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             Some("bork-12-pr-status".into())
         );
     }
@@ -4434,7 +4686,8 @@ mod tests {
             .insert("bork-10".into(), "bork-10/something".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             None
         );
     }
@@ -4530,7 +4783,8 @@ mod tests {
             .insert("bork-8".into(), "bork-8/init-cli".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             None
         );
     }
@@ -4552,7 +4806,8 @@ mod tests {
             .insert("bork-1-abcdef".into(), "bork-1/abcdef".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             Some("bork-1-a".into())
         );
     }
@@ -4570,7 +4825,8 @@ mod tests {
             .insert("bork-1-extended".into(), "bork-1/extended".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             Some("bork-1".into())
         );
     }
@@ -4584,7 +4840,8 @@ mod tests {
             .insert("bork-8".into(), "bork-8/feature".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             Some("bork-8".into())
         );
     }
@@ -4598,7 +4855,8 @@ mod tests {
             .insert("bork-1".into(), "bork-1/feature".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             Some("bork-1".into())
         );
     }
@@ -4612,7 +4870,8 @@ mod tests {
         );
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             Some("legora-doc-1929-show-hidden-data".into())
         );
     }
@@ -4626,7 +4885,8 @@ mod tests {
             .insert("legora-doc-1929".into(), "doc-1929/feature".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             Some("legora-doc-1929".into())
         );
     }
@@ -4640,7 +4900,8 @@ mod tests {
             .insert("legora-doc-12-something".into(), "doc-12/something".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             None
         );
     }
@@ -4658,7 +4919,8 @@ mod tests {
             .insert("legora-bork-1-extended".into(), "bork-1/extended".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             Some("bork-1".into())
         );
     }
@@ -4672,7 +4934,8 @@ mod tests {
             .insert("bork-14-fix-auth".into(), "bork-14/fix-auth".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             Some("bork-14-fix-auth".into())
         );
     }
@@ -4686,7 +4949,8 @@ mod tests {
         );
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             Some("vil-123-fix-auth-flow".into())
         );
     }
@@ -4700,7 +4964,8 @@ mod tests {
             .insert("bork-14-fix-auth".into(), "bork-14/fix-auth".into());
         assert_eq!(
             app.project()
-                .detect_worktree(&app.project().issues[0].clone()),
+                .detect_worktree(&app.project().issues[0].clone())
+                .map(|(name, _)| name),
             None
         );
     }
@@ -4723,19 +4988,26 @@ mod tests {
     }
 
     #[test]
-    fn auto_assign_never_claims_provider_worktrees() {
-        // A provider worktree lives outside project_root, so a name match
-        // would attach the card with a fabricated path. Providers link the
-        // worktree to its card at create time instead.
+    fn test_auto_assign_carries_the_provider_path() {
+        // An external provider's worktree lives outside project_root (a slot,
+        // say), so a card auto-assigned to it by name/branch match must carry
+        // that absolute path rather than let `worktree_path_in` fall back to
+        // `project_root/<name>` — a path that does not exist for it, which
+        // sends a launched session's tmux pane to $HOME instead.
         let mut app = test_app(vec![test_issue("bork-8", Column::InProgress)]);
-        app.project_mut().config.worktree_create_cmd = Some("true".into());
         app.project_mut()
             .live
             .worktree_branches
             .insert("bork-8".into(), "bork-8/init-cli".into());
-
-        assert!(!app.project_mut().auto_assign_worktrees());
-        assert_eq!(app.project().issues[0].worktree, None);
+        app.project_mut()
+            .live
+            .worktree_paths
+            .insert("bork-8".into(), "/elsewhere/bork-8".into());
+        app.project_mut().auto_assign_worktrees();
+        assert_eq!(
+            app.project().issues[0].worktree_path.as_deref(),
+            Some("/elsewhere/bork-8")
+        );
     }
 
     #[test]
@@ -6214,6 +6486,219 @@ mod tests {
         app
     }
 
+    // ================================================================
+    // Worktree detection by branch
+    // ================================================================
+
+    /// The head branch lives on the polled PR, not the issue, so the caller
+    /// seeds `pr_statuses` separately.
+    fn issue_with_pr(id: &str) -> Issue {
+        let mut issue = test_issue(id, Column::CodeReview);
+        issue.github_pr_links.push(crate::types::LinkedGithubPr {
+            number: 42,
+            imported: true,
+            import_source: None,
+        });
+        issue
+    }
+
+    /// Branch-based detection is provider-only, so the fixture configures one.
+    fn app_with_pr_branch(id: &str, head_branch: &str, worktrees: &[(&str, &str)]) -> App {
+        let mut app = test_app(vec![issue_with_pr(id)]);
+        app.project_mut().config.worktree_create_cmd = Some("true".into());
+        let live = &mut app.project_mut().live;
+        for (dir, branch) in worktrees {
+            live.worktree_branches
+                .insert((*dir).to_string(), (*branch).to_string());
+        }
+        live.pr_statuses.insert(
+            id.to_lowercase(),
+            crate::types::PrStatus {
+                number: 42,
+                title: "t".into(),
+                url: String::new(),
+                author: String::new(),
+                is_cross_repository: false,
+                state: crate::types::PrState::Open,
+                is_draft: false,
+                checks: None,
+                review: None,
+                additions: 0,
+                deletions: 0,
+                head_branch: head_branch.to_string(),
+            },
+        );
+        app
+    }
+
+    #[test]
+    fn detects_a_slot_worktree_by_its_branch() {
+        // A slot directory never carries the issue id, so the name heuristic
+        // cannot link them.
+        let app = app_with_pr_branch(
+            "card-21",
+            "eng-88-refresh-guide",
+            &[("wt--pool-slot-a", "eng-88-refresh-guide")],
+        );
+
+        assert_eq!(
+            app.project()
+                .detect_worktree(&app.project().issues[0])
+                .map(|(name, _)| name),
+            Some("wt--pool-slot-a".to_string())
+        );
+    }
+
+    #[test]
+    fn branch_detection_is_off_without_a_provider() {
+        // Under bork's own layout every worktree it created carries the issue
+        // id, so this fallback would only claim worktrees never assigned.
+        let mut app = app_with_pr_branch(
+            "card-21",
+            "eng-88-refresh-guide",
+            &[("wt--pool-slot-a", "eng-88-refresh-guide")],
+        );
+        app.project_mut().config.worktree_create_cmd = None;
+
+        assert_eq!(
+            app.project().detect_worktree(&app.project().issues[0]),
+            None
+        );
+    }
+
+    #[test]
+    fn branch_detection_ignores_unrelated_worktrees() {
+        let app = app_with_pr_branch(
+            "card-21",
+            "eng-88-refresh-guide",
+            &[("wt--pool-slot-a", "some-other-branch")],
+        );
+
+        assert_eq!(
+            app.project().detect_worktree(&app.project().issues[0]),
+            None
+        );
+    }
+
+    #[test]
+    fn name_matching_still_wins_when_it_applies() {
+        let app = app_with_pr_branch(
+            "card-21",
+            "eng-88-refresh-guide",
+            &[
+                ("wt--pool-card-21", "whatever"),
+                ("wt--pool-slot-a", "eng-88-refresh-guide"),
+            ],
+        );
+
+        assert_eq!(
+            app.project()
+                .detect_worktree(&app.project().issues[0])
+                .map(|(name, _)| name),
+            Some("wt--pool-card-21".to_string())
+        );
+    }
+
+    // ================================================================
+    // Placement label
+    // ================================================================
+
+    #[test]
+    fn placement_label_prefers_the_attached_worktree_label() {
+        let mut issue = test_issue("bork-1", Column::Todo);
+        issue.attach_worktree("wt-1".into());
+        issue.worktree_target = Some("b".into());
+        let mut app = test_app(vec![issue]);
+        app.project_mut()
+            .live
+            .worktree_labels
+            .insert("wt-1".into(), "slot b · :13001".into());
+
+        // Reality over intent: the two can disagree.
+        assert_eq!(
+            app.project().placement_label(&app.project().issues[0]),
+            Some("slot b · :13001".to_string())
+        );
+    }
+
+    #[test]
+    fn placement_label_falls_back_to_the_target() {
+        let mut issue = test_issue("bork-1", Column::Todo);
+        issue.worktree_target = Some("b".into());
+        let app = test_app(vec![issue]);
+
+        assert_eq!(
+            app.project().placement_label(&app.project().issues[0]),
+            Some("b".to_string())
+        );
+    }
+
+    #[test]
+    fn placement_label_is_absent_without_a_worktree_or_target() {
+        let app = test_app(vec![test_issue("bork-1", Column::Todo)]);
+
+        assert_eq!(
+            app.project().placement_label(&app.project().issues[0]),
+            None
+        );
+    }
+
+    // ================================================================
+    // Target picker candidates
+    // ================================================================
+
+    fn provided(target: &str) -> crate::external::worktree_provider::ProvidedTarget {
+        crate::external::worktree_provider::ProvidedTarget {
+            target: target.into(),
+            label: Some(format!("branch-{target}")),
+        }
+    }
+
+    #[test]
+    fn target_candidates_lead_with_a_clearing_row() {
+        let candidates =
+            build_target_candidates(&[], "bork-1", vec![provided("a")], &test_config());
+
+        assert_eq!(candidates[0].target, None);
+        assert_eq!(candidates[1].target.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn target_candidates_mark_a_target_held_by_another_card() {
+        let mut holder = test_issue("bork-9", Column::InProgress);
+        holder.worktree_target = Some("a".into());
+        holder.attach_worktree("wt--pool-slot-a".into());
+
+        let candidates =
+            build_target_candidates(&[holder], "bork-1", vec![provided("a")], &test_config());
+
+        assert_eq!(candidates[1].held_by.as_deref(), Some("bork-9"));
+    }
+
+    #[test]
+    fn target_candidates_ignore_a_holder_without_a_worktree() {
+        // Targeting something is not holding it; only a live worktree is.
+        let mut other = test_issue("bork-9", Column::Todo);
+        other.worktree_target = Some("a".into());
+
+        let candidates =
+            build_target_candidates(&[other], "bork-1", vec![provided("a")], &test_config());
+
+        assert_eq!(candidates[1].held_by, None);
+    }
+
+    #[test]
+    fn target_candidates_do_not_report_the_card_itself_as_holder() {
+        let mut own = test_issue("bork-1", Column::InProgress);
+        own.worktree_target = Some("a".into());
+        own.attach_worktree("wt--pool-slot-a".into());
+
+        let candidates =
+            build_target_candidates(&[own], "bork-1", vec![provided("a")], &test_config());
+
+        assert_eq!(candidates[1].held_by, None);
+    }
+
     #[test]
     fn drive_session_cleanup_first_attempt_kills_and_invalidates() {
         let mut app = expired_cleanup_app();
@@ -6364,6 +6849,111 @@ mod tests {
         let app = test_app(vec![done, in_prog]);
         let classes = app.project().worktree_poll_classes();
         assert_eq!(classes.get("shared"), Some(&PollClass::Hot));
+    }
+
+    // ================================================================
+    // Feature 3: Git polling - partial poll merge
+    // ================================================================
+
+    /// A poll where every worktree is on a branch, which is the ordinary case.
+    fn poll(
+        statuses: &[(&str, WorktreeStatus)],
+        branches: &[&str],
+    ) -> crate::external::git::GitPollResult {
+        let mut result = poll_with_existing(statuses, branches, branches);
+        result
+            .existing
+            .extend(statuses.iter().map(|(n, _)| n.to_string()));
+        result
+    }
+
+    fn poll_with_existing(
+        statuses: &[(&str, WorktreeStatus)],
+        branches: &[&str],
+        existing: &[&str],
+    ) -> crate::external::git::GitPollResult {
+        crate::external::git::GitPollResult {
+            statuses: statuses.iter().map(|(n, s)| (n.to_string(), *s)).collect(),
+            branches: branches
+                .iter()
+                .map(|n| (n.to_string(), format!("branch-{n}")))
+                .collect(),
+            paths: HashMap::new(),
+            labels: HashMap::new(),
+            existing: existing.iter().map(|n| n.to_string()).collect(),
+        }
+    }
+
+    const DIRTY: WorktreeStatus = WorktreeStatus {
+        staged: 1,
+        unstaged: 0,
+    };
+    const CLEAN: WorktreeStatus = WorktreeStatus {
+        staged: 0,
+        unstaged: 0,
+    };
+
+    #[test]
+    fn partial_poll_keeps_status_of_unpolled_worktrees() {
+        let mut live = LiveState::default();
+        apply_git_poll(&mut live, poll(&[("a", DIRTY), ("b", CLEAN)], &["a", "b"]));
+
+        // A filtered round carries only 'a'. Blanking 'b' would make the prune
+        // dialog read it as unknown and default it to Keep.
+        apply_git_poll(&mut live, poll(&[("a", CLEAN)], &["a", "b"]));
+
+        assert_eq!(live.worktree_statuses.get("a"), Some(&CLEAN));
+        assert_eq!(live.worktree_statuses.get("b"), Some(&CLEAN));
+    }
+
+    #[test]
+    fn poll_drops_status_of_vanished_worktrees() {
+        let mut live = LiveState::default();
+        apply_git_poll(&mut live, poll(&[("a", DIRTY), ("b", DIRTY)], &["a", "b"]));
+
+        // Enumeration is complete, so absence from it means removal.
+        let changed = apply_git_poll(&mut live, poll(&[], &["a"]));
+
+        assert!(changed);
+        assert!(!live.worktree_statuses.contains_key("b"));
+        assert_eq!(live.worktree_statuses.get("a"), Some(&DIRTY));
+    }
+
+    #[test]
+    fn poll_keeps_status_of_a_worktree_on_a_detached_head() {
+        let mut live = LiveState::default();
+        apply_git_poll(&mut live, poll(&[("a", DIRTY)], &["a"]));
+
+        // A provider parks a shared worktree detached between branches, so it
+        // reports no branch while still very much existing. Keying eviction on
+        // branches would blank its dirty state on every poll.
+        apply_git_poll(&mut live, poll_with_existing(&[("a", DIRTY)], &[], &["a"]));
+
+        assert_eq!(live.worktree_statuses.get("a"), Some(&DIRTY));
+    }
+
+    #[test]
+    fn first_poll_registers_even_when_empty() {
+        let mut live = LiveState::default();
+
+        assert!(apply_git_poll(&mut live, poll(&[], &[])));
+        assert!(live.git_poll_done);
+    }
+
+    #[test]
+    fn unchanged_poll_reports_no_change() {
+        let mut live = LiveState::default();
+        apply_git_poll(&mut live, poll(&[("a", DIRTY)], &["a"]));
+
+        assert!(!apply_git_poll(&mut live, poll(&[("a", DIRTY)], &["a"])));
+    }
+
+    #[test]
+    fn changed_status_reports_a_change() {
+        let mut live = LiveState::default();
+        apply_git_poll(&mut live, poll(&[("a", DIRTY)], &["a"]));
+
+        assert!(apply_git_poll(&mut live, poll(&[("a", CLEAN)], &["a"])));
     }
 
     // ================================================================
@@ -7745,6 +8335,8 @@ mod tests {
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,
+            worktree_targets_cmd: None,
+            worktree_target_label: None,
             worktree_pool_size: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
@@ -8473,6 +9065,7 @@ mod tests {
             "prompt",
             "worktree",
             "worktree_path",
+            "worktree_target",
             "done_at",
             "sessions",
             "pruned_at",

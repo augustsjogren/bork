@@ -38,6 +38,7 @@ pub fn map_key_to_action(
         // Rename is a one-line text field, same as search.
         InputMode::SidebarRename => map_search_key(key),
         InputMode::PruneDialog => map_prune_dialog_key(key),
+        InputMode::TargetPicker => map_target_picker_key(key),
     }
 }
 
@@ -53,6 +54,19 @@ fn map_prune_dialog_key(key: KeyEvent) -> Action {
         KeyCode::Char('n') => Action::PruneSelectAllKeep,
         KeyCode::Char('j') | KeyCode::Down => Action::PruneMoveDown,
         KeyCode::Char('k') | KeyCode::Up => Action::PruneMoveUp,
+        _ => Action::Noop,
+    }
+}
+
+fn map_target_picker_key(key: KeyEvent) -> Action {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return Action::TargetPickerClose;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => Action::TargetPickerClose,
+        KeyCode::Enter => Action::TargetPickerSelect,
+        KeyCode::Char('j') | KeyCode::Down => Action::TargetPickerDown,
+        KeyCode::Char('k') | KeyCode::Up => Action::TargetPickerUp,
         _ => Action::Noop,
     }
 }
@@ -117,6 +131,9 @@ fn map_normal_key(key: KeyEvent, swimlane_count: usize) -> Action {
         KeyCode::Char('s') => Action::ExpandStack,
         KeyCode::Char('O') => Action::OpenLinear,
         KeyCode::Char('w') => Action::AssignWorktree,
+        KeyCode::Char('X') => Action::DetachWorktree,
+        KeyCode::Char('v') => Action::OpenTargetPicker,
+        KeyCode::Char('C') => Action::AttachWorktree,
         KeyCode::Char('W') => Action::OpenPruneDialog,
 
         KeyCode::Char('/') => Action::SearchStart,
@@ -342,6 +359,36 @@ mod tests {
     }
 
     // --- Normal mode ---
+
+    #[test]
+    fn normal_worktree_keys_are_distinct() {
+        // 'X' must not shadow 'x' (kill session) or 'W' (prune dialog).
+        assert_eq!(
+            map_normal_key(key(KeyCode::Char('X')), 1),
+            Action::DetachWorktree
+        );
+        assert_eq!(
+            map_normal_key(key(KeyCode::Char('x')), 1),
+            Action::KillSession
+        );
+        assert_eq!(
+            map_normal_key(key(KeyCode::Char('W')), 1),
+            Action::OpenPruneDialog
+        );
+        assert_eq!(
+            map_normal_key(key(KeyCode::Char('w')), 1),
+            Action::AssignWorktree
+        );
+        assert_eq!(
+            map_normal_key(key(KeyCode::Char('C')), 1),
+            Action::AttachWorktree
+        );
+        // 'c' opens the link picker; 'C' must not shadow it.
+        assert_eq!(
+            map_normal_key(key(KeyCode::Char('c')), 1),
+            Action::OpenLinkPicker
+        );
+    }
 
     #[test]
     fn normal_quit() {

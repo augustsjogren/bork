@@ -88,6 +88,19 @@ impl Drop for PoolPermit<'_> {
 pub struct GitPollResult {
     pub statuses: HashMap<String, WorktreeStatus>,
     pub branches: HashMap<String, String>,
+    /// Absolute path per worktree, from the provider. An external provider's
+    /// worktrees live outside `project_root`, so a card auto-assigned by
+    /// name/branch match must carry this rather than let
+    /// `Issue::worktree_path_in` fall back to `project_root/<name>` — a path
+    /// that does not exist for them.
+    pub paths: HashMap<String, String>,
+    /// Provider-supplied descriptions, keyed like the others. Complete on
+    /// every poll, since enumeration is cheap.
+    pub labels: HashMap<String, String>,
+    /// Every worktree this poll saw. Wider than `branches`, which omits a
+    /// worktree sitting on a detached HEAD — a state a provider parks a shared
+    /// worktree in between branches.
+    pub existing: HashSet<String>,
 }
 
 /// Per-worktree scheduling and cached data. Owned by a single `GitPoller`
@@ -141,6 +154,9 @@ impl GitPoller {
 
         let mut statuses = HashMap::new();
         let mut branches = HashMap::new();
+        let mut paths = HashMap::new();
+        let mut labels = HashMap::new();
+        let mut existing = HashSet::new();
 
         // One `git worktree list --porcelain` resolves every worktree's branch,
         // instead of a `git rev-parse` subprocess per directory per poll.
@@ -151,6 +167,15 @@ impl GitPoller {
         for entry in worktrees::enumerate(&self.config) {
             let dir_name = entry.name;
             let path = entry.path;
+
+            // Complete on every poll, since enumeration is cheap: a card
+            // needs its worktree's absolute path and provider label even
+            // when the worktree is skipped/cold this cycle.
+            paths.insert(dir_name.clone(), path.to_string_lossy().into_owned());
+            if let Some(label) = entry.label {
+                labels.insert(dir_name.clone(), label);
+            }
+            existing.insert(dir_name.clone());
 
             let class = classify(&dir_name);
             if class == PollClass::Skip {
@@ -182,7 +207,13 @@ impl GitPoller {
         self.worktrees.retain(|name, _| seen.contains(name));
         self.branch_fallback.retain(|name, _| seen.contains(name));
 
-        GitPollResult { statuses, branches }
+        GitPollResult {
+            statuses,
+            branches,
+            paths,
+            labels,
+            existing,
+        }
     }
 
     /// Whether a worktree should be refreshed this cycle. Ensures a

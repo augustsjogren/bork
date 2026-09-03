@@ -1011,6 +1011,16 @@ enum IssueCommand {
         agent: Option<AgentKind>,
     },
 
+    /// Set or clear where an issue's worktree comes from. The value is passed
+    /// to worktree_create_cmd as BORK_TARGET; its meaning is the provider's.
+    Target {
+        /// Issue ID (e.g. bork-1)
+        id: String,
+
+        /// Target to set. Omit to clear.
+        target: Option<String>,
+    },
+
     /// Show issue details
     Show {
         /// Issue ID (e.g. bork-1)
@@ -1674,6 +1684,8 @@ fn resolved_config_value(config: &config::AppConfig, key: &str) -> Option<String
         "worktree_create_cmd" => Some(config.worktree_create_cmd.clone().unwrap_or_default()),
         "worktree_remove_cmd" => Some(config.worktree_remove_cmd.clone().unwrap_or_default()),
         "worktree_list_cmd" => Some(config.worktree_list_cmd.clone().unwrap_or_default()),
+        "worktree_targets_cmd" => Some(config.worktree_targets_cmd.clone().unwrap_or_default()),
+        "worktree_target_label" => Some(config.worktree_target_label.clone().unwrap_or_default()),
         // Empty rather than 0: an unset pool is unbounded, not a pool of none.
         "worktree_pool_size" => Some(
             config
@@ -1865,6 +1877,17 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
                 );
             } else {
                 println!("{} has no stored {} session", reset.issue_id, reset.agent);
+            }
+            Ok(())
+        }
+        IssueCommand::Target { id, target } => {
+            let issue = ops::set_worktree_target(&project_root, &id, target.as_deref())?;
+            match issue.worktree_target.as_deref() {
+                Some(target) => println!("{} targets '{}'", issue.id, target),
+                None => println!("{} has no worktree target", issue.id),
+            }
+            if issue.worktree.is_some() {
+                println!("Its current worktree is unchanged; detach to move it.");
             }
             Ok(())
         }
@@ -2501,16 +2524,7 @@ fn drain_project_workers(
     // --- Git status ---
     let mut git_data_changed = false;
     while let Ok(git_result) = workers.git_rx.try_recv() {
-        let live = &mut project.live;
-        // The first poll must always register (sets git_poll_done) even
-        // when the data matches the empty default.
-        if !live.git_poll_done
-            || live.worktree_statuses != git_result.statuses
-            || live.worktree_branches != git_result.branches
-        {
-            live.worktree_statuses = git_result.statuses;
-            live.worktree_branches = git_result.branches;
-            live.git_poll_done = true;
+        if app::apply_git_poll(&mut project.live, git_result) {
             git_data_changed = true;
             needs_redraw = true;
         }
@@ -3040,6 +3054,36 @@ fn run_tui() -> anyhow::Result<()> {
                 handler::queue_force_prune(&mut app, project_id, outcome.plan_not_saved());
             }
 
+            if let Some((project_id, issue_id, worktree_dir, worktree_path)) =
+                result.worktree_attached
+            {
+                if let Some(project) = app.find_project_mut(&project_id) {
+                    // Mirrors worktree::link_worktree: any other card already
+                    // holding this worktree loses it first, since one
+                    // worktree belongs to at most one card.
+                    for other in project
+                        .issues
+                        .iter_mut()
+                        .filter(|i| !i.id.eq_ignore_ascii_case(&issue_id))
+                        .filter(|i| i.worktree.as_deref() == Some(worktree_dir.as_str()))
+                    {
+                        other.detach_worktree();
+                    }
+                    if let Some(issue) = project
+                        .issues
+                        .iter_mut()
+                        .find(|i| i.id.eq_ignore_ascii_case(&issue_id))
+                    {
+                        issue.attach_worktree_at(worktree_dir, worktree_path);
+                    }
+                    project.mark_dirty();
+                }
+                // Wake the git poller so the fresh worktree's branch, status
+                // and label land now instead of on the next poll tick.
+                let lane = swimlane_workers.get(&project_id).unwrap_or(&workers);
+                let _ = lane.git_wake_tx.send(());
+            }
+
             for (project_id, issue_id) in result.issues_to_delete {
                 handler::delete_issue_from_app(&mut app, &project_id, &issue_id);
             }
@@ -3048,6 +3092,10 @@ fn run_tui() -> anyhow::Result<()> {
                 handler::archive_issue_in_app(&mut app, &project_id, &issue_id);
             }
             handler::queue_force_archive(&mut app, result.force_archive_offers);
+
+            if let Some((project_id, issue_id, targets)) = result.targets_for_picker {
+                app.open_target_picker(&project_id, &issue_id, targets);
+            }
 
             if let Some(launch_id) = result.launched_issue_id {
                 // A kill during the detection window (x kill, done-TTL)

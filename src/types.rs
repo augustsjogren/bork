@@ -475,6 +475,12 @@ pub struct Issue {
     /// directory layout; `None` means the worktree is `project_root/<worktree>`.
     #[serde(default)]
     pub worktree_path: Option<String>,
+    /// Where this card's worktree should come from, passed to an external
+    /// provider as `BORK_TARGET`. Its meaning belongs to the provider — bork
+    /// only carries it. Persisted so a card parked and later resumed lands
+    /// back on the same target without being re-pointed by hand.
+    #[serde(default)]
+    pub worktree_target: Option<String>,
     #[serde(default)]
     pub done_at: Option<u64>,
     /// Agent session IDs keyed by the agent that created them. Switching
@@ -581,6 +587,7 @@ impl Issue {
             model: None,
             worktree: None,
             worktree_path: None,
+            worktree_target: None,
             done_at: None,
             sessions: BTreeMap::new(),
             pruned_at: None,
@@ -1483,7 +1490,8 @@ mod tests {
         }"#;
         let issue: Issue = serde_json::from_str(json).unwrap();
         assert_eq!(issue.pruned_at, None);
-        // A state.json written before this field existed must still load.
+        // A state.json written before these fields existed must still load.
+        assert_eq!(issue.worktree_target, None);
         assert_eq!(issue.worktree_path, None);
     }
 
