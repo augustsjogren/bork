@@ -1,6 +1,12 @@
 use std::process::Command;
 
 fn main() {
+    // Without these, cargo reruns this script only when build.rs itself
+    // changes, so the embedded commit goes stale across builds — and the
+    // update check then compares against a commit from weeks ago.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs");
+
     // Embed the current git commit hash. Empty if we're not in a git tree
     // (e.g. source tarball builds); the runtime falls back to `git rev-parse`
     // in the resolved source repo so this is a soft failure.
