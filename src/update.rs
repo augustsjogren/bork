@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::thread;
@@ -92,6 +92,42 @@ fn resolve_source_repo() -> anyhow::Result<PathBuf> {
         "Could not find source repository. \
          bork update requires a source install (symlink from cargo build)."
     )
+}
+
+/// The branch checked out in the source repo, or `None` for a detached HEAD or
+/// a git failure.
+fn checked_out_branch(repo: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--short", "--quiet", "HEAD"])
+        .current_dir(repo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    non_empty(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Refuse to update a source repo that is not on `main`.
+///
+/// The update pulls `origin/main` into whatever is checked out and rebuilds. On
+/// a branch carrying local work that is a merge of upstream into it — silently,
+/// mid-update, in a repo the user was not looking at.
+fn ensure_updatable_branch(branch: Option<&str>) -> anyhow::Result<()> {
+    match branch {
+        Some("main") => Ok(()),
+        Some(other) => bail!(
+            "Source repo is on '{other}', not main. `bork update` pulls origin/main \
+             into the checked-out branch, which would merge upstream into your work. \
+             Update it yourself: git fetch && git rebase origin/main && cargo build --release."
+        ),
+        None => bail!(
+            "Source repo has no branch checked out (detached HEAD). \
+             Check out main before running `bork update`."
+        ),
+    }
 }
 
 /// The git commit this binary was built from. Prefers the value embedded by
@@ -372,6 +408,7 @@ fn local_origin_main_sha(repo: &PathBuf) -> Option<String> {
 
 pub fn run_update() -> anyhow::Result<()> {
     let repo = resolve_source_repo()?;
+    ensure_updatable_branch(checked_out_branch(&repo).as_deref())?;
     let current = env!("CARGO_PKG_VERSION");
     let build_sha = current_commit();
     println!("Current version: v{current}");
@@ -457,4 +494,35 @@ pub fn run_update() -> anyhow::Result<()> {
     println!("Updated to latest. Restart bork to use the new version.");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_is_allowed_on_main() {
+        assert!(ensure_updatable_branch(Some("main")).is_ok());
+    }
+
+    #[test]
+    fn update_is_refused_on_a_fork_branch() {
+        // The update pulls origin/main into whatever is checked out, so on a
+        // branch carrying local work it would merge upstream into that work.
+        let err = ensure_updatable_branch(Some("feature-branch"))
+            .expect_err("a non-main branch must not be pulled into");
+
+        assert!(err.to_string().contains("feature-branch"), "got: {err}");
+        assert!(
+            err.to_string().contains("git rebase origin/main"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_is_refused_on_a_detached_head() {
+        let err = ensure_updatable_branch(None).expect_err("detached HEAD is not updatable");
+
+        assert!(err.to_string().contains("detached HEAD"), "got: {err}");
+    }
 }
