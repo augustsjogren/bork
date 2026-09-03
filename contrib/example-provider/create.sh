@@ -2,9 +2,14 @@
 #
 # worktree_create_cmd for the example provider.
 #
-# Reads BORK_ISSUE_ID / BORK_SLUG / BORK_BASE / BORK_BRANCH, creates a
-# worktree under the pool root, and prints it as a JSON object on the last
-# line of stdout.
+# Reads BORK_ISSUE_ID / BORK_SLUG / BORK_BASE / BORK_TARGET / BORK_BRANCH,
+# creates (or re-attaches) a worktree under the pool root, and prints it as a
+# JSON object on the last line of stdout.
+#
+# BORK_TARGET, when set, is a slot letter: a persistent worktree whose branch is
+# swapped in place. A real provider does this to skip whatever a fresh worktree
+# spends minutes provisioning; here it only demonstrates that a targeted create
+# reuses a worktree and costs no pool index.
 set -euo pipefail
 
 source "$(dirname "$0")/pool.sh"
@@ -30,17 +35,42 @@ branch_exists() {
   git -C "$main" show-ref --verify --quiet "refs/heads/$1"
 }
 
-name="wt--pool-$(sanitise "$branch")"
+if [[ -n ${BORK_TARGET:-} ]]; then
+  if [[ ! $BORK_TARGET =~ ^[a-z]$ ]]; then
+    echo "BORK_TARGET must be a single a-z slot letter, got '$BORK_TARGET'" >&2
+    exit 1
+  fi
+  name="wt--pool-slot-$BORK_TARGET"
+else
+  name="wt--pool-$(sanitise "$branch")"
+fi
 path="$POOL_ROOT/$name"
 
-index="$(registry_claim "$name")"
-echo "Allocated index $index (ports :$(port_for "$index")+)" >&2
-if branch_exists "$branch"; then
-  git -C "$main" worktree add "$path" "$branch" >&2
+if [[ -d $path ]]; then
+  # Swap the branch in place. Cheap, and the reason a card is pointed at a slot
+  # rather than given a worktree of its own.
+  echo "Reusing $name" >&2
+  if branch_exists "$branch"; then
+    git -C "$path" checkout "$branch" >&2
+  else
+    git -C "$path" checkout -b "$branch" "$base" >&2
+  fi
 else
-  git -C "$main" worktree add -b "$branch" "$path" "$base" >&2
+  index="$(registry_claim "$name")"
+  echo "Allocated index $index (ports :$(port_for "$index")+)" >&2
+  if branch_exists "$branch"; then
+    git -C "$main" worktree add "$path" "$branch" >&2
+  else
+    git -C "$main" worktree add -b "$branch" "$path" "$base" >&2
+  fi
 fi
 
-printf '{"path":%s,"name":%s}\n' \
+# A directory that exists without a registry entry was made outside the pool;
+# claim one for it rather than reporting it with no port block.
+index="$(registry_index_of "$name")"
+[[ -n $index ]] || index="$(registry_claim "$name")"
+
+printf '{"path":%s,"name":%s,"label":%s}\n' \
   "$(json_string "$path")" \
-  "$(json_string "$name")"
+  "$(json_string "$name")" \
+  "$(json_string "$(label_for "$name" "$index")")"

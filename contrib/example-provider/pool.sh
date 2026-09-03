@@ -75,6 +75,17 @@ port_for() {
   echo "$((8000 + $1 * 10))"
 }
 
+# What a card shows for this worktree. Slots are named so a reader recognises
+# the shared one; everything else is identified by its index.
+label_for() {
+  local name="$1" index="$2"
+  if [[ $name =~ ^wt--pool-slot-([a-z])$ ]]; then
+    echo "slot ${BASH_REMATCH[1]} · :$(port_for "$index")"
+  else
+    echo "wt $index · :$(port_for "$index")"
+  fi
+}
+
 # Escape backslashes and quotes, the only characters a path or branch name can
 # realistically contain.
 json_string() {

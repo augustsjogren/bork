@@ -95,6 +95,8 @@ const SECTIONS: &[Section] = &[
             ("O", "Open in Linear"),
             ("I", "Import from Linear"),
             ("w", "Assign worktree"),
+            ("X", "Detach worktree (keep card)"),
+            ("v", "Attach worktree (pick a target or its own)"),
             ("q", "Quit"),
         ],
     },

@@ -3,7 +3,7 @@
 # worktree_list_cmd for the example provider.
 #
 # Prints one JSON object per worktree holding a pool index:
-# {"name": ..., "path": ...}.
+# {"name": ..., "path": ..., "label": ...}.
 #
 # Index-holding is the thing that matters, not what `git worktree list` reports:
 # a worktree created outside the pool shows up in git with no index, no ports
@@ -21,7 +21,8 @@ while IFS= read -r name; do
   [[ -n $name ]] || continue
   path="$POOL_ROOT/$name"
   [[ -d $path ]] || continue
-  printf '{"path":%s,"name":%s}\n' \
+  printf '{"path":%s,"name":%s,"label":%s}\n' \
     "$(json_string "$path")" \
-    "$(json_string "$name")"
+    "$(json_string "$name")" \
+    "$(json_string "$(label_for "$name" "$index")")"
 done <"$REGISTRY"

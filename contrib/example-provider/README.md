@@ -11,8 +11,9 @@ board wants to reuse a small pool of pre-provisioned worktrees rather than
 create one per card. Everything below is bork's side of that arrangement.
 
 What this example does: it keeps a fixed pool of worktrees **outside the project
-root**, each holding an index in a registry file that gives it a port block. A
-real provider would allocate databases and services against that same index.
+root**, each holding an index in a registry file that gives it a port block. Two
+of the four commands are only interesting because of the pool — a real provider
+would allocate databases and services against that same index.
 
 ```sh
 contrib/example-provider/test.sh
@@ -24,9 +25,13 @@ below.
 ## Configuration
 
 ```toml
-worktree_create_cmd = "$HOME/dev/bork/contrib/example-provider/create.sh"
-worktree_remove_cmd = "$HOME/dev/bork/contrib/example-provider/remove.sh"
-worktree_list_cmd   = "$HOME/dev/bork/contrib/example-provider/list.sh"
+worktree_create_cmd  = "$HOME/dev/bork/contrib/example-provider/create.sh"
+worktree_remove_cmd  = "$HOME/dev/bork/contrib/example-provider/remove.sh"
+worktree_list_cmd    = "$HOME/dev/bork/contrib/example-provider/list.sh"
+worktree_targets_cmd = "$HOME/dev/bork/contrib/example-provider/targets.sh"
+
+# Targets are bare letters on the wire; spell them out in the UI.
+worktree_target_label = "slot {target}"
 
 # Must match the provider's own ceiling — BORK_EXAMPLE_POOL_SIZE here — so bork
 # refuses an attach at the limit instead of letting create fail mid-launch.
@@ -58,24 +63,29 @@ so a new field never breaks an existing parse.
 
 | Script | Input | Output |
 | --- | --- | --- |
-| `create.sh` | `BORK_ISSUE_ID`, `BORK_SLUG`, `BORK_BASE`, `BORK_BRANCH` | one object, last stdout line |
+| `create.sh` | `BORK_ISSUE_ID`, `BORK_SLUG`, `BORK_BASE`, `BORK_TARGET`, `BORK_BRANCH` | one object, last stdout line |
 | `remove.sh` | `BORK_WORKTREE_NAME`, `BORK_WORKTREE_PATH`, `BORK_FORCE` | — |
 | `list.sh` | — | one object per pool worktree |
+| `targets.sh` | — | one object per available target |
 
 ```jsonc
-// create.sh, and each line of list.sh. Only "path" is required; "name"
-// defaults to its basename.
-{"name": "wt--pool-bork-1-fix-bug",
- "path": "/Users/me/.bork-example-pool/wt--pool-bork-1-fix-bug"}
+// create.sh, and each line of list.sh. Only "path" is required; "name" defaults
+// to its basename, and "label" is what a card shows.
+{"name": "wt--pool-slot-a", "path": "/Users/me/.bork-example-pool/wt--pool-slot-a",
+ "label": "slot a · :8010"}
+
+// each line of targets.sh
+{"target": "a", "label": "bork-2-fix-bug"}
 ```
 
-All three run with `main/` as their working directory, and every invocation
+All four run with `main/` as their working directory, and every invocation
 also carries `BORK_PROVIDER_API` (currently `1`) and `BORK_PROJECT_ROOT`.
 Commands are killed at a deadline (minutes for create/remove, seconds for
-list), so a provider that can hang should do its own retrying. `pool.sh` is shared state,
+list and targets), so a provider that can hang should do its own retrying.
+`pool.sh` is shared state,
 sourced by the others; bork never calls it.
 
-A malformed line in `list.sh` is skipped rather than failing the
+A malformed line in `list.sh` or `targets.sh` is skipped rather than failing the
 whole enumeration — these feed the poll loop, and one bad line must not blank the
 board. `create.sh` is the opposite: it returns a single object, so anything
 unparseable is a hard error.
@@ -89,6 +99,30 @@ but the object on stdout.
 `BORK_BRANCH`, when set, is an existing branch to use verbatim — a pull request's
 head branch, so a review card lands on the PR's own branch rather than a newly
 invented one. Otherwise the branch is composed from the issue id and slug.
+
+## Targets
+
+`BORK_TARGET` carries a card's requested target, and its meaning belongs to the
+provider — bork only carries it. Here it is a slot letter: a persistent worktree
+whose branch is swapped in place.
+
+- `create.sh` with `BORK_TARGET=a` reuses `wt--pool-slot-a`, checking the branch
+  out in it instead of creating a worktree.
+- `remove.sh` on `wt--pool-slot-<letter>` detaches the branch, keeping the
+  worktree and its pool index.
+- **A targeted create bypasses the pool ceiling**, since the worktree already
+  exists and already holds its index.
+
+On the board, `s` picks a target and attaches to it in one motion; the first
+picker row, "(a worktree of its own)", provisions a dedicated worktree instead.
+The rows spell out the difference because reusing a slot costs seconds while a
+worktree of its own can cost minutes of provisioning.
+`bork issue target <id> [target]` sets the target from the CLI without
+attaching; omit the target to clear it.
+
+Reusing a slot has a consequence worth stating to whoever adapts this: whatever
+the provider provisioned **carries over between branches**. That is what makes
+the swap fast, and it differs from a fresh worktree's clean state.
 
 ## Why the registry, and not `git worktree list`
 

@@ -50,6 +50,7 @@ impl<'a> WorktreeBackend<'a> {
                 create,
                 remove: config.worktree_remove_cmd.as_deref(),
                 list: config.worktree_list_cmd.as_deref(),
+                targets: config.worktree_targets_cmd.as_deref(),
             }),
             None => WorktreeBackend::Native,
         }
@@ -67,6 +68,7 @@ pub struct ProviderCommands<'a> {
     create: &'a str,
     remove: Option<&'a str>,
     list: Option<&'a str>,
+    targets: Option<&'a str>,
 }
 
 impl ProviderCommands<'_> {
@@ -78,14 +80,17 @@ impl ProviderCommands<'_> {
     ///
     /// The command receives the issue's identity in the environment and must
     /// print the worktree as a JSON object on the last line of stdout.
-    /// `BORK_BRANCH`, when set, is the exact branch to check out — used when a
-    /// card already has one, such as a pull request's head branch — and
-    /// overrides composing a name from the issue id and slug.
+    /// `BORK_TARGET` carries the card's requested target, whose meaning
+    /// belongs to the provider; empty when unset. `BORK_BRANCH`, when set, is
+    /// the exact branch to check out — used when a card already has one, such
+    /// as a pull request's head branch — and overrides composing a name from
+    /// the issue id and slug.
     pub fn create(
         &self,
         issue_id: &str,
         slug: Option<&str>,
         base_branch: Option<&str>,
+        target: Option<&str>,
         branch: Option<&str>,
     ) -> anyhow::Result<WorktreeEntry> {
         let stdout = run_provider_command(
@@ -96,6 +101,7 @@ impl ProviderCommands<'_> {
                 ("BORK_ISSUE_ID", issue_id),
                 ("BORK_SLUG", slug.unwrap_or_default()),
                 ("BORK_BASE", base_branch.unwrap_or_default()),
+                ("BORK_TARGET", target.unwrap_or_default()),
                 ("BORK_BRANCH", branch.unwrap_or_default()),
             ],
             CREATE_TIMEOUT,
@@ -165,6 +171,27 @@ impl ProviderCommands<'_> {
             run_provider_command(self.config, "worktree_list_cmd", script, &[], LIST_TIMEOUT)?;
 
         Ok(parse_list(&stdout))
+    }
+
+    /// Enumerate the targets a card may be pointed at.
+    ///
+    /// Failure is reported: the picker shows it rather than an empty list,
+    /// since "no targets exist" and "the command is broken" need different
+    /// fixes.
+    pub fn targets(&self) -> anyhow::Result<Vec<ProvidedTarget>> {
+        let Some(script) = self.targets else {
+            return Ok(Vec::new());
+        };
+
+        let stdout = run_provider_command(
+            self.config,
+            "worktree_targets_cmd",
+            script,
+            &[],
+            LIST_TIMEOUT,
+        )?;
+
+        Ok(parse_targets(&stdout))
     }
 }
 
@@ -286,6 +313,8 @@ struct WorktreeJson {
     path: String,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
 }
 
 impl WorktreeJson {
@@ -305,8 +334,27 @@ impl WorktreeJson {
             bail!("'{name}' is not a valid worktree name");
         }
 
-        Ok(WorktreeEntry { name, path })
+        Ok(WorktreeEntry {
+            name,
+            path,
+            label: self.label.filter(|label| !label.trim().is_empty()),
+        })
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct TargetJson {
+    target: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// A target a card may be pointed at, as reported by `worktree_targets_cmd`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvidedTarget {
+    pub target: String,
+    /// Provider-supplied description, e.g. the branch a slot currently holds.
+    pub label: Option<String>,
 }
 
 /// Last non-empty line of a captured stream, for error messages. Providers
@@ -344,6 +392,18 @@ fn parse_list(stdout: &str) -> Vec<WorktreeEntry> {
     parse_json_lines::<WorktreeJson>(stdout)
         .into_iter()
         .filter_map(|entry| entry.into_entry().ok())
+        .collect()
+}
+
+/// Parse one JSON object per line.
+fn parse_targets(stdout: &str) -> Vec<ProvidedTarget> {
+    parse_json_lines::<TargetJson>(stdout)
+        .into_iter()
+        .filter(|target| !target.target.trim().is_empty())
+        .map(|target| ProvidedTarget {
+            target: target.target.trim().to_string(),
+            label: target.label.filter(|label| !label.trim().is_empty()),
+        })
         .collect()
 }
 
@@ -530,18 +590,36 @@ mod tests {
     }
 
     #[test]
+    fn targets_reports_a_failing_command() {
+        // "No targets" and "the command is broken" need different fixes, so
+        // the picker must see the difference.
+        let config = AppConfig {
+            worktree_targets_cmd: Some("echo kaput >&2; exit 5".into()),
+            ..provider_config("unused")
+        };
+
+        let err = provider(&config)
+            .targets()
+            .expect_err("a failing targets command must be reported");
+
+        assert!(err.to_string().contains("exit 5"), "got: {err}");
+        assert!(err.to_string().contains("kaput"), "got: {err}");
+    }
+
+    #[test]
     fn parse_created_takes_the_last_line() {
         // Providers log progress before the result.
         let stdout = concat!(
             "Allocating slot 3\n",
             "Setting up databases\n",
-            "{\"path\":\"/dev/wt--pool-a\",\"name\":\"wt--pool-a\"}\n",
+            "{\"path\":\"/dev/wt--pool-a\",\"name\":\"wt--pool-a\",\"label\":\"wt 3\"}\n",
         );
 
         let entry = parse_created(stdout).expect("should parse");
 
         assert_eq!(entry.name, "wt--pool-a");
         assert_eq!(entry.path, PathBuf::from("/dev/wt--pool-a"));
+        assert_eq!(entry.label.as_deref(), Some("wt 3"));
     }
 
     #[test]
@@ -549,6 +627,7 @@ mod tests {
         let entry = parse_created("{\"path\":\"/dev/wt--pool-a\"}").expect("should parse");
 
         assert_eq!(entry.name, "wt--pool-a");
+        assert_eq!(entry.label, None);
     }
 
     #[test]
@@ -590,9 +669,45 @@ mod tests {
     }
 
     #[test]
-    fn parse_list_reads_objects_with_and_without_names() {
+    fn parse_targets_reads_labelled_and_bare_objects() {
         let stdout = concat!(
-            "{\"name\":\"wt-a\",\"path\":\"/dev/wt-a\"}\n",
+            "{\"target\":\"a\",\"label\":\"some-branch\"}\n",
+            "{\"target\":\"b\"}\n",
+            "\n",
+            "{\"target\":\"c\",\"label\":\"\"}\n",
+        );
+
+        assert_eq!(
+            parse_targets(stdout),
+            vec![
+                ProvidedTarget {
+                    target: "a".into(),
+                    label: Some("some-branch".into()),
+                },
+                ProvidedTarget {
+                    target: "b".into(),
+                    label: None,
+                },
+                // An empty label is no label, not an empty string.
+                ProvidedTarget {
+                    target: "c".into(),
+                    label: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_targets_skips_objects_without_a_target() {
+        let stdout = "{\"label\":\"label-only\"}\n{\"target\":\"  \"}\nnot json\n";
+
+        assert!(parse_targets(stdout).is_empty());
+    }
+
+    #[test]
+    fn parse_list_reads_objects_with_and_without_labels() {
+        let stdout = concat!(
+            "{\"name\":\"wt-a\",\"path\":\"/dev/wt-a\",\"label\":\"slot a · :8002\"}\n",
             "{\"path\":\"/dev/wt-b\"}\n",
         );
 
@@ -602,10 +717,12 @@ mod tests {
                 WorktreeEntry {
                     name: "wt-a".into(),
                     path: PathBuf::from("/dev/wt-a"),
+                    label: Some("slot a · :8002".into()),
                 },
                 WorktreeEntry {
                     name: "wt-b".into(),
                     path: PathBuf::from("/dev/wt-b"),
+                    label: None,
                 },
             ]
         );
@@ -627,6 +744,7 @@ mod tests {
             vec![WorktreeEntry {
                 name: "wt-c".into(),
                 path: PathBuf::from("/dev/wt-c"),
+                label: None,
             }]
         );
     }

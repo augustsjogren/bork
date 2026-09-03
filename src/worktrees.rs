@@ -14,6 +14,9 @@ use crate::external::worktree_provider::WorktreeBackend;
 pub struct WorktreeEntry {
     pub name: String,
     pub path: PathBuf,
+    /// Provider-supplied description of what this worktree is, e.g. the slot
+    /// it occupies and the port it serves. Shown on the card.
+    pub label: Option<String>,
 }
 
 /// Every worktree currently on disk, sorted by name.
@@ -61,7 +64,11 @@ fn scan_project_root(config: &AppConfig) -> Vec<WorktreeEntry> {
             if !path.join(".git").exists() {
                 return None;
             }
-            Some(WorktreeEntry { name, path })
+            Some(WorktreeEntry {
+                name,
+                path,
+                label: None,
+            })
         })
         .collect()
 }
@@ -169,6 +176,7 @@ mod tests {
             vec![WorktreeEntry {
                 name: "wt--pool-a".into(),
                 path: PathBuf::from("/elsewhere/wt--pool-a"),
+                label: None,
             }]
         );
         let _ = fs::remove_dir_all(&project);
