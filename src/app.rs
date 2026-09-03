@@ -1392,6 +1392,13 @@ impl Project {
             }
         }
 
+        // A PR whose head branch carries an existing card's id belongs to that
+        // card. The import dedup below skips such PRs to avoid a duplicate
+        // card, but skipping alone drops the association — a card with no
+        // worktree (nothing provisioned locally) would never show its PR.
+        // Adopt it instead, before the claimed sets are built.
+        let adopted = self.adopt_prs_by_branch_prefix();
+
         // Build sets of already-claimed PRs for dedup
         let claimed_branches: HashSet<String> = self
             .issues
@@ -1528,7 +1535,13 @@ impl Project {
         self.live.reported_draft_skips = Some(skipped_drafts);
         let report_drafts = skipped_drafts > 0 && draft_notice_is_new;
 
-        if added == 0 && removed == 0 && completed == 0 && retagged == 0 && !report_drafts {
+        if adopted == 0
+            && added == 0
+            && removed == 0
+            && completed == 0
+            && retagged == 0
+            && !report_drafts
+        {
             return (false, None);
         }
 
@@ -1562,11 +1575,52 @@ impl Project {
             ));
         }
 
-        let changed = added > 0 || removed > 0 || completed > 0 || retagged > 0;
+        let changed = adopted > 0 || added > 0 || removed > 0 || completed > 0 || retagged > 0;
         if parts.is_empty() {
             return (changed, None);
         }
         (changed, Some(parts.join(", ")))
+    }
+
+    /// Link every polled PR whose head branch starts with `<issue-id>-` or
+    /// `<issue-id>/` to that card, unless some card already claims the PR.
+    /// Returns how many links were added.
+    fn adopt_prs_by_branch_prefix(&mut self) -> usize {
+        let claimed: HashSet<u32> = self
+            .issues
+            .iter()
+            .flat_map(|issue| issue.pr_numbers())
+            .collect();
+
+        let candidates: Vec<(u32, String)> = self
+            .live
+            .user_prs
+            .iter()
+            .chain(self.live.review_requested_prs.iter())
+            .filter(|pr| pr.state == PrState::Open && !pr.is_cross_repository)
+            .filter(|pr| !claimed.contains(&pr.number))
+            .map(|pr| (pr.number, pr.head_branch.to_lowercase()))
+            .collect();
+
+        let mut adopted = 0;
+        for (number, branch) in candidates {
+            let Some(issue) = self.issues.iter_mut().find(|issue| {
+                let id = issue.id.to_lowercase();
+                branch.starts_with(&format!("{id}-")) || branch.starts_with(&format!("{id}/"))
+            }) else {
+                continue;
+            };
+            if issue.pr_numbers().contains(&number) {
+                continue;
+            }
+            issue.github_pr_links.push(LinkedGithubPr {
+                number,
+                imported: false,
+                import_source: None,
+            });
+            adopted += 1;
+        }
+        adopted
     }
 
     /// Issue skeleton for an auto-imported PR. A draft lands in In Progress —
@@ -5543,6 +5597,41 @@ mod tests {
     }
 
     #[test]
+    fn a_pr_on_a_cards_branch_is_adopted_not_skipped() {
+        // The card has no worktree, so branch matching can never find the PR;
+        // the id prefix in the head branch is the only tie, and dropping it
+        // would leave the card blank forever.
+        let mut app = test_app(vec![test_issue("eng-3391", Column::InProgress)]);
+        let mut pr = test_pr(42424, "eng-3391-parse-errors");
+        pr.is_draft = true;
+        app.project_mut().live.user_prs = vec![pr];
+        app.project_mut().live.pr_poll_done = true;
+
+        let (changed, _) = app.project_mut().sync_prs_as_issues();
+
+        assert!(changed);
+        assert_eq!(app.project().issues.len(), 1, "adopt, never duplicate");
+        assert!(app.project().issues[0].has_pr_number(42424));
+    }
+
+    #[test]
+    fn adoption_never_steals_a_claimed_pr() {
+        let mut claimed = test_issue("bork-9", Column::InProgress);
+        claimed.github_pr_links.push(LinkedGithubPr {
+            number: 42424,
+            imported: false,
+            import_source: None,
+        });
+        let mut app = test_app(vec![claimed, test_issue("eng-3391", Column::InProgress)]);
+        app.project_mut().live.user_prs = vec![test_pr(42424, "eng-3391-parse-errors")];
+        app.project_mut().live.pr_poll_done = true;
+
+        app.project_mut().sync_prs_as_issues();
+
+        assert!(!app.project().issues[1].has_pr_number(42424));
+    }
+
+    #[test]
     fn sync_prs_imports_open_pr_as_issue() {
         let mut app = test_app(vec![]);
         app.project_mut().live.user_prs = vec![test_pr(1, "feature/new")];
@@ -5830,8 +5919,10 @@ mod tests {
         app.project_mut().live.user_prs = vec![test_pr(1, "bork-5/follow-up")];
         app.project_mut().live.pr_poll_done = true;
 
-        assert!(!app.project_mut().sync_prs_as_issues().0);
+        // Adopted onto the matching card, never imported as a duplicate.
+        assert!(app.project_mut().sync_prs_as_issues().0);
         assert_eq!(app.project().issues.len(), 1);
+        assert!(app.project().issues[0].has_pr_number(1));
     }
 
     #[test]
@@ -5909,8 +6000,9 @@ mod tests {
         app.project_mut().live.user_prs = vec![test_pr(1, "DOC-1917-attachment-selection-search")];
         app.project_mut().live.pr_poll_done = true;
 
-        assert!(!app.project_mut().sync_prs_as_issues().0);
+        assert!(app.project_mut().sync_prs_as_issues().0);
         assert_eq!(app.project().issues.len(), 1);
+        assert!(app.project().issues[0].has_pr_number(1));
     }
 
     #[test]
@@ -5932,8 +6024,9 @@ mod tests {
         app.project_mut().live.user_prs = vec![test_pr(1, "bork-5/fix")];
         app.project_mut().live.pr_poll_done = true;
 
-        assert!(!app.project_mut().sync_prs_as_issues().0);
+        assert!(app.project_mut().sync_prs_as_issues().0);
         assert_eq!(app.project().issues.len(), 1);
+        assert!(app.project().issues[0].has_pr_number(1));
     }
 
     // ================================================================
