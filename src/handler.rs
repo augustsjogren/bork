@@ -725,7 +725,18 @@ fn handle_normal(
             let issues = project.target_issues(&q);
             let message = match issues.as_slice() {
                 [] => return PostAction::None,
-                [issue] => format!("Delete {}: {}? (y/n)", issue.id, issue.title),
+                // Deleting a card never touches its worktree, so one that still
+                // holds a provider's worktree strands it: the databases, ports
+                // and pool slot stay allocated with nothing on the board
+                // pointing at them. Name it rather than refuse — `X` then `d`
+                // is the way out.
+                [issue] => match issue.worktree.as_deref() {
+                    Some(worktree) => format!(
+                        "Delete {}: {}? '{worktree}' stays on disk — release it with X first. (y/n)",
+                        issue.id, issue.title
+                    ),
+                    None => format!("Delete {}: {}? (y/n)", issue.id, issue.title),
+                },
                 _ => format!("Delete {}? (y/n)", count_of(issues.len(), "issue")),
             };
             let issue_ids = issues.iter().map(|issue| issue.id.clone()).collect();
@@ -3988,6 +3999,7 @@ mod tests {
             project: app.project(),
             ports: None,
             search_query: "",
+            target_label: None,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
@@ -4161,6 +4173,7 @@ mod tests {
                 project: app.project(),
                 ports: None,
                 search_query: "",
+                target_label: None,
             };
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 7)).unwrap();
@@ -4247,6 +4260,7 @@ mod tests {
                     project,
                     ports: None,
                     search_query: "",
+                    target_label: None,
                 };
                 let mut terminal =
                     ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 7)).unwrap();

@@ -6526,6 +6526,9 @@ mod tests {
                 additions: 0,
                 deletions: 0,
                 head_branch: head_branch.to_string(),
+                merge_blocker: None,
+                in_merge_queue: false,
+                unresolved_threads: 0,
             },
         );
         app
