@@ -3238,6 +3238,11 @@ fn delete_confirm_message(project: &Project, issues: &[&Issue]) -> Option<String
             if running(issue) {
                 details.push("session running".to_string());
             }
+            if let Some(worktree) = issue.worktree.as_deref() {
+                details.push(format!(
+                    "'{worktree}' stays on disk, release it with X first"
+                ));
+            }
             format!("{}: {}", issue.id, issue.title)
         }
         _ => {
@@ -4078,6 +4083,7 @@ mod tests {
             project: app.project(),
             ports: None,
             search_query: "",
+            target_label: None,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
@@ -4251,6 +4257,7 @@ mod tests {
                 project: app.project(),
                 ports: None,
                 search_query: "",
+                target_label: None,
             };
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 7)).unwrap();
@@ -4337,6 +4344,7 @@ mod tests {
                     project,
                     ports: None,
                     search_query: "",
+                    target_label: None,
                 };
                 let mut terminal =
                     ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 7)).unwrap();
