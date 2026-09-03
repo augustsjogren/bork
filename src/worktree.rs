@@ -611,6 +611,7 @@ mod tests {
             done_session_ttl: 300,
             debug: false,
             auto_import_reviews: true,
+            auto_import_draft_prs: false,
             auto_import_authored_prs: true,
             agents_allowlist: None,
             prune_threshold: crate::config::DEFAULT_PRUNE_THRESHOLD,

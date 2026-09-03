@@ -1596,6 +1596,7 @@ enum ConfigKeyKind {
 
 const CONFIG_KEYS: &[(&str, ConfigKeyKind)] = &[
     ("auto_import_reviews", ConfigKeyKind::Bool),
+    ("auto_import_draft_prs", ConfigKeyKind::Bool),
     ("auto_import_authored_prs", ConfigKeyKind::Bool),
     ("debug", ConfigKeyKind::Bool),
     ("done_session_ttl", ConfigKeyKind::U64),
@@ -1660,6 +1661,7 @@ fn toml_literal_for(kind: ConfigKeyKind, value: &str) -> anyhow::Result<String> 
 fn resolved_config_value(config: &config::AppConfig, key: &str) -> Option<String> {
     match key {
         "auto_import_reviews" => Some(config.auto_import_reviews.to_string()),
+        "auto_import_draft_prs" => Some(config.auto_import_draft_prs.to_string()),
         "auto_import_authored_prs" => Some(config.auto_import_authored_prs.to_string()),
         "debug" => Some(config.debug.to_string()),
         "done_session_ttl" => Some(config.done_session_ttl.to_string()),

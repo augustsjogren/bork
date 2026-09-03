@@ -119,6 +119,9 @@ pub struct LiveState {
     /// Live run state of Cursor cloud agents, keyed by agent id. Never
     /// persisted; durable facts live on `Issue.cloud`.
     pub cloud_runs: HashMap<String, CloudRunInfo>,
+    /// Draft-skip count last surfaced to the user. The poll runs every minute,
+    /// so the notice repeats only when the number actually changes.
+    pub reported_draft_skips: Option<usize>,
 }
 
 /// Work produced by one tick of `Project::drive_session_cleanup`, applied by
@@ -1302,7 +1305,7 @@ impl Project {
                              new_pr_numbers: &HashSet<u32>,
                              issue_ids: &[String]|
          -> bool {
-            if pr.state != PrState::Open || pr.is_draft {
+            if pr.state != PrState::Open {
                 return false;
             }
             // Fork branches live in another repo's namespace, so skip the
@@ -1331,6 +1334,9 @@ impl Project {
         };
 
         let mut new_pr_numbers: HashSet<u32> = HashSet::new();
+        // Drafts that would have imported but for their draft status. Silence
+        // here reads as "bork is broken" to anyone who opens PRs as drafts.
+        let mut skipped_drafts = 0usize;
 
         // Import authored PRs
         let authored_prs: &[PrStatus] = if self.config.auto_import_authored_prs
@@ -1348,6 +1354,10 @@ impl Project {
                 &new_pr_numbers,
                 &issue_ids,
             ) {
+                continue;
+            }
+            if pr.is_draft && !self.config.auto_import_draft_prs {
+                skipped_drafts += 1;
                 continue;
             }
             new_pr_numbers.insert(pr.number);
@@ -1389,6 +1399,10 @@ impl Project {
             ) {
                 continue;
             }
+            if pr.is_draft && !self.config.auto_import_draft_prs {
+                skipped_drafts += 1;
+                continue;
+            }
             new_pr_numbers.insert(pr.number);
             let id = self.next_issue_id_after(new_issues.len() as u32);
             new_issues.push(self.imported_pr_issue(id, pr, PrImportSource::ReviewRequested));
@@ -1397,7 +1411,13 @@ impl Project {
         let added = new_issues.len();
         self.issues.append(&mut new_issues);
 
-        if added == 0 && removed == 0 && completed == 0 && retagged == 0 {
+        // Repeat the draft notice only when the count moves; the poll is every
+        // minute and a standing "4 drafts skipped" toast would be noise.
+        let draft_notice_is_new = self.live.reported_draft_skips != Some(skipped_drafts);
+        self.live.reported_draft_skips = Some(skipped_drafts);
+        let report_drafts = skipped_drafts > 0 && draft_notice_is_new;
+
+        if added == 0 && removed == 0 && completed == 0 && retagged == 0 && !report_drafts {
             return (false, None);
         }
 
@@ -1423,14 +1443,24 @@ impl Project {
                 if completed == 1 { "" } else { "s" }
             ));
         }
-        if parts.is_empty() {
-            return (true, None);
+        if report_drafts {
+            parts.push(format!(
+                "Skipped {} draft PR{} (set auto_import_draft_prs to import them)",
+                skipped_drafts,
+                if skipped_drafts == 1 { "" } else { "s" }
+            ));
         }
-        (true, Some(parts.join(", ")))
+
+        let changed = added > 0 || removed > 0 || completed > 0 || retagged > 0;
+        if parts.is_empty() {
+            return (changed, None);
+        }
+        (changed, Some(parts.join(", ")))
     }
 
-    /// Issue skeleton for an auto-imported PR. Review-requested PRs get a
-    /// review prompt where authored ones get none.
+    /// Issue skeleton for an auto-imported PR. A draft lands in In Progress —
+    /// it is work in flight, not something to review — and review-requested
+    /// PRs get a review prompt where authored ones get none.
     fn imported_pr_issue(&self, id: String, pr: &PrStatus, source: PrImportSource) -> Issue {
         let prompt = match source {
             PrImportSource::Authored => None,
@@ -1461,7 +1491,16 @@ impl Project {
                 imported: true,
                 import_source: Some(source),
             }],
-            ..Issue::new(id, pr.title.clone(), Column::CodeReview, agent_kind)
+            ..Issue::new(
+                id,
+                pr.title.clone(),
+                if pr.is_draft {
+                    Column::InProgress
+                } else {
+                    Column::CodeReview
+                },
+                agent_kind,
+            )
         }
     }
 
@@ -3187,6 +3226,7 @@ mod tests {
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             auto_import_reviews: true,
+            auto_import_draft_prs: false,
             auto_import_authored_prs: true,
             agents_allowlist: None,
             prune_threshold: crate::config::DEFAULT_PRUNE_THRESHOLD,
@@ -5160,6 +5200,74 @@ mod tests {
         let mut memory = base.clone();
         merge_issue_fields(&mut memory, &base, &original);
         assert_eq!(memory.pr_import_baseline, original.pr_import_baseline);
+    }
+
+    fn draft_pr(number: u32, branch: &str) -> PrStatus {
+        PrStatus {
+            is_draft: true,
+            ..test_pr(number, branch)
+        }
+    }
+
+    #[test]
+    fn sync_prs_skips_drafts_but_says_so() {
+        // Silence here is indistinguishable from a broken board for anyone who
+        // opens pull requests as drafts.
+        let mut app = test_app(vec![]);
+        app.project_mut().live.user_prs = vec![draft_pr(1, "feature/wip")];
+        app.project_mut().live.pr_poll_done = true;
+
+        let (changed, message) = app.project_mut().sync_prs_as_issues();
+
+        assert!(app.project().issues.is_empty());
+        assert!(!changed, "nothing was imported, so nothing to persist");
+        let message = message.expect("the skip must be reported");
+        assert!(message.contains("Skipped 1 draft PR"), "got: {message}");
+        assert!(message.contains("auto_import_draft_prs"), "got: {message}");
+    }
+
+    #[test]
+    fn sync_prs_reports_a_draft_skip_once() {
+        // The poll runs every minute; a standing toast would be noise.
+        let mut app = test_app(vec![]);
+        app.project_mut().live.user_prs = vec![draft_pr(1, "feature/wip")];
+        app.project_mut().live.pr_poll_done = true;
+
+        app.project_mut().sync_prs_as_issues();
+        let (_, repeat) = app.project_mut().sync_prs_as_issues();
+
+        assert_eq!(repeat, None);
+    }
+
+    #[test]
+    fn sync_prs_reports_again_when_the_draft_count_changes() {
+        let mut app = test_app(vec![]);
+        app.project_mut().live.user_prs = vec![draft_pr(1, "feature/wip")];
+        app.project_mut().live.pr_poll_done = true;
+        app.project_mut().sync_prs_as_issues();
+
+        app.project_mut()
+            .live
+            .user_prs
+            .push(draft_pr(2, "feature/other"));
+        let (_, message) = app.project_mut().sync_prs_as_issues();
+
+        assert!(message
+            .expect("a new draft is worth saying")
+            .contains("Skipped 2 draft PRs"),);
+    }
+
+    #[test]
+    fn sync_prs_imports_drafts_into_in_progress_when_enabled() {
+        // A draft is work in flight, so Code Review would be the wrong column.
+        let mut app = test_app(vec![]);
+        app.project_mut().config.auto_import_draft_prs = true;
+        app.project_mut().live.user_prs = vec![draft_pr(1, "feature/wip")];
+        app.project_mut().live.pr_poll_done = true;
+
+        assert!(app.project_mut().sync_prs_as_issues().0);
+        assert_eq!(app.project().issues.len(), 1);
+        assert_eq!(app.project().issues[0].column, Column::InProgress);
     }
 
     #[test]
@@ -7641,6 +7749,7 @@ mod tests {
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             auto_import_reviews: true,
+            auto_import_draft_prs: false,
             auto_import_authored_prs: true,
             agents_allowlist: None,
             prune_threshold: crate::config::DEFAULT_PRUNE_THRESHOLD,
