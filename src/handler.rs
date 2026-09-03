@@ -930,7 +930,9 @@ fn handle_normal(
             let Some(issue) = app.context_project(ctx).selected_issue(&q) else {
                 return PostAction::None;
             };
-            let Some(wt) = issue.worktree.clone() else {
+            let Some(worktree_path) =
+                issue.worktree_path_in(&app.context_project(ctx).config.project_root)
+            else {
                 app.set_warning("No worktree assigned");
                 return PostAction::None;
             };
@@ -948,7 +950,6 @@ fn handle_normal(
                 None
             };
             let popup_title = issue.popup_title();
-            let worktree_path = app.context_project(ctx).config.project_root.join(&wt);
             let tx = ch.action_tx.clone();
             app.begin_busy();
             app.set_message(match (session_alive, pr) {
@@ -1070,7 +1071,9 @@ fn handle_normal(
             let Some(idx) = app.context_project(ctx).selected_issue_index(&q) else {
                 return PostAction::None;
             };
-            if let Some(old) = app.context_project_mut(ctx).issues[idx].worktree.take() {
+            let old = app.context_project_mut(ctx).issues[idx].worktree.clone();
+            app.context_project_mut(ctx).issues[idx].detach_worktree();
+            if let Some(old) = old {
                 app.set_message(format!("Cleared worktree '{old}', re-detecting..."));
             } else {
                 app.set_message("No worktree assigned, re-detecting...");
@@ -2179,7 +2182,7 @@ fn spawn_prune(
     thread::spawn(move || {
         let outcome =
             crate::prune::execute_removals(&project_root, &to_remove, &dirty, force_plans);
-        let (message, message_kind) = format_prune_result(&outcome);
+        let (message, message_kind) = format_prune_result(&outcome, "Pruned");
         let _ = tx.send(ActionResult {
             message,
             message_kind,
@@ -2246,11 +2249,14 @@ pub fn show_queued_force_prune(app: &mut App) -> bool {
     true
 }
 
-fn format_prune_result(outcome: &crate::prune::PruneOutcome) -> (String, MessageKind) {
+fn format_prune_result(outcome: &crate::prune::PruneOutcome, verb: &str) -> (String, MessageKind) {
     let removed = outcome.removed_count();
     let failed = outcome.failed_count();
     if failed == 0 {
-        return (format!("Pruned {} worktree(s)", removed), MessageKind::Info);
+        return (
+            format!("{} {} worktree(s)", verb, removed),
+            MessageKind::Info,
+        );
     }
     let failure_summary: Vec<String> = outcome
         .results
@@ -2265,7 +2271,8 @@ fn format_prune_result(outcome: &crate::prune::PruneOutcome) -> (String, Message
         .collect();
     (
         format!(
-            "Pruned {} worktree(s), {} failed ({}), see .bork/errors.log",
+            "{} {} worktree(s), {} failed ({}), see .bork/errors.log",
+            verb,
             removed,
             failed,
             failure_summary.join("; ")
@@ -2913,6 +2920,10 @@ mod tests {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            worktree_create_cmd: None,
+            worktree_remove_cmd: None,
+            worktree_list_cmd: None,
+            worktree_pool_size: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             auto_import_reviews: true,
@@ -4937,6 +4948,30 @@ mod tests {
     }
 
     #[test]
+    fn delete_confirm_names_a_worktree_that_will_be_stranded() {
+        // `d` leaves the worktree allocated with no card pointing at it, so the
+        // prompt has to say which one and how to release it.
+        let mut app = app_with_issues();
+        app.project_mut().issues[0].attach_worktree("wt--pool-slot-a".into());
+
+        act(&mut app, Action::DeleteIssue);
+
+        let message = app.confirm_message.as_deref().expect("confirm open");
+        assert!(message.contains("wt--pool-slot-a"), "got: {message}");
+        assert!(message.contains("release it with X"), "got: {message}");
+    }
+
+    #[test]
+    fn delete_confirm_stays_plain_without_a_worktree() {
+        let mut app = app_with_issues();
+
+        act(&mut app, Action::DeleteIssue);
+
+        let message = app.confirm_message.as_deref().expect("confirm open");
+        assert!(!message.contains("stays on disk"), "got: {message}");
+    }
+
+    #[test]
     fn delete_confirm_waits_for_teardown_before_removing_issue() {
         let mut app = app_with_issues();
         let project_id = app.project().id();
@@ -5710,6 +5745,10 @@ mod tests {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            worktree_create_cmd: None,
+            worktree_remove_cmd: None,
+            worktree_list_cmd: None,
+            worktree_pool_size: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             auto_import_reviews: true,

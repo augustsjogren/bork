@@ -801,7 +801,7 @@ pub fn archive_issue(
     // teardown script and git removal were running.
     let mut state = config::load_state(project_root);
     if let Some(saved) = state.issues.iter_mut().find(|i| i.id == issue.id) {
-        saved.worktree = None;
+        saved.detach_worktree();
         saved.move_to_column(Column::Done, now_epoch());
     }
     config::save_state(&state, project_root)?;

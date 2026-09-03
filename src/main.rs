@@ -23,6 +23,7 @@ mod ui;
 mod undo;
 mod update;
 mod worktree;
+mod worktrees;
 
 /// Serializes tests that point the process-global
 /// config dir somewhere, either through `with_test_config_home` or by setting
@@ -55,6 +56,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::{App, InputMode, Project, ProjectId};
+use config::AppConfig;
 use global_config::ReloadResult;
 use handler::{ActionResult, PostAction};
 use input::map_key_to_action;
@@ -309,7 +311,7 @@ impl AgentStatusCache {
 }
 
 fn spawn_git_status_worker(
-    project_root: PathBuf,
+    config: AppConfig,
     classes: Arc<Mutex<HashMap<String, PollClass>>>,
     pool: GitStatusPool,
     suspended: Arc<AtomicBool>,
@@ -318,7 +320,7 @@ fn spawn_git_status_worker(
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        let mut poller = GitPoller::new(project_root, pool);
+        let mut poller = GitPoller::new(config, pool);
         // The first cycle refreshes everything; later cycles honor the adaptive
         // cadence unless a wake forces a full refresh.
         let mut force_all = true;
@@ -1244,7 +1246,7 @@ fn run_prune_command(
     let config = config::load_config();
     let mut state = config::load_state(&config.project_root);
 
-    let poll = external::git::poll_all_worktrees(&config.project_root, &HashSet::new());
+    let poll = external::git::poll_all_worktrees(&config, &HashSet::new());
 
     let mut candidates: Vec<PruneCandidate> = poll
         .branches
@@ -1603,6 +1605,12 @@ const CONFIG_KEYS: &[(&str, ConfigKeyKind)] = &[
     ("review_prompt", ConfigKeyKind::Str),
     ("stack_review_prompt", ConfigKeyKind::Str),
     ("orchestrator_prompt", ConfigKeyKind::Str),
+    ("worktree_create_cmd", ConfigKeyKind::Str),
+    ("worktree_remove_cmd", ConfigKeyKind::Str),
+    ("worktree_list_cmd", ConfigKeyKind::Str),
+    ("worktree_targets_cmd", ConfigKeyKind::Str),
+    ("worktree_target_label", ConfigKeyKind::Str),
+    ("worktree_pool_size", ConfigKeyKind::U64),
 ];
 
 fn config_key_kind(key: &str) -> Option<ConfigKeyKind> {
@@ -1661,6 +1669,16 @@ fn resolved_config_value(config: &config::AppConfig, key: &str) -> Option<String
         "review_prompt" => Some(config.review_prompt.clone().unwrap_or_default()),
         "stack_review_prompt" => Some(config.stack_review_prompt.clone().unwrap_or_default()),
         "orchestrator_prompt" => Some(config.orchestrator_prompt.clone().unwrap_or_default()),
+        "worktree_create_cmd" => Some(config.worktree_create_cmd.clone().unwrap_or_default()),
+        "worktree_remove_cmd" => Some(config.worktree_remove_cmd.clone().unwrap_or_default()),
+        "worktree_list_cmd" => Some(config.worktree_list_cmd.clone().unwrap_or_default()),
+        // Empty rather than 0: an unset pool is unbounded, not a pool of none.
+        "worktree_pool_size" => Some(
+            config
+                .worktree_pool_size
+                .map(|size| size.to_string())
+                .unwrap_or_default(),
+        ),
         _ => None,
     }
 }
@@ -2007,7 +2025,7 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
             None,
             opts.base_branch.as_deref(),
         )?;
-        issue.attach_worktree(result.worktree_dir.clone());
+        issue.attach_worktree_at(result.worktree_dir.clone(), result.worktree_path);
         Some(result.worktree_dir)
     };
 
@@ -2306,7 +2324,7 @@ fn spawn_project_workers(
     let git_classes = Arc::new(Mutex::new(project.worktree_poll_classes()));
     let (git_wake_tx, git_wake_rx) = mpsc::channel::<()>();
     let git_rx = spawn_git_status_worker(
-        project_root.clone(),
+        project.config.clone(),
         git_classes.clone(),
         git_pool.clone(),
         suspended.clone(),
@@ -2548,7 +2566,8 @@ fn drain_project_workers(
     // a freshly created issue whose worktree already exists must be
     // assigned even if the git poll data is identical. Gated on
     // git_poll_done so an empty pre-poll branch map can't wipe worktrees.
-    if git_data_changed || (project.state_dirty && project.live.git_poll_done) {
+    if git_data_changed || ((pr_data_changed || project.state_dirty) && project.live.git_poll_done)
+    {
         let mut worktree_changed = project.auto_assign_worktrees();
         worktree_changed = project.clear_stale_worktrees() || worktree_changed;
         if worktree_changed {
@@ -3565,7 +3584,7 @@ fn maybe_auto_prune_message(app: &mut app::App) -> Option<String> {
             }
         }
         project.last_auto_prune_check = Some(now_inst);
-        let count = prune::discover_worktree_names(&project.config.project_root).len();
+        let count = prune::discover_worktree_names(&project.config).len();
         if (count as u64) < project.config.prune_threshold {
             continue;
         }

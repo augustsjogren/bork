@@ -1,10 +1,11 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context};
 
 use crate::agent_config;
 use crate::config;
+use crate::external::worktree_provider::{ProviderCommands, WorktreeBackend};
 use crate::types::{Column, Issue, IssueKind};
 
 /// Create a git worktree and register it with bork's state.json.
@@ -28,6 +29,9 @@ pub fn run_worktree(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeResult {
     pub worktree_dir: String,
+    /// Absolute path, when an external provider chose it. `None` means the
+    /// worktree sits at `project_root/<worktree_dir>`.
+    pub worktree_path: Option<PathBuf>,
     pub branch_name: String,
 }
 
@@ -105,6 +109,19 @@ pub fn create_worktree_in(
     title: Option<&str>,
     base_branch: Option<&str>,
 ) -> anyhow::Result<WorktreeResult> {
+    create_worktree_with_branch(config, issue_id, slug, title, base_branch, None)
+}
+
+/// As [`create_worktree_in`], with an explicit branch to check out instead of
+/// one composed from the issue id and slug.
+pub fn create_worktree_with_branch(
+    config: &config::AppConfig,
+    issue_id: &str,
+    slug: Option<&str>,
+    title: Option<&str>,
+    base_branch: Option<&str>,
+    branch_override: Option<&str>,
+) -> anyhow::Result<WorktreeResult> {
     let mut state = config::load_state(&config.project_root);
 
     if state
@@ -118,11 +135,23 @@ pub fn create_worktree_in(
         );
     }
 
-    let main_dir = config.project_root.join("main");
+    let main_dir = config.main_dir();
     if !main_dir.join(".git").exists() {
         bail!(
             "No git repo found at {}/main. Are you in a bork project?",
             config.project_root.display()
+        );
+    }
+
+    if let WorktreeBackend::Provider(provider) = WorktreeBackend::resolve(config) {
+        return create_via_provider(
+            &provider,
+            &mut state,
+            issue_id,
+            slug,
+            title,
+            base_branch,
+            branch_override,
         );
     }
 
@@ -176,6 +205,90 @@ pub fn create_worktree_in(
         bail!("git worktree add failed");
     }
 
+    link_worktree(config, &mut state, issue_id, title, &worktree_dir, None)?;
+
+    Ok(WorktreeResult {
+        worktree_dir,
+        worktree_path: None,
+        branch_name,
+    })
+}
+
+/// Create a worktree through the configured external provider, which owns
+/// naming, layout and any per-worktree provisioning.
+fn create_via_provider(
+    provider: &ProviderCommands,
+    state: &mut config::AppState,
+    issue_id: &str,
+    slug: Option<&str>,
+    title: Option<&str>,
+    base_branch: Option<&str>,
+    branch_override: Option<&str>,
+) -> anyhow::Result<WorktreeResult> {
+    let config = provider.config();
+
+    if let Some(limit) = config.worktree_pool_size {
+        // Fails closed: a list command that errors must not read as an empty
+        // pool and wave the create through the ceiling it exists to enforce.
+        let in_use = provider
+            .list_checked()
+            .context("Cannot check the worktree pool before creating")?
+            .len() as u64;
+        if in_use >= limit {
+            bail!(
+                "All {} worktrees in the pool are in use. \
+                 Detach one from its card (or prune it) to free a slot.",
+                limit
+            );
+        }
+    }
+
+    let created = provider.create(issue_id, slug, base_branch, branch_override)?;
+    let branch_name = git_stdout(&created.path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .filter(|branch| !branch.is_empty() && branch != "HEAD")
+        .unwrap_or_else(|| created.name.clone());
+
+    link_worktree(
+        config,
+        state,
+        issue_id,
+        title,
+        &created.name,
+        Some(created.path.clone()),
+    )?;
+
+    Ok(WorktreeResult {
+        worktree_dir: created.name,
+        worktree_path: Some(created.path),
+        branch_name,
+    })
+}
+
+/// Attach the new worktree to its issue, creating the issue when a title is
+/// given, then persist. Shared by both creation paths so an externally
+/// provided worktree lands on the board identically.
+fn link_worktree(
+    config: &config::AppConfig,
+    state: &mut config::AppState,
+    issue_id: &str,
+    title: Option<&str>,
+    name: &str,
+    path: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    // One worktree, one card. A provider hands back a worktree it already owns
+    // — a slot swapping branches — and the card that had it may have been
+    // matched by branch rather than by target, so the target check upstream of
+    // here cannot see it. Its branch has just moved, so it no longer has a
+    // worktree either way.
+    for issue in state
+        .issues
+        .iter_mut()
+        .filter(|i| !i.id.eq_ignore_ascii_case(issue_id))
+        .filter(|i| i.worktree.as_deref() == Some(name))
+    {
+        issue.detach_worktree();
+    }
+
     // Match case-insensitively: stored ids are lowercase but users may type
     // e.g. `bork worktree BORK-1` or a Linear identifier like `VIL-123`.
     if let Some(issue) = state
@@ -183,17 +296,15 @@ pub fn create_worktree_in(
         .iter_mut()
         .find(|i| i.id.eq_ignore_ascii_case(issue_id))
     {
-        issue.attach_worktree(worktree_dir.to_string());
+        issue.attach_worktree_at(name.to_string(), path);
     } else if let Some(title) = title {
-        let issue = Issue {
-            worktree: Some(worktree_dir.to_string()),
-            ..Issue::new(
-                issue_id,
-                title,
-                Column::Todo,
-                agent_config::default_agent_for(config),
-            )
-        };
+        let mut issue = Issue::new(
+            issue_id,
+            title,
+            Column::Todo,
+            agent_config::default_agent_for(config),
+        );
+        issue.attach_worktree_at(name.to_string(), path);
         state.issues.push(issue);
     } else {
         println!(
@@ -204,12 +315,7 @@ pub fn create_worktree_in(
         );
     }
 
-    config::save_state(&state, &config.project_root)?;
-
-    Ok(WorktreeResult {
-        worktree_dir,
-        branch_name,
-    })
+    config::save_state(state, &config.project_root)
 }
 
 /// A removal that `--force` would push through: the issue's plan couldn't be
@@ -268,8 +374,19 @@ pub fn remove_worktree_in(
     worktree_dir: &str,
     removal: Removal,
 ) -> anyhow::Result<Removed> {
+    remove_worktree_at(config, worktree_dir, None, removal)
+}
+
+/// Remove a worktree whose path is known, for providers that place worktrees
+/// outside the project root.
+pub fn remove_worktree_at(
+    config: &config::AppConfig,
+    worktree_dir: &str,
+    worktree_path: Option<&Path>,
+    removal: Removal,
+) -> anyhow::Result<Removed> {
     let force = removal != Removal::Safe;
-    let main_dir = config.project_root.join("main");
+    let main_dir = config.main_dir();
     if !main_dir.join(".git").exists() {
         bail!(
             "No git repo found at {}/main. Are you in a bork project?",
@@ -277,7 +394,10 @@ pub fn remove_worktree_in(
         );
     }
 
-    let worktree_path = config.project_root.join(worktree_dir);
+    let worktree_path = match worktree_path {
+        Some(path) => path.to_path_buf(),
+        None => config.project_root.join(worktree_dir),
+    };
     if !worktree_path.exists() {
         // Directory already gone; clean up any stale worktree metadata.
         let _ = crate::external::git_command()
@@ -328,6 +448,14 @@ pub fn remove_worktree_in(
             dirty: has_uncommitted_changes(&worktree_path),
         }
         .into());
+    }
+
+    // An external provider's removal has to release whatever it allocated
+    // alongside the checkout, so it replaces `git worktree remove` outright
+    // rather than running before it.
+    if let WorktreeBackend::Provider(provider) = WorktreeBackend::resolve(config) {
+        provider.remove(worktree_dir, &worktree_path, force)?;
+        return Ok(Removed::default());
     }
 
     let worktree_arg = format!("../{}", worktree_dir);
@@ -476,6 +604,10 @@ mod tests {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            worktree_create_cmd: None,
+            worktree_remove_cmd: None,
+            worktree_list_cmd: None,
+            worktree_pool_size: None,
             done_session_ttl: 300,
             debug: false,
             auto_import_reviews: true,
@@ -486,6 +618,27 @@ mod tests {
             cloud_agents: false,
             agent_launch: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn untargeted_create_is_refused_when_the_pool_is_full() {
+        let (tmp, project, _cfg) = setup_test_project();
+        let cfg = config::AppConfig {
+            worktree_create_cmd: Some("true".into()),
+            worktree_list_cmd: Some(r#"printf '{"path":"/tmp/a"}\n'"#.into()),
+            worktree_pool_size: Some(1),
+            ..test_config(&project)
+        };
+
+        let err = create_worktree_in(&cfg, "bork-1", None, None, None)
+            .expect_err("a full pool must refuse a create");
+
+        assert!(
+            err.to_string().contains("in the pool are in use"),
+            "got: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

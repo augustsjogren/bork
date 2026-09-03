@@ -863,6 +863,14 @@ impl Project {
     /// Finds a worktree directory by dash-bounded substring match of the issue ID.
     /// Shortest match wins (e.g. `bork-1` preferred over `bork-1-extended`).
     pub(crate) fn detect_worktree(&self, issue: &Issue) -> Option<String> {
+        // Never match provider worktrees: they live outside project_root, so a
+        // name match would attach the card with a fabricated
+        // `project_root/<name>` path. Provider worktrees are linked to their
+        // card when they are created.
+        if self.config.uses_external_worktrees() {
+            return None;
+        }
+
         let live = &self.live;
         let all_keys = live
             .worktree_branches
@@ -920,7 +928,7 @@ impl Project {
         }
 
         for i in stale {
-            self.issues[i].worktree = None;
+            self.issues[i].detach_worktree();
         }
         true
     }
@@ -1421,8 +1429,8 @@ impl Project {
         (true, Some(parts.join(", ")))
     }
 
-    /// Issue skeleton for a PR auto-imported into Code Review. Review-requested
-    /// PRs get a review prompt; authored PRs get none.
+    /// Issue skeleton for an auto-imported PR. Review-requested PRs get a
+    /// review prompt where authored ones get none.
     fn imported_pr_issue(&self, id: String, pr: &PrStatus, source: PrImportSource) -> Issue {
         let prompt = match source {
             PrImportSource::Authored => None,
@@ -1974,6 +1982,7 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
         prompt: _,
         model: _,
         worktree: _,
+        worktree_path: _,
         done_at: _,
         pruned_at: _,
         setup_ran: _,
@@ -2022,6 +2031,9 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
         merge_field!(model);
     }
     merge_field!(worktree);
+    // Follows `worktree`: the path is where the provider put it, so a stale
+    // one would point a card at a directory it no longer holds.
+    merge_field!(worktree_path);
     merge_field!(done_at);
     merge_field!(pruned_at);
     merge_field!(setup_ran);
@@ -3168,6 +3180,10 @@ mod tests {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            worktree_create_cmd: None,
+            worktree_remove_cmd: None,
+            worktree_list_cmd: None,
+            worktree_pool_size: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             auto_import_reviews: true,
@@ -4664,6 +4680,22 @@ mod tests {
         let changed = app.project_mut().auto_assign_worktrees();
         assert!(changed);
         assert_eq!(app.project().issues[0].worktree, Some("bork-8".into()));
+    }
+
+    #[test]
+    fn auto_assign_never_claims_provider_worktrees() {
+        // A provider worktree lives outside project_root, so a name match
+        // would attach the card with a fabricated path. Providers link the
+        // worktree to its card at create time instead.
+        let mut app = test_app(vec![test_issue("bork-8", Column::InProgress)]);
+        app.project_mut().config.worktree_create_cmd = Some("true".into());
+        app.project_mut()
+            .live
+            .worktree_branches
+            .insert("bork-8".into(), "bork-8/init-cli".into());
+
+        assert!(!app.project_mut().auto_assign_worktrees());
+        assert_eq!(app.project().issues[0].worktree, None);
     }
 
     #[test]
@@ -7602,6 +7634,10 @@ mod tests {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            worktree_create_cmd: None,
+            worktree_remove_cmd: None,
+            worktree_list_cmd: None,
+            worktree_pool_size: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             auto_import_reviews: true,
@@ -8327,6 +8363,7 @@ mod tests {
             "agent_mode",
             "prompt",
             "worktree",
+            "worktree_path",
             "done_at",
             "sessions",
             "pruned_at",

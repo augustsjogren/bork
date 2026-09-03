@@ -227,7 +227,8 @@ pub struct LaunchOutcome {
 /// other's ids.
 pub fn launch_session(issue: &Issue, config: &AppConfig) -> Result<LaunchOutcome, AppError> {
     let session_name = issue.session_name(&config.project_name);
-    let cwd = &config.project_root;
+    let cwd = session_cwd(issue, config);
+    let cwd = &cwd;
 
     if tmux::session_exists(&session_name) {
         return Ok(LaunchOutcome {
@@ -553,19 +554,51 @@ fn kill_tmux_session(_session_name: &str) -> Result<bool, AppError> {
 }
 
 /// Build the setup-script prefix for a launch command, if applicable.
+/// Where a session opens.
+///
+/// The project root by default, which is what bork's own layout expects: the
+/// worktree is a child of it and the prompt tells the agent to `cd` in. An
+/// external provider places worktrees elsewhere, so the session opens directly
+/// in the worktree — otherwise the agent lands in a directory holding none of
+/// the issue's code. Orchestrators have no worktree either way.
+fn session_cwd(issue: &Issue, config: &AppConfig) -> PathBuf {
+    if !config.uses_external_worktrees() {
+        return config.project_root.clone();
+    }
+    issue
+        .worktree_path_in(&config.project_root)
+        .unwrap_or_else(|| config.project_root.clone())
+}
+
+/// How a worktree is named to the agent: bare, resolved against the session's
+/// cwd, or absolute when an external provider owns the layout.
+fn worktree_for_prompt(issue: &Issue, config: &AppConfig) -> Option<String> {
+    if !config.uses_external_worktrees() {
+        return issue.worktree.clone();
+    }
+    Some(
+        issue
+            .worktree_path_in(&config.project_root)?
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
 /// Skipped once `setup_ran` is set — see `Issue::attach_worktree` for the
 /// once-per-worktree rule. The script itself is user-authored shell and is
-/// inserted verbatim; the worktree dir is escaped. The tmux session's cwd is
-/// the project root, so the relative worktree dir resolves correctly.
+/// inserted verbatim; the worktree is escaped.
+///
+/// The `cd` target matches the session's cwd: relative under bork's own layout,
+/// absolute when a provider places worktrees outside the project root.
 fn setup_prefix(issue: &Issue, config: &AppConfig) -> Option<String> {
     if issue.setup_ran {
         return None;
     }
-    let worktree = issue.worktree.as_deref()?;
+    let worktree = worktree_for_prompt(issue, config)?;
     let script = config.setup_script.as_deref()?;
     Some(format!(
         "(cd '{}' && {})",
-        shell_escape_single_quotes(worktree),
+        shell_escape_single_quotes(&worktree),
         script
     ))
 }
@@ -632,9 +665,9 @@ fn build_agent_cmd(
         );
         prompt.push_str("\n\nBork project: ");
         prompt.push_str(&config.project_name);
-        if let Some(worktree) = issue.worktree.as_deref() {
+        if let Some(worktree) = worktree_for_prompt(issue, config) {
             prompt.push_str("\n\nAssigned worktree: ");
-            prompt.push_str(worktree);
+            prompt.push_str(&worktree);
             prompt.push_str(". Do all work for this issue inside that directory.");
         }
         let is_review = issue.primary_pr_import_source() == Some(PrImportSource::ReviewRequested);
@@ -1519,6 +1552,10 @@ mod tests {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            worktree_create_cmd: None,
+            worktree_remove_cmd: None,
+            worktree_list_cmd: None,
+            worktree_pool_size: None,
             done_session_ttl: 300,
             debug: false,
             auto_import_reviews: true,
@@ -1582,6 +1619,65 @@ mod tests {
         let config = test_config();
         let (_, _, prompt) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
         assert!(prompt.unwrap().contains("Bork project: bork"));
+    }
+
+    /// Config with an external worktree provider configured.
+    fn provider_test_config() -> AppConfig {
+        AppConfig {
+            worktree_create_cmd: Some("true".into()),
+            ..test_config()
+        }
+    }
+
+    fn issue_on_external_worktree() -> Issue {
+        let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        issue.attach_worktree_at(
+            "wt--pool-thing".into(),
+            Some(std::path::PathBuf::from("/elsewhere/wt--pool-thing")),
+        );
+        issue
+    }
+
+    #[test]
+    fn session_opens_at_the_project_root_by_default() {
+        // Bork's own layout: the worktree is a child of the project root and
+        // the prompt tells the agent to cd in.
+        let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        issue.worktree = Some("bork-1-fix-bug".into());
+        let config = test_config();
+
+        assert_eq!(session_cwd(&issue, &config), config.project_root);
+    }
+
+    #[test]
+    fn session_opens_in_the_worktree_for_a_provider() {
+        // The reported symptom: a provider's worktree lives outside the
+        // project root, so opening there gives the agent none of the code.
+        assert_eq!(
+            session_cwd(&issue_on_external_worktree(), &provider_test_config()),
+            std::path::PathBuf::from("/elsewhere/wt--pool-thing")
+        );
+    }
+
+    #[test]
+    fn session_falls_back_to_the_project_root_without_a_worktree() {
+        // Orchestrators have no worktree and run at the project root.
+        let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        issue.worktree = None;
+        let config = provider_test_config();
+
+        assert_eq!(session_cwd(&issue, &config), config.project_root);
+    }
+
+    #[test]
+    fn setup_prefix_uses_an_absolute_path_for_a_provider() {
+        let mut config = provider_test_config();
+        config.setup_script = Some("npm install".to_string());
+
+        assert_eq!(
+            setup_prefix(&issue_on_external_worktree(), &config),
+            Some("(cd '/elsewhere/wt--pool-thing' && npm install)".to_string())
+        );
     }
 
     #[test]

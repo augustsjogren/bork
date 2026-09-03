@@ -30,6 +30,30 @@ pub struct AppConfig {
     /// Shell command run inside a worktree right before it is removed by
     /// `bork issue archive` (e.g. stopping services, dropping databases).
     pub teardown_script: Option<String>,
+    /// Shell command that creates a worktree, replacing bork's own
+    /// `git worktree add`. Run with the main checkout as its working directory
+    /// and `BORK_ISSUE_ID`, `BORK_SLUG`, `BORK_BASE`, `BORK_TARGET` and
+    /// `BORK_BRANCH` in the environment. It must print the new worktree as a
+    /// JSON object on the last line of stdout:
+    /// `{"path": "...", "name": "...", "label": "..."}`, name and label
+    /// optional. Configuring it hands directory layout, naming and any
+    /// per-worktree provisioning to an external tool.
+    pub worktree_create_cmd: Option<String>,
+    /// Shell command that removes a worktree created by
+    /// `worktree_create_cmd`. Receives `BORK_WORKTREE_NAME`,
+    /// `BORK_WORKTREE_PATH` and `BORK_FORCE`.
+    pub worktree_remove_cmd: Option<String>,
+    /// Shell command that enumerates existing worktrees, one JSON object per
+    /// line in the same shape `worktree_create_cmd` returns. Required
+    /// alongside `worktree_create_cmd`, because worktrees outside the project
+    /// root cannot be discovered by scanning it.
+    pub worktree_list_cmd: Option<String>,
+    /// Total worktrees the external provider can hand out. `None` means
+    /// unbounded. A provider that allocates from a fixed pool of ports or
+    /// databases has a hard ceiling well below the number of cards a board
+    /// can hold, so bork refuses an attach at the ceiling rather than
+    /// letting the create command fail mid-launch.
+    pub worktree_pool_size: Option<u64>,
     pub done_session_ttl: u64,
     pub debug: bool,
     /// Auto-create issues from PRs the user has been requested to review.
@@ -91,6 +115,29 @@ impl AppConfig {
         let mode_args = cfg.mode_args.get(&mode).map(Vec::as_slice);
         (&cfg.args, mode_args)
     }
+
+    /// The main checkout. May be a symlink to a repo outside the project
+    /// root, which is how an external provider's checkout is reached.
+    pub fn main_dir(&self) -> PathBuf {
+        self.project_root.join("main")
+    }
+
+    /// Whether worktree creation, removal and discovery are delegated to
+    /// external commands.
+    pub fn uses_external_worktrees(&self) -> bool {
+        self.worktree_create_cmd.is_some()
+    }
+
+    /// Defaults with a fixed `project_root`, so tests never depend on the
+    /// directory the suite happens to run in.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        AppConfig {
+            project_name: "bork".into(),
+            project_root: PathBuf::from("/tmp/test-bork"),
+            ..AppConfig::default()
+        }
+    }
 }
 
 pub const DEFAULT_DONE_SESSION_TTL: u64 = 300;
@@ -127,6 +174,10 @@ impl Default for AppConfig {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            worktree_create_cmd: None,
+            worktree_remove_cmd: None,
+            worktree_list_cmd: None,
+            worktree_pool_size: None,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             auto_import_reviews: true,
@@ -238,6 +289,10 @@ pub struct PartialConfig {
     pub orchestrator_prompt: Option<String>,
     pub setup_script: Option<String>,
     pub teardown_script: Option<String>,
+    pub worktree_create_cmd: Option<String>,
+    pub worktree_remove_cmd: Option<String>,
+    pub worktree_list_cmd: Option<String>,
+    pub worktree_pool_size: Option<u64>,
     pub done_session_ttl: Option<u64>,
     pub debug: Option<bool>,
     pub auto_import_reviews: Option<bool>,
@@ -300,6 +355,10 @@ impl PartialConfig {
             orchestrator_prompt: other.orchestrator_prompt.or(self.orchestrator_prompt),
             setup_script: other.setup_script.or(self.setup_script),
             teardown_script: other.teardown_script.or(self.teardown_script),
+            worktree_create_cmd: other.worktree_create_cmd.or(self.worktree_create_cmd),
+            worktree_remove_cmd: other.worktree_remove_cmd.or(self.worktree_remove_cmd),
+            worktree_list_cmd: other.worktree_list_cmd.or(self.worktree_list_cmd),
+            worktree_pool_size: other.worktree_pool_size.or(self.worktree_pool_size),
             done_session_ttl: other.done_session_ttl.or(self.done_session_ttl),
             debug: other.debug.or(self.debug),
             auto_import_reviews: other.auto_import_reviews.or(self.auto_import_reviews),
@@ -355,6 +414,10 @@ fn materialize(merged: PartialConfig, project_root: &Path) -> AppConfig {
         orchestrator_prompt: merged.orchestrator_prompt,
         setup_script: merged.setup_script,
         teardown_script: merged.teardown_script,
+        worktree_create_cmd: merged.worktree_create_cmd,
+        worktree_remove_cmd: merged.worktree_remove_cmd,
+        worktree_list_cmd: merged.worktree_list_cmd,
+        worktree_pool_size: merged.worktree_pool_size,
         done_session_ttl: merged.done_session_ttl.unwrap_or(DEFAULT_DONE_SESSION_TTL),
         debug: merged.debug.unwrap_or(false),
         auto_import_reviews: merged.auto_import_reviews.unwrap_or(true),
@@ -455,6 +518,23 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
+    let worktree_create_cmd = table
+        .get("worktree_create_cmd")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let worktree_remove_cmd = table
+        .get("worktree_remove_cmd")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let worktree_list_cmd = table
+        .get("worktree_list_cmd")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let worktree_pool_size = table.get("worktree_pool_size").and_then(|v| v.as_u64());
+
     let done_session_ttl = table.get("done_session_ttl").and_then(|v| v.as_u64());
     let debug = table.get("debug").and_then(|v| v.as_bool());
     let auto_import_reviews = table.get("auto_import_reviews").and_then(|v| v.as_bool());
@@ -486,6 +566,10 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         orchestrator_prompt,
         setup_script,
         teardown_script,
+        worktree_create_cmd,
+        worktree_remove_cmd,
+        worktree_list_cmd,
+        worktree_pool_size,
         done_session_ttl,
         debug,
         auto_import_reviews,
@@ -802,6 +886,57 @@ agent_kind = "opencode"
 "#,
         );
         assert_eq!(p.done_session_ttl, None);
+    }
+
+    #[test]
+    fn worktree_provider_fields_reach_app_config() {
+        let config = merge_to_app(
+            "",
+            r#"
+worktree_create_cmd = "contrib/example-provider/create.sh"
+worktree_remove_cmd = "contrib/example-provider/remove.sh"
+worktree_list_cmd = "contrib/example-provider/list.sh"
+worktree_pool_size = "4"
+"#,
+        );
+
+        assert_eq!(
+            config.worktree_create_cmd.as_deref(),
+            Some("contrib/example-provider/create.sh")
+        );
+        assert_eq!(
+            config.worktree_remove_cmd.as_deref(),
+            Some("contrib/example-provider/remove.sh")
+        );
+        assert_eq!(
+            config.worktree_list_cmd.as_deref(),
+            Some("contrib/example-provider/list.sh")
+        );
+        assert_eq!(config.worktree_pool_size, Some(4));
+        assert!(config.uses_external_worktrees());
+    }
+
+    #[test]
+    fn worktree_provider_is_off_by_default() {
+        let config = merge_to_app("", "project_name = \"bork\"\n");
+
+        assert!(!config.uses_external_worktrees());
+        assert_eq!(config.worktree_pool_size, None);
+    }
+
+    #[test]
+    fn project_worktree_provider_overrides_global() {
+        let config = merge_to_app(
+            "worktree_create_cmd = \"global-create\"\nworktree_pool_size = \"4\"\n",
+            "worktree_create_cmd = \"project-create\"\n",
+        );
+
+        assert_eq!(
+            config.worktree_create_cmd.as_deref(),
+            Some("project-create")
+        );
+        // Unset in the project layer, so the global pool size still applies.
+        assert_eq!(config.worktree_pool_size, Some(4));
     }
 
     #[test]

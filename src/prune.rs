@@ -1,15 +1,17 @@
 //! Auto-prune mechanism for stale worktrees.
 //!
-//! Scans the project root for git worktree directories, classifies each by
-//! safety, and runs `git worktree remove` for the user's selection. The
-//! corresponding `Issue` records stay on the board; only `issue.worktree` is
-//! cleared and `issue.pruned_at` set.
+//! Enumerates existing worktrees, classifies each by safety, and removes the
+//! user's selection. The corresponding `Issue` records stay on the board; only
+//! `issue.worktree` is cleared and `issue.pruned_at` set.
 
 use std::collections::HashSet;
 use std::path::Path;
 
 use crate::app::Project;
+use crate::config::AppConfig;
+use crate::external::worktree_provider::WorktreeBackend;
 use crate::types::{Column, Issue, WorktreeStatus};
+use crate::worktrees;
 
 /// Selected action for a candidate worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,8 +20,8 @@ pub enum PruneAction {
     Remove,
 }
 
-/// A single worktree directory under the project root, with enough metadata
-/// for the dialog and the executor to make a decision.
+/// A single existing worktree, with enough metadata for the dialog and the
+/// executor to make a decision.
 #[derive(Debug, Clone)]
 pub struct PruneCandidate {
     pub worktree: String,
@@ -67,38 +69,24 @@ impl PruneCandidate {
     }
 }
 
-/// Discover worktree directory names directly from disk: every child
-/// directory of the project root with a `.git`, except `main/` and dotdirs.
-/// Mirrors the discovery rule in `external::git::poll_all_worktrees`.
+/// Names of every worktree that exists, via `worktrees::enumerate`.
 ///
-/// This is the single definition of "a prunable worktree". The dialog and
-/// the auto-prune prompt both count from here rather than the git poll
-/// cache, which fills one slow `git status` at a time and can lag the disk
-/// by a minute on projects with hundreds of worktrees.
-pub fn discover_worktree_names(project_root: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(project_root) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|name| {
-            name != "main"
-                && !name.starts_with('.')
-                && project_root.join(name).join(".git").exists()
-        })
-        .collect();
-    names.sort();
-    names
+/// The dialog and the auto-prune prompt both count from here rather than the
+/// git poll cache, which fills one slow `git status` at a time and can lag
+/// reality by a minute on projects with hundreds of worktrees.
+pub fn discover_worktree_names(config: &AppConfig) -> Vec<String> {
+    worktrees::enumerate(config)
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect()
 }
 
-/// Build the candidate list for `project`. Names come from the disk scan;
-/// the live git poll cache only enriches them with dirty/session state, so
-/// a worktree the poller hasn't reached yet still shows up (with unknown
+/// Build the candidate list for `project`. Names come from enumeration; the
+/// live git poll cache only enriches them with dirty/session state, so a
+/// worktree the poller hasn't reached yet still shows up (with unknown
 /// status, defaulting to Keep).
 pub fn scan_candidates(project: &Project) -> Vec<PruneCandidate> {
-    let names = discover_worktree_names(&project.config.project_root);
+    let names = discover_worktree_names(&project.config);
     build_candidates(project, names)
 }
 
@@ -206,6 +194,20 @@ impl PruneOutcome {
                 _ => None,
             })
             .collect()
+    }
+
+    /// One `Failed` per requested worktree, for a failure that happened before
+    /// any of them could be attempted.
+    fn all_failed(worktrees: &[String], reason: &str) -> Self {
+        PruneOutcome {
+            results: worktrees
+                .iter()
+                .map(|name| PruneResult {
+                    worktree: name.clone(),
+                    outcome: RemoveOutcome::Failed(reason.to_string()),
+                })
+                .collect(),
+        }
     }
 
     pub fn removed_worktrees(&self) -> Vec<&str> {
@@ -333,7 +335,7 @@ pub fn apply_outcome_to_issues(issues: &mut [Issue], outcome: &PruneOutcome, now
             continue;
         };
         if removed.contains(wt) {
-            issue.worktree = None;
+            issue.detach_worktree();
             issue.pruned_at = Some(now);
             changed = true;
         }
@@ -404,29 +406,6 @@ mod tests {
     fn live_session_defaults_keep() {
         let c = candidate("wt", Some(Column::Done), false, true);
         assert_eq!(c.action, PruneAction::Keep);
-    }
-
-    #[test]
-    fn discover_finds_git_dirs_excluding_main_and_hidden() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let root = dir.path();
-        // Real worktrees have a `.git` file; a `.git` dir (plain clone)
-        // must count too. Both spellings are covered here.
-        for name in ["main", "wt-b"] {
-            std::fs::create_dir_all(root.join(name)).unwrap();
-            std::fs::write(root.join(name).join(".git"), "gitdir: elsewhere").unwrap();
-        }
-        std::fs::create_dir_all(root.join("wt-a").join(".git")).unwrap();
-        std::fs::create_dir_all(root.join(".bork")).unwrap();
-        std::fs::create_dir_all(root.join("not-a-repo")).unwrap();
-
-        let names = discover_worktree_names(root);
-        assert_eq!(names, vec!["wt-a".to_string(), "wt-b".to_string()]);
-    }
-
-    #[test]
-    fn discover_missing_root_returns_empty() {
-        assert!(discover_worktree_names(Path::new("/nonexistent/bork-prune-test")).is_empty());
     }
 
     #[test]

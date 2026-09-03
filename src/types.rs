@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -469,6 +470,11 @@ pub struct Issue {
     pub model: Option<String>,
     #[serde(default)]
     pub worktree: Option<String>,
+    /// Absolute path of the attached worktree, when it does not live under the
+    /// project root. Set by an external worktree provider, which owns its own
+    /// directory layout; `None` means the worktree is `project_root/<worktree>`.
+    #[serde(default)]
+    pub worktree_path: Option<String>,
     #[serde(default)]
     pub done_at: Option<u64>,
     /// Agent session IDs keyed by the agent that created them. Switching
@@ -545,6 +551,15 @@ pub struct IssueDraft {
     pub model: Option<String>,
 }
 
+/// Resolve a worktree's absolute path. An external provider supplies `path`;
+/// otherwise the worktree is a direct child of the project root.
+pub fn resolve_worktree_path(project_root: &Path, name: &str, path: Option<&str>) -> PathBuf {
+    match path {
+        Some(path) => PathBuf::from(path),
+        None => project_root.join(name),
+    }
+}
+
 impl Issue {
     /// Baseline issue with all optional/legacy fields empty. Combine with
     /// struct update syntax for variations:
@@ -565,6 +580,7 @@ impl Issue {
             prompt: None,
             model: None,
             worktree: None,
+            worktree_path: None,
             done_at: None,
             sessions: BTreeMap::new(),
             pruned_at: None,
@@ -718,9 +734,34 @@ impl Issue {
     /// attach path must keep these fields in sync, so the invariant lives
     /// here.
     pub fn attach_worktree(&mut self, worktree: String) {
+        self.attach_worktree_at(worktree, None);
+    }
+
+    /// Attach a worktree that lives at `path` instead of under the project
+    /// root. `None` keeps the default `project_root/<worktree>` layout.
+    pub fn attach_worktree_at(&mut self, worktree: String, path: Option<PathBuf>) {
         self.worktree = Some(worktree);
+        self.worktree_path = path.map(|p| p.to_string_lossy().into_owned());
         self.pruned_at = None;
         self.setup_ran = false;
+    }
+
+    /// Release the attached worktree. Both the name and the external path are
+    /// dropped together, so a later re-attach can never inherit a stale path
+    /// from a worktree that has since been removed.
+    pub fn detach_worktree(&mut self) {
+        self.worktree = None;
+        self.worktree_path = None;
+    }
+
+    /// Absolute path of the attached worktree, if one is attached.
+    pub fn worktree_path_in(&self, project_root: &Path) -> Option<PathBuf> {
+        let name = self.worktree.as_ref()?;
+        Some(resolve_worktree_path(
+            project_root,
+            name,
+            self.worktree_path.as_deref(),
+        ))
     }
 
     /// Migrate legacy singular fields into the new Vec fields.
@@ -1234,6 +1275,71 @@ mod tests {
     }
 
     #[test]
+    fn worktree_path_defaults_to_project_root_child() {
+        let mut issue = Issue::new("bork-1", "Test", Column::Todo, AgentKind::OpenCode);
+        issue.attach_worktree("bork-1-fix".into());
+
+        assert_eq!(
+            issue.worktree_path_in(Path::new("/projects/demo")),
+            Some(PathBuf::from("/projects/demo/bork-1-fix"))
+        );
+    }
+
+    #[test]
+    fn worktree_path_uses_external_path_when_attached_at() {
+        let mut issue = Issue::new("bork-1", "Test", Column::Todo, AgentKind::OpenCode);
+        issue.attach_worktree_at(
+            "wt--pool-bork-1".into(),
+            Some(PathBuf::from("/elsewhere/wt--pool-bork-1")),
+        );
+
+        assert_eq!(
+            issue.worktree_path_in(Path::new("/projects/demo")),
+            Some(PathBuf::from("/elsewhere/wt--pool-bork-1"))
+        );
+    }
+
+    #[test]
+    fn worktree_path_is_none_without_a_worktree() {
+        let issue = Issue::new("bork-1", "Test", Column::Todo, AgentKind::OpenCode);
+
+        assert_eq!(issue.worktree_path_in(Path::new("/projects/demo")), None);
+    }
+
+    #[test]
+    fn detach_worktree_drops_the_external_path_too() {
+        let mut issue = Issue::new("bork-1", "Test", Column::Todo, AgentKind::OpenCode);
+        issue.attach_worktree_at(
+            "wt--pool-bork-1".into(),
+            Some(PathBuf::from("/elsewhere/wt--pool-bork-1")),
+        );
+
+        issue.detach_worktree();
+
+        // A stale path surviving a detach would make the next default-layout
+        // attach resolve to the removed directory.
+        assert_eq!(issue.worktree, None);
+        assert_eq!(issue.worktree_path, None);
+        assert_eq!(issue.worktree_path_in(Path::new("/projects/demo")), None);
+    }
+
+    #[test]
+    fn attach_worktree_clears_a_previous_external_path() {
+        let mut issue = Issue::new("bork-1", "Test", Column::Todo, AgentKind::OpenCode);
+        issue.attach_worktree_at(
+            "wt--pool-bork-1".into(),
+            Some(PathBuf::from("/elsewhere/wt--pool-bork-1")),
+        );
+
+        issue.attach_worktree("bork-1-fix".into());
+
+        assert_eq!(
+            issue.worktree_path_in(Path::new("/projects/demo")),
+            Some(PathBuf::from("/projects/demo/bork-1-fix"))
+        );
+    }
+
+    #[test]
     fn set_kind_same_kind_is_noop() {
         let mut issue = issue_with_session_state(IssueKind::Orchestrator);
         assert!(!issue.set_kind(IssueKind::Orchestrator));
@@ -1377,6 +1483,8 @@ mod tests {
         }"#;
         let issue: Issue = serde_json::from_str(json).unwrap();
         assert_eq!(issue.pruned_at, None);
+        // A state.json written before this field existed must still load.
+        assert_eq!(issue.worktree_path, None);
     }
 
     #[test]
