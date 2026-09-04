@@ -174,16 +174,44 @@ fn render_column(
         y_offset += 1;
     }
 
+    // Own work sorts above review-imported cards (`review_cards_last`); a
+    // one-row rule marks the boundary. Only drawn between two visible cards:
+    // the overflow guard below drops a trailing card when the extra row
+    // pushes it past the column, the same way the scroll indicators do.
+    let review_divider_before = issues
+        .iter()
+        .position(|(_, issue)| issue.is_review_import())
+        .filter(|&boundary| boundary > viewport_start && boundary < viewport_end);
+
     for (visible_idx, (_global_idx, issue)) in
         issues[viewport_start..viewport_end].iter().enumerate()
     {
-        let card_y = inner.y + y_offset + (visible_idx as u16 * card_h);
+        let absolute_idx = viewport_start + visible_idx;
+        let divider_rows: u16 = match review_divider_before {
+            Some(boundary) if absolute_idx >= boundary => 1,
+            _ => 0,
+        };
+        let card_y = inner.y + y_offset + (visible_idx as u16 * card_h) + divider_rows;
         if card_y + card_h > inner.y + inner.height {
             break;
         }
 
+        if review_divider_before == Some(absolute_idx) {
+            let label = " reviews ";
+            let side = (inner.width as usize).saturating_sub(label.len()) / 2;
+            let rule = "\u{2500}".repeat(side);
+            let divider = Line::from(Span::styled(
+                format!("{rule}{label}{rule}"),
+                styles::dim_style(),
+            ));
+            frame.render_widget(
+                Paragraph::new(divider),
+                Rect::new(inner.x, card_y - 1, inner.width, 1),
+            );
+        }
+
         let card_area = Rect::new(inner.x, card_y, inner.width, card_h);
-        let is_selected = is_selected_col && (viewport_start + visible_idx) == selected_row;
+        let is_selected = is_selected_col && absolute_idx == selected_row;
         let marked = project.marked_issues.contains(&issue.id.to_lowercase());
 
         let pr = project.pr_for(issue);

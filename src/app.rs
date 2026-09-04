@@ -77,6 +77,13 @@ pub enum InputMode {
 /// as unknown and default them all to Keep. `existing` says which worktrees the
 /// poll saw, so stale entries still drop; keying that on branches instead would
 /// evict a worktree on a detached HEAD, which has no branch.
+/// Stable partition: own work keeps its order at the top, review-imported
+/// cards keep theirs below. The board draws the group boundary.
+fn review_cards_last(mut items: Vec<(usize, &Issue)>) -> Vec<(usize, &Issue)> {
+    items.sort_by_key(|(_, issue)| issue.is_review_import());
+    items
+}
+
 pub fn apply_git_poll(live: &mut LiveState, result: crate::external::git::GitPollResult) -> bool {
     let branches = result.branches;
     let existing = result.existing;
@@ -501,14 +508,16 @@ impl Project {
             .filter(|(_, issue)| !self.attention_filter || self.needs_you(issue))
             .collect();
         let Some(anchor) = self.link_filter.as_deref() else {
-            return matches;
+            return review_cards_last(matches);
         };
         // Resolve the component once (cached) instead of per-issue, then filter.
         self.with_linked_component(anchor, |component| {
-            matches
-                .into_iter()
-                .filter(|(_, issue)| component.contains(&issue.id.to_lowercase()))
-                .collect()
+            review_cards_last(
+                matches
+                    .into_iter()
+                    .filter(|(_, issue)| component.contains(&issue.id.to_lowercase()))
+                    .collect(),
+            )
         })
     }
 
@@ -7338,6 +7347,25 @@ mod tests {
     // ================================================================
     // Existing logic: issues_in_column
     // ================================================================
+
+    #[test]
+    fn review_imports_sort_below_own_work_in_a_column() {
+        let own_a = test_issue("bork-1", Column::CodeReview);
+        let review = issue_linked_to_pr("bork-2", 7, Some(PrImportSource::ReviewRequested));
+        let own_b = test_issue("bork-3", Column::CodeReview);
+
+        let mut review = review;
+        review.column = Column::CodeReview;
+        let app = test_app(vec![own_a, review, own_b]);
+
+        let ids: Vec<&str> = app
+            .project()
+            .issues_in_column(Column::CodeReview, "")
+            .into_iter()
+            .map(|(_, issue)| issue.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["bork-1", "bork-3", "bork-2"]);
+    }
 
     #[test]
     fn issues_in_column_filters_correctly() {

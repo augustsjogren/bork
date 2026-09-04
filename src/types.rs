@@ -926,6 +926,12 @@ impl Issue {
         self.github_pr_links.first().and_then(|l| l.import_source)
     }
 
+    /// Whether this card exists because someone asked for a review, as opposed
+    /// to the owner's own work. Review cards group after own work in a column.
+    pub fn is_review_import(&self) -> bool {
+        self.primary_pr_import_source() == Some(PrImportSource::ReviewRequested)
+    }
+
     pub fn has_pr_number(&self, number: u32) -> bool {
         self.github_pr_links.iter().any(|l| l.number == number)
     }
