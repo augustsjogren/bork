@@ -101,6 +101,11 @@ pub fn apply_git_poll(live: &mut LiveState, result: crate::external::git::GitPol
         changed = true;
     }
 
+    if live.base_sync != result.base {
+        live.base_sync = result.base;
+        changed = true;
+    }
+
     live.worktree_branches = branches;
     live.worktree_paths = result.paths;
     live.git_poll_done = true;
@@ -144,6 +149,9 @@ pub struct LiveState {
     pub review_stack_fallback: HashSet<u32>,
     pub github_user: Option<String>,
     pub tuicr_drafts: crate::external::tuicr::DraftComments,
+    /// Main checkout's position behind `origin/<base_branch>`, from the git
+    /// poll. `None` until known (or when the remote branch does not exist).
+    pub base_sync: Option<crate::external::git::BaseSync>,
     pub git_poll_done: bool,
     pub pr_poll_done: bool,
     pub pr_loading_more: bool,
@@ -3649,6 +3657,8 @@ mod tests {
             worktree_targets_cmd: None,
             worktree_target_label: None,
             worktree_pool_size: None,
+            base_branch: "main".to_string(),
+            base_fetch_interval_secs: 900,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             auto_import_reviews: true,
@@ -7203,6 +7213,7 @@ mod tests {
         existing: &[&str],
     ) -> crate::external::git::GitPollResult {
         crate::external::git::GitPollResult {
+            base: None,
             statuses: statuses.iter().map(|(n, s)| (n.to_string(), *s)).collect(),
             branches: branches
                 .iter()
@@ -7218,6 +7229,30 @@ mod tests {
         staged: 1,
         unstaged: 0,
     };
+
+    #[test]
+    fn apply_git_poll_tracks_base_sync_changes() {
+        let mut live = LiveState::default();
+        apply_git_poll(&mut live, poll(&[], &[]));
+        assert_eq!(live.base_sync, None);
+
+        let mut result = poll(&[], &[]);
+        result.base = Some(crate::external::git::BaseSync {
+            branch: "main".to_string(),
+            behind: 3,
+        });
+        assert!(apply_git_poll(&mut live, result));
+        assert_eq!(live.base_sync.as_ref().map(|b| b.behind), Some(3));
+
+        // An unchanged base must not report a change on its own.
+        let mut result = poll(&[], &[]);
+        result.base = Some(crate::external::git::BaseSync {
+            branch: "main".to_string(),
+            behind: 3,
+        });
+        assert!(!apply_git_poll(&mut live, result));
+    }
+
     const CLEAN: WorktreeStatus = WorktreeStatus {
         staged: 0,
         unstaged: 0,
@@ -8678,6 +8713,8 @@ mod tests {
             worktree_targets_cmd: None,
             worktree_target_label: None,
             worktree_pool_size: None,
+            base_branch: "main".to_string(),
+            base_fetch_interval_secs: 900,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
             debug: false,
             auto_import_reviews: true,
