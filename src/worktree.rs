@@ -644,6 +644,8 @@ mod tests {
             worktree_targets_cmd: None,
             worktree_target_label: None,
             worktree_pool_size: None,
+            base_branch: "main".to_string(),
+            base_fetch_interval_secs: 900,
             done_session_ttl: 300,
             debug: false,
             auto_import_reviews: true,
@@ -750,6 +752,8 @@ mod tests {
         let cfg = config::AppConfig {
             worktree_list_cmd: Some(r#"printf '{"path":"/tmp/a"}\n'"#.into()),
             worktree_pool_size: Some(1),
+            base_branch: "main".to_string(),
+            base_fetch_interval_secs: 900,
             ..targeting_config(&project)
         };
 
@@ -770,6 +774,8 @@ mod tests {
         let cfg = config::AppConfig {
             worktree_list_cmd: Some(r#"printf '{"path":"/tmp/a"}\n'"#.into()),
             worktree_pool_size: Some(1),
+            base_branch: "main".to_string(),
+            base_fetch_interval_secs: 900,
             ..targeting_config(&project)
         };
 
