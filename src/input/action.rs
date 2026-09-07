@@ -80,6 +80,7 @@ pub enum Action {
     CloseStack,
     StackDown,
     StackUp,
+    LinearPickerCycleFilter,
     ToggleLinkFilter,
     ToggleAttentionFilter,
     OpenLinkPicker,

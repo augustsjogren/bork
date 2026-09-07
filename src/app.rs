@@ -146,6 +146,8 @@ pub struct LiveState {
     /// lists above keep the last good data, so this explains why they're
     /// empty or stale.
     pub linear_error: Option<String>,
+    /// Open, unassigned issues in your teams — pickable, not yet claimed.
+    pub linear_unassigned_issues: Vec<LinearIssue>,
     pub user_prs: Vec<PrStatus>,
     pub review_requested_prs: Vec<PrStatus>,
     pub review_stacks: Option<HashMap<u32, Option<u32>>>,
@@ -219,6 +221,10 @@ impl LiveState {
             || !self.user_prs.is_empty()
             || !self.review_requested_prs.is_empty()
     }
+
+    pub fn has_linear_issues(&self) -> bool {
+        !self.linear_issues.is_empty() || !self.linear_unassigned_issues.is_empty()
+    }
 }
 
 pub struct Project {
@@ -251,6 +257,15 @@ pub struct Project {
     /// Most recent time we ran the auto-prune threshold check for this
     /// project. Ephemeral; throttles both the check and its toast.
     pub last_auto_prune_check: Option<Instant>,
+    /// (linear issue id, team key) pairs queued by `move_issue_to_column`
+    /// when a linked card enters `InProgress`. Drained by the handler, which
+    /// owns the action channel `move_issue_to_column` doesn't have access to,
+    /// to fire the "move to started" mutation in the background.
+    pending_linear_starts: Vec<(String, String)>,
+    /// Linear issue ids queued alongside `pending_linear_starts` when the
+    /// linked ticket isn't already assigned to you — starting a card claims
+    /// it too, the same as picking up an unassigned one from the picker.
+    pending_linear_assigns: Vec<String>,
     pub last_config_mtime: Option<SystemTime>,
     /// Per-frame render caches keyed on cheap fingerprints of their inputs.
     /// Populated lazily by read-only query methods and invalidated implicitly
@@ -312,6 +327,8 @@ impl Project {
             last_state_mtime,
             last_prune_at,
             last_auto_prune_check: None,
+            pending_linear_starts: Vec::new(),
+            pending_linear_assigns: Vec::new(),
             last_config_mtime,
             render_cache: RefCell::new(RenderCache::default()),
         };
@@ -869,6 +886,44 @@ impl Project {
                 self.unfreeze_worktree_status(&w);
             }
         }
+
+        if target == Column::InProgress {
+            self.queue_linear_start(idx);
+        }
+    }
+
+    /// Queue a Linear "move to started" request for `self.issues[idx]`'s
+    /// linked ticket, if it has one — however it got linked (auto-imported,
+    /// or attached by hand through the edit dialog; both matter equally
+    /// here, unlike the PR-lifecycle checks that only care about imports).
+    /// Also queues a self-assign when the ticket isn't already yours —
+    /// starting a card claims it, same as picking one up from the picker.
+    pub fn queue_linear_start(&mut self, idx: usize) {
+        let Some(link) = self.issues[idx].linear_links.first() else {
+            return;
+        };
+        let Some(team_key) = link.identifier.split('-').next() else {
+            return;
+        };
+        let already_mine = self.live.linear_issues.iter().any(|i| i.id == link.id);
+        if !already_mine {
+            self.pending_linear_assigns.push(link.id.clone());
+        }
+        self.pending_linear_starts
+            .push((link.id.clone(), team_key.to_string()));
+    }
+
+    /// Drain Linear "move to started" requests queued this tick — by a
+    /// column move into `InProgress`, or by starting a session. The handler
+    /// owns the action channel needed to fire these in the background, so it
+    /// calls this after dispatching.
+    pub fn take_pending_linear_starts(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.pending_linear_starts)
+    }
+
+    /// Drain Linear self-assign requests queued alongside `queue_linear_start`.
+    pub fn take_pending_linear_assigns(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_linear_assigns)
     }
 
     pub fn is_session_alive(&self, session_name: &str) -> bool {
@@ -1833,9 +1888,18 @@ impl Project {
         picker: &LinearPickerState,
     ) -> Vec<&'a LinearIssue> {
         let query = picker.search.to_lowercase();
-        self.live
-            .linear_issues
-            .iter()
+        let source: Vec<&'a LinearIssue> = match picker.linear_filter {
+            LinearIssueFilter::All => self
+                .live
+                .linear_issues
+                .iter()
+                .chain(self.live.linear_unassigned_issues.iter())
+                .collect(),
+            LinearIssueFilter::Mine => self.live.linear_issues.iter().collect(),
+            LinearIssueFilter::Unassigned => self.live.linear_unassigned_issues.iter().collect(),
+        };
+        source
+            .into_iter()
             .filter(|i| {
                 query.is_empty()
                     || i.title.to_lowercase().contains(&query)
@@ -2035,6 +2099,36 @@ impl GithubPickerEntry<'_> {
 pub struct LinearPickerState {
     pub search: String,
     pub selected: usize,
+    pub linear_filter: LinearIssueFilter,
+}
+
+/// Which Linear issues the picker's Linear tab shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LinearIssueFilter {
+    #[default]
+    All,
+    /// Assigned to you.
+    Mine,
+    /// Open, unclaimed issues in your teams.
+    Unassigned,
+}
+
+impl LinearIssueFilter {
+    pub fn cycle(self) -> Self {
+        match self {
+            LinearIssueFilter::All => LinearIssueFilter::Mine,
+            LinearIssueFilter::Mine => LinearIssueFilter::Unassigned,
+            LinearIssueFilter::Unassigned => LinearIssueFilter::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LinearIssueFilter::All => "All",
+            LinearIssueFilter::Mine => "Mine",
+            LinearIssueFilter::Unassigned => "Unassigned",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -3112,6 +3206,7 @@ impl App {
         self.linear_picker = Some(LinearPickerState {
             search: String::new(),
             selected: 0,
+            linear_filter: LinearIssueFilter::default(),
         });
         self.input_mode = InputMode::LinearPicker;
     }
@@ -3672,6 +3767,112 @@ mod tests {
             import_source: source,
         });
         issue
+    }
+
+    #[test]
+    fn moving_a_linked_card_to_in_progress_queues_a_linear_start() {
+        let mut issue = test_issue("bork-1", Column::Todo);
+        issue.linear_links.push(crate::types::LinkedLinear {
+            id: "linear-uuid".to_string(),
+            identifier: "ENG-42".to_string(),
+            url: "https://linear.app/x".to_string(),
+            imported: true,
+        });
+        let mut app = test_app(vec![issue]);
+
+        app.project_mut().move_issue_right("");
+
+        assert_eq!(
+            app.project_mut().take_pending_linear_starts(),
+            vec![("linear-uuid".to_string(), "ENG".to_string())]
+        );
+    }
+
+    #[test]
+    fn moving_a_manually_attached_linear_card_also_queues_a_start() {
+        // Attached via the edit dialog's Linear tab, not the picker's
+        // "import" flow, so `imported` is false — the start mutation must
+        // still fire, since the ticket is just as much yours either way.
+        let mut issue = test_issue("bork-1", Column::Todo);
+        issue.linear_links.push(crate::types::LinkedLinear {
+            id: "linear-uuid".to_string(),
+            identifier: "ENG-42".to_string(),
+            url: "https://linear.app/x".to_string(),
+            imported: false,
+        });
+        let mut app = test_app(vec![issue]);
+
+        app.project_mut().move_issue_right("");
+
+        assert_eq!(
+            app.project_mut().take_pending_linear_starts(),
+            vec![("linear-uuid".to_string(), "ENG".to_string())]
+        );
+    }
+
+    #[test]
+    fn moving_a_card_with_no_linear_link_queues_nothing() {
+        let mut app = test_app(vec![test_issue("bork-1", Column::Todo)]);
+
+        app.project_mut().move_issue_right("");
+
+        assert!(app.project_mut().take_pending_linear_starts().is_empty());
+    }
+
+    #[test]
+    fn moving_past_in_progress_does_not_re_queue() {
+        let mut issue = test_issue("bork-1", Column::Todo);
+        issue.linear_links.push(crate::types::LinkedLinear {
+            id: "linear-uuid".to_string(),
+            identifier: "ENG-42".to_string(),
+            url: "https://linear.app/x".to_string(),
+            imported: true,
+        });
+        let mut app = test_app(vec![issue]);
+
+        app.project_mut().move_issue_right(""); // Todo -> InProgress
+        app.project_mut().take_pending_linear_starts();
+        app.project_mut().move_issue_right(""); // InProgress -> CodeReview
+
+        assert!(app.project_mut().take_pending_linear_starts().is_empty());
+    }
+
+    #[test]
+    fn starting_an_unassigned_linked_card_also_queues_a_self_assign() {
+        let mut issue = test_issue("bork-1", Column::Todo);
+        issue.linear_links.push(crate::types::LinkedLinear {
+            id: "linear-uuid".to_string(),
+            identifier: "ENG-42".to_string(),
+            url: "https://linear.app/x".to_string(),
+            imported: false,
+        });
+        let mut app = test_app(vec![issue]);
+        // Not in live.linear_issues: not yours yet.
+
+        app.project_mut().move_issue_right("");
+
+        assert_eq!(
+            app.project_mut().take_pending_linear_assigns(),
+            vec!["linear-uuid".to_string()]
+        );
+    }
+
+    #[test]
+    fn starting_an_already_assigned_linked_card_does_not_requeue_assign() {
+        let mut issue = test_issue("bork-1", Column::Todo);
+        issue.linear_links.push(crate::types::LinkedLinear {
+            id: "linear-uuid".to_string(),
+            identifier: "ENG-42".to_string(),
+            url: "https://linear.app/x".to_string(),
+            imported: false,
+        });
+        let mut app = test_app(vec![issue]);
+        app.project_mut().live.linear_issues =
+            vec![test_linear_issue("linear-uuid", "ENG-42", "Already mine")];
+
+        app.project_mut().move_issue_right("");
+
+        assert!(app.project_mut().take_pending_linear_assigns().is_empty());
     }
 
     fn attention_of(app: &App) -> Option<Attention> {
@@ -8435,6 +8636,41 @@ mod tests {
 
         let filtered = app.filtered_linear_issues();
         assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn linear_filter_cycles_all_mine_unassigned() {
+        assert_eq!(LinearIssueFilter::All.cycle(), LinearIssueFilter::Mine);
+        assert_eq!(
+            LinearIssueFilter::Mine.cycle(),
+            LinearIssueFilter::Unassigned
+        );
+        assert_eq!(
+            LinearIssueFilter::Unassigned.cycle(),
+            LinearIssueFilter::All
+        );
+    }
+
+    #[test]
+    fn filtered_linear_issues_respects_the_picker_filter() {
+        let mut app = test_app(vec![]);
+        app.project_mut().live.linear_issues = vec![test_linear_issue("uuid-1", "ENG-1", "Mine")];
+        app.project_mut().live.linear_unassigned_issues =
+            vec![test_linear_issue("uuid-2", "ENG-2", "Up for grabs")];
+        let ctx = app.action_context();
+        app.open_linear_picker(&ctx);
+
+        assert_eq!(app.filtered_linear_issues().len(), 2);
+
+        app.linear_picker.as_mut().unwrap().linear_filter = LinearIssueFilter::Mine;
+        let mine = app.filtered_linear_issues();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].identifier, "ENG-1");
+
+        app.linear_picker.as_mut().unwrap().linear_filter = LinearIssueFilter::Unassigned;
+        let unassigned = app.filtered_linear_issues();
+        assert_eq!(unassigned.len(), 1);
+        assert_eq!(unassigned[0].identifier, "ENG-2");
     }
 
     #[test]

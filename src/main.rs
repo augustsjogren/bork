@@ -389,11 +389,16 @@ fn spawn_linear_worker(
             Ok((issues, projects)) => LinearPollResult {
                 issues,
                 projects,
+                // Best-effort: a hiccup fetching unassigned issues just means
+                // the pickup list is stale this round, not worth a second
+                // error toast alongside the assigned-issues one above.
+                unassigned_issues: external::linear::fetch_unassigned_issues().unwrap_or_default(),
                 error: None,
             },
             Err(e) => LinearPollResult {
                 issues: Vec::new(),
                 projects: Vec::new(),
+                unassigned_issues: Vec::new(),
                 error: Some(e.to_string()),
             },
         };
@@ -3382,6 +3387,7 @@ fn run_tui() -> anyhow::Result<()> {
                 last_linear_error = None;
                 for project in &mut app.projects {
                     project.live.linear_issues = result.issues.clone();
+                    project.live.linear_unassigned_issues = result.unassigned_issues.clone();
                     let linear_titles: Vec<(String, String)> = project
                         .live
                         .linear_issues

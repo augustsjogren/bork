@@ -210,6 +210,7 @@ fn map_linear_picker_key(key: KeyEvent) -> Action {
             KeyCode::Char('s') => Action::AttachStack,
             KeyCode::Char('l') => Action::PickerSwitchTab,
             KeyCode::Char('h') => Action::PickerSwitchTab,
+            KeyCode::Char('f') => Action::LinearPickerCycleFilter,
             _ => Action::Noop,
         };
     }

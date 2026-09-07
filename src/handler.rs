@@ -8,7 +8,7 @@ use crate::app::{
 };
 use crate::config::AppConfig;
 use crate::external::linear::LinearProject;
-use crate::external::{agent, browser, github, tmux, tuicr};
+use crate::external::{agent, browser, github, linear, tmux, tuicr};
 use crate::global_config::ReloadResult;
 use crate::input::Action;
 use crate::types::{
@@ -115,7 +115,14 @@ pub fn handle_action(
             PostAction::None
         }
         InputMode::LinearPicker => {
-            handle_linear_picker(app, action, ctx, ch.linear_wake_tx, ch.pr_wake_tx);
+            handle_linear_picker(
+                app,
+                action,
+                ctx,
+                ch.linear_wake_tx,
+                ch.pr_wake_tx,
+                ch.action_tx,
+            );
             PostAction::None
         }
         InputMode::StackDetails => handle_stack_details(app, action, ch),
@@ -135,7 +142,11 @@ pub fn handle_action(
             handle_debug_inspector(app, action);
             PostAction::None
         }
-        InputMode::Normal => handle_normal(app, action, ctx, ch),
+        InputMode::Normal => {
+            let post = handle_normal(app, action, ctx, ch);
+            spawn_pending_linear_starts(app, ctx, ch.action_tx);
+            post
+        }
         InputMode::Sidebar => handle_sidebar(app, action),
         InputMode::SidebarRename => {
             handle_sidebar_rename(app, action);
@@ -949,6 +960,10 @@ fn handle_normal(
                 return PostAction::None;
             }
 
+            // A genuinely new launch is "starting" the card whether or not
+            // it's also being dragged into the InProgress column.
+            app.context_project_mut(ctx).queue_linear_start(idx);
+
             app.set_message(if open_popup {
                 "Launching session..."
             } else {
@@ -1727,6 +1742,7 @@ fn handle_linear_picker(
     ctx: &ActionContext,
     linear_wake_tx: &mpsc::Sender<()>,
     pr_wake_tx: &mpsc::Sender<crate::github_poll::Wake>,
+    action_tx: &mpsc::Sender<ActionResult>,
 ) {
     match action {
         Action::LinearPickerClose => {
@@ -1740,6 +1756,12 @@ fn handle_linear_picker(
                 if let Some(ref mut picker) = app.linear_picker {
                     picker.selected = 0;
                 }
+            }
+        }
+        Action::LinearPickerCycleFilter => {
+            if let Some(ref mut picker) = app.linear_picker {
+                picker.linear_filter = picker.linear_filter.cycle();
+                picker.selected = 0;
             }
         }
         Action::LinearPickerDown => {
@@ -1784,7 +1806,7 @@ fn handle_linear_picker(
             (LinearPickerContext::Attach, ImportSource::GitHub) => {
                 attach_github_to_dialog(app, ctx)
             }
-            (_, ImportSource::Linear) => import_linear_issue(app, ctx),
+            (_, ImportSource::Linear) => import_linear_issue(app, ctx, action_tx),
             (_, ImportSource::LinearProject) => import_linear_project(app, ctx),
             (_, ImportSource::GitHub) => import_github_pr(app, ctx),
         },
@@ -1875,7 +1897,46 @@ fn attach_linear_to_dialog(app: &mut App, _ctx: &ActionContext) {
     }
 }
 
-fn import_linear_issue(app: &mut App, ctx: &ActionContext) {
+/// Fires the Linear "move to started" mutation for any card that just
+/// entered `InProgress`, queued by `Project::move_issue_to_column`. Silent on
+/// success (a background sync, not a user action); surfaces a failure once.
+fn spawn_pending_linear_starts(
+    app: &mut App,
+    ctx: &ActionContext,
+    action_tx: &mpsc::Sender<ActionResult>,
+) {
+    let project = app.context_project_mut(ctx);
+    let pending_assigns = project.take_pending_linear_assigns();
+    let pending_starts = project.take_pending_linear_starts();
+
+    for linear_id in pending_assigns {
+        let tx = action_tx.clone();
+        thread::spawn(move || {
+            if let Err(e) = linear::assign_to_me(&linear_id) {
+                let _ = tx.send(ActionResult {
+                    message: format!("Started the card but couldn't self-assign it in Linear: {e}"),
+                    message_kind: MessageKind::Warning,
+                    ..Default::default()
+                });
+            }
+        });
+    }
+
+    for (linear_id, team_key) in pending_starts {
+        let tx = action_tx.clone();
+        thread::spawn(move || {
+            if let Err(e) = linear::move_to_started(&linear_id, &team_key) {
+                let _ = tx.send(ActionResult {
+                    message: format!("Started the card but couldn't update Linear: {e}"),
+                    message_kind: MessageKind::Warning,
+                    ..Default::default()
+                });
+            }
+        });
+    }
+}
+
+fn import_linear_issue(app: &mut App, ctx: &ActionContext, action_tx: &mpsc::Sender<ActionResult>) {
     let filtered = app.filtered_linear_issues();
     let selected_idx = app.linear_picker.as_ref().map(|p| p.selected).unwrap_or(0);
 
@@ -1892,6 +1953,14 @@ fn import_linear_issue(app: &mut App, ctx: &ActionContext) {
         app.close_linear_picker();
         return;
     };
+
+    // Picked from the unassigned pool rather than your own assigned list:
+    // picking it up claims it, so self-assign it in Linear too.
+    let needs_assign = !project
+        .live
+        .linear_issues
+        .iter()
+        .any(|i| i.id == linear_issue.id);
 
     if project.issues.iter().any(|i| i.id == id) {
         app.set_message(format!(
@@ -1923,6 +1992,21 @@ fn import_linear_issue(app: &mut App, ctx: &ActionContext) {
         issue,
         format!("Imported {}", linear_issue.identifier),
     );
+
+    if needs_assign {
+        let tx = action_tx.clone();
+        let issue_id = linear_issue.id.clone();
+        let identifier = linear_issue.identifier.clone();
+        thread::spawn(move || {
+            if let Err(e) = linear::assign_to_me(&issue_id) {
+                let _ = tx.send(ActionResult {
+                    message: format!("Imported {identifier} but couldn't self-assign it: {e}"),
+                    message_kind: MessageKind::Warning,
+                    ..Default::default()
+                });
+            }
+        });
+    }
 }
 
 /// Add an imported issue to Todo, select it, and close the picker.
@@ -4944,6 +5028,53 @@ mod tests {
         let filtered = app.filtered_linear_issues();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].identifier, "TEST-1");
+    }
+
+    #[test]
+    fn linear_picker_cycle_filter_wraps_around_and_resets_selection() {
+        let mut app = test_app();
+        app.project_mut().linear_available = true;
+        app.project_mut().live.linear_issues = vec![test_linear_issue("uuid-1", "TEST-1", "Mine")];
+        app.project_mut().live.linear_unassigned_issues =
+            vec![test_linear_issue("uuid-2", "TEST-2", "Up for grabs")];
+
+        let ctx = app.action_context();
+        app.open_linear_picker(&ctx);
+        app.linear_picker.as_mut().unwrap().selected = 1;
+
+        handle_action(
+            &mut app,
+            Action::LinearPickerCycleFilter,
+            &ctx,
+            &test_channels(),
+        );
+        assert_eq!(
+            app.linear_picker.as_ref().unwrap().linear_filter,
+            crate::app::LinearIssueFilter::Mine
+        );
+        assert_eq!(app.linear_picker.as_ref().unwrap().selected, 0);
+
+        handle_action(
+            &mut app,
+            Action::LinearPickerCycleFilter,
+            &ctx,
+            &test_channels(),
+        );
+        assert_eq!(
+            app.linear_picker.as_ref().unwrap().linear_filter,
+            crate::app::LinearIssueFilter::Unassigned
+        );
+
+        handle_action(
+            &mut app,
+            Action::LinearPickerCycleFilter,
+            &ctx,
+            &test_channels(),
+        );
+        assert_eq!(
+            app.linear_picker.as_ref().unwrap().linear_filter,
+            crate::app::LinearIssueFilter::All
+        );
     }
 
     #[test]
