@@ -77,6 +77,27 @@ pub enum InputMode {
 /// as unknown and default them all to Keep. `existing` says which worktrees the
 /// poll saw, so stale entries still drop; keying that on branches instead would
 /// evict a worktree on a detached HEAD, which has no branch.
+/// One-line ribbing for the prune dialog when it finds worktrees safe to
+/// remove — a nudge that this is worth doing, not just a count.
+fn prune_roast(removable: usize) -> String {
+    const LINES: &[&str] = &[
+        "these worktrees have been done for a while now",
+        "your disk called, it wants some of this back",
+        "clean-up on aisle worktree",
+        "these branches shipped ages ago and never left",
+    ];
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0) as usize;
+    let line = LINES[seed % LINES.len()];
+    if removable > 1 {
+        format!("{line} \u{2014} {removable} ready to go")
+    } else {
+        line.to_string()
+    }
+}
+
 /// Stable partition: own work keeps its order at the top, review-imported
 /// cards keep theirs below. The board draws the group boundary.
 fn review_cards_last(mut items: Vec<(usize, &Issue)>) -> Vec<(usize, &Issue)> {
@@ -3140,26 +3161,6 @@ impl App {
         false
     }
 
-    /// Dot-matrix "Pillar Sweep" spinner: a 3-wide block of filled dots
-    /// sweeps left-to-right across 5 cells, then trails off. Each entry
-    /// is `true` for a filled dot, `false` for an empty dot. Renderers
-    /// draw filled and empty dots in different styles for the two-tone
-    /// dot-matrix look.
-    pub fn spinner_frame(&self) -> [bool; 5] {
-        const FRAMES: [[bool; 5]; 8] = [
-            [true, false, false, false, false],
-            [true, true, false, false, false],
-            [true, true, true, false, false],
-            [false, true, true, true, false],
-            [false, false, true, true, true],
-            [false, false, false, true, true],
-            [false, false, false, false, true],
-            [false, false, false, false, false],
-        ];
-        // Tick runs at 50ms; advance one frame every 2 ticks (~10 fps).
-        FRAMES[(self.spinner_tick / 2) % FRAMES.len()]
-    }
-
     pub fn open_dialog(&mut self, ctx: &ActionContext) {
         self.open_dialog_in_column(Column::Todo, ctx);
     }
@@ -3213,6 +3214,13 @@ impl App {
         if candidates.is_empty() {
             self.set_message("No worktrees to prune");
             return;
+        }
+        let removable = candidates
+            .iter()
+            .filter(|c| c.action == crate::prune::PruneAction::Remove)
+            .count();
+        if removable > 0 {
+            self.set_warning(prune_roast(removable));
         }
         self.prune_dialog = Some(PruneDialogState::new(ctx.project_id.clone(), candidates));
         self.input_mode = InputMode::PruneDialog;
