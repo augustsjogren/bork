@@ -177,6 +177,7 @@ pub fn render_import_picker(frame: &mut Frame, app: &App) {
         count,
         content_area.width as usize,
         app.active_project().live.stacks_available && !app.active_project().live.gh_missing,
+        (app.picker_tab == ImportSource::Linear).then(|| picker.linear_filter.label()),
     );
     frame.render_widget(Paragraph::new(footer), content_area);
     if loading {
@@ -191,6 +192,7 @@ fn picker_footer(
     count: usize,
     width: usize,
     stacks_available: bool,
+    linear_filter_label: Option<&str>,
 ) -> Line<'static> {
     let select = if context == LinearPickerContext::Attach {
         "toggle"
@@ -198,9 +200,12 @@ fn picker_footer(
         "import"
     };
     let counter = format!("{selected}/{count}");
-    let mut bindings = vec![("Enter", select)];
+    let mut bindings = vec![("Enter".to_string(), select.to_string())];
     if source == ImportSource::GitHub && stacks_available {
-        bindings.push(("Ctrl+s", "stack"));
+        bindings.push(("Ctrl+s".to_string(), "stack".to_string()));
+    }
+    if let Some(label) = linear_filter_label {
+        bindings.push(("Ctrl+f".to_string(), format!("filter [{label}]")));
     }
     let required = bindings
         .iter()
@@ -210,15 +215,15 @@ fn picker_footer(
         + counter.len()
         + 2;
     if required + "Ctrl+r refresh  ".len() <= width {
-        bindings.push(("Ctrl+r", "refresh"));
+        bindings.push(("Ctrl+r".to_string(), "refresh".to_string()));
     }
-    bindings.push(("Esc", "close"));
+    bindings.push(("Esc".to_string(), "close".to_string()));
     let mut spans = Vec::new();
     for (index, (key, label)) in bindings.iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled(*key, styles::statusbar_key_style()));
+        spans.push(Span::styled(key.clone(), styles::statusbar_key_style()));
         spans.push(Span::styled(
             format!(" {label}"),
             styles::statusbar_desc_style(),
@@ -299,11 +304,25 @@ fn render_linear_list(
         .unwrap_or_default();
     let is_attach = app.linear_picker_context == LinearPickerContext::Attach;
 
+    let assigned_ids: HashSet<&str> = app
+        .active_project()
+        .live
+        .linear_issues
+        .iter()
+        .map(|i| i.id.as_str())
+        .collect();
+
     let scroll = scroll_offset(picker.selected, visible_count);
 
     if count == 0 {
-        let msg = if app.active_project().live.linear_issues.is_empty() {
+        let msg = if !app.active_project().live.has_linear_issues() {
             "No issues loaded"
+        } else if picker.search.is_empty() {
+            match picker.linear_filter {
+                crate::app::LinearIssueFilter::All => "No matching issues",
+                crate::app::LinearIssueFilter::Mine => "Nothing assigned to you",
+                crate::app::LinearIssueFilter::Unassigned => "No unassigned issues in your teams",
+            }
         } else {
             "No matching issues"
         };
@@ -344,9 +363,12 @@ fn render_linear_list(
                 }
             };
 
+            let is_unassigned = !assigned_ids.contains(issue.id.as_str());
             let id_width = issue.identifier.len();
             let state_str = if is_imported {
                 " \u{25cf} on board".to_string()
+            } else if is_unassigned {
+                " \u{25cb} unassigned".to_string()
             } else {
                 format!(" \u{25cf} {}", issue.state_name)
             };
@@ -635,6 +657,7 @@ mod tests {
             3,
             76,
             false,
+            None,
         );
         let text: String = line
             .spans
@@ -655,6 +678,7 @@ mod tests {
                 554,
                 width,
                 true,
+                None,
             );
             assert!(line.width() <= width);
             let text: String = line

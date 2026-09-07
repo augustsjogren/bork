@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 use serde::Deserialize;
 
@@ -47,6 +49,7 @@ impl LinearProject {
 pub struct LinearPollResult {
     pub issues: Vec<LinearIssue>,
     pub projects: Vec<LinearProject>,
+    pub unassigned_issues: Vec<LinearIssue>,
     /// Why the poll returned nothing, when it failed. An empty list is
     /// otherwise indistinguishable from having no assigned issues, which sends
     /// the user looking at Linear instead of at their key.
@@ -148,6 +151,46 @@ pub fn project_slug(reference: &str) -> Option<String> {
     let slug = segment.rsplit('-').next()?;
     let valid = !slug.is_empty() && slug.chars().all(|c| c.is_ascii_alphanumeric());
     valid.then(|| slug.to_lowercase())
+}
+
+fn parse_issues(body: &str) -> Result<Vec<LinearIssue>, AppError> {
+    parse_issues_at(body, "/data/viewer/assignedIssues/nodes")
+}
+
+fn parse_projects(body: &str) -> Result<Vec<LinearProject>, AppError> {
+    let response: ProjectsResponse = serde_json::from_value(parse_response(body)?)
+        .map_err(|e| AppError::Linear(format!("unexpected Linear response shape: {e}")))?;
+
+    Ok(response
+        .data
+        .projects
+        .nodes
+        .into_iter()
+        .map(|node| LinearProject {
+            id: node.id,
+            slug: node.slug_id,
+            name: node.name,
+            url: node.url,
+            status_name: node.status.map(|s| s.name).unwrap_or_default(),
+        })
+        .collect())
+}
+
+// `team: { members: { some: { isMe: ... } } }` scopes to teams you belong to
+// without a separate lookup for your team ids.
+const QUERY_UNASSIGNED: &str = concat!(
+    "{ issues(filter: { assignee: { null: true }, ",
+    "team: { members: { some: { isMe: { eq: true } } } }, ",
+    "state: { type: { nin: [\"completed\", \"canceled\", \"triage\"] } } }, ",
+    "first: 50, ",
+    "orderBy: updatedAt",
+    ") { nodes { id identifier title url branchName priority ",
+    "state { name } team { key } } } }",
+);
+
+/// Open issues in your teams with no assignee — pickable, not yet claimed.
+pub fn fetch_unassigned_issues() -> Result<Vec<LinearIssue>, AppError> {
+    parse_issues_at(&run_query(QUERY_UNASSIGNED)?, "/data/issues/nodes")
 }
 
 /// Run a GraphQL query, returning the raw response body.
@@ -264,55 +307,14 @@ fn escape_for_config(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Read issues out of a response body.
-fn parse_issues(body: &str) -> Result<Vec<LinearIssue>, AppError> {
-    let response: GraphqlResponse = serde_json::from_value(checked_response(body)?)
-        .map_err(|e| AppError::Linear(format!("unexpected Linear response shape: {e}")))?;
-
-    Ok(response
-        .data
-        .viewer
-        .assigned_issues
-        .nodes
-        .into_iter()
-        .map(|node| LinearIssue {
-            id: node.id,
-            identifier: node.identifier,
-            title: node.title,
-            url: node.url,
-            branch_name: node.branch_name.unwrap_or_default(),
-            priority: node.priority,
-            state_name: node.state.name,
-            team_key: node.team.key,
-        })
-        .collect())
-}
-
-fn parse_projects(body: &str) -> Result<Vec<LinearProject>, AppError> {
-    let response: ProjectsResponse = serde_json::from_value(checked_response(body)?)
-        .map_err(|e| AppError::Linear(format!("unexpected Linear response shape: {e}")))?;
-
-    Ok(response
-        .data
-        .projects
-        .nodes
-        .into_iter()
-        .map(|node| LinearProject {
-            id: node.id,
-            slug: node.slug_id,
-            name: node.name,
-            url: node.url,
-            status_name: node.status.map(|s| s.name).unwrap_or_default(),
-        })
-        .collect())
-}
-
-/// Parse a response body, turning a GraphQL `errors` array into an error.
+/// Parse the response body as a top-level JSON value, surfacing a GraphQL
+/// `errors` array as an `Err` instead of letting it fall through to a
+/// confusing "unexpected shape" message from a null `data`.
 ///
 /// GraphQL reports query and permission failures in the body — Linear returns
 /// some of them with a non-2xx status too — so a bare deserialize would show an
 /// expired token as a parse error.
-fn checked_response(body: &str) -> Result<serde_json::Value, AppError> {
+fn parse_response(body: &str) -> Result<serde_json::Value, AppError> {
     let value: serde_json::Value = serde_json::from_str(body).map_err(|e| {
         AppError::Linear(format!(
             "could not parse the Linear response: {e} (body: {})",
@@ -341,32 +343,132 @@ fn checked_response(body: &str) -> Result<serde_json::Value, AppError> {
     Ok(value)
 }
 
+/// Read a list of issue nodes out of the response body at `pointer` (a JSON
+/// Pointer into `data`, e.g. `/data/viewer/assignedIssues/nodes`). Different
+/// queries nest their node list under a different path.
+fn parse_issues_at(body: &str, pointer: &str) -> Result<Vec<LinearIssue>, AppError> {
+    let value = parse_response(body)?;
+
+    let nodes: Vec<IssueNode> = value
+        .pointer(pointer)
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AppError::Linear(format!("unexpected Linear response shape: {e}")))?
+        .unwrap_or_default();
+
+    Ok(nodes
+        .into_iter()
+        .map(|node| LinearIssue {
+            id: node.id,
+            identifier: node.identifier,
+            title: node.title,
+            url: node.url,
+            branch_name: node.branch_name.unwrap_or_default(),
+            priority: node.priority,
+            state_name: node.state.name,
+            team_key: node.team.key,
+        })
+        .collect())
+}
+
 fn truncate(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
+/// Cache of `viewer.id`, resolved once. Only used for the `assigneeId` of a
+/// self-assign mutation, so a rare cold miss costs one extra round trip.
+static VIEWER_ID: Mutex<Option<String>> = Mutex::new(None);
+
+fn viewer_id() -> Result<String, AppError> {
+    if let Some(id) = VIEWER_ID.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Ok(id);
+    }
+    let value = parse_response(&run_query("{ viewer { id } }")?)?;
+    let id = value
+        .pointer("/data/viewer/id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::Linear("Linear response had no viewer id".to_string()))?
+        .to_string();
+    *VIEWER_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
+    Ok(id)
+}
+
+/// Cache of each team's "In Progress" workflow state id, keyed by team key.
+/// A team can have several `started`-type states (In Progress, In Review,
+/// Blocked, ...); only the one literally named "In Progress" is the target.
+static STARTED_STATE_IDS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+fn started_state_id(team_key: &str) -> Result<String, AppError> {
+    if let Some(id) = STARTED_STATE_IDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|cache| cache.get(team_key))
+        .cloned()
+    {
+        return Ok(id);
+    }
+    let query = format!(
+        r#"{{ teams(filter: {{ key: {{ eq: "{team_key}" }} }}) {{ nodes {{ states(filter: {{ type: {{ eq: "started" }}, name: {{ eq: "In Progress" }} }}) {{ nodes {{ id }} }} }} }} }}"#
+    );
+    let value = parse_response(&run_query(&query)?)?;
+    let id = value
+        .pointer("/data/teams/nodes/0/states/nodes/0/id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            AppError::Linear(format!(
+                "no 'In Progress' workflow state found for team {team_key}"
+            ))
+        })?
+        .to_string();
+    STARTED_STATE_IDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(team_key.to_string(), id.clone());
+    Ok(id)
+}
+
+fn run_mutation(mutation: &str, field: &str) -> Result<(), AppError> {
+    let value = parse_response(&run_query(mutation)?)?;
+    if mutation_succeeded(&value, field) {
+        Ok(())
+    } else {
+        Err(AppError::Linear("Linear rejected the update".to_string()))
+    }
+}
+
+fn mutation_succeeded(value: &serde_json::Value, field: &str) -> bool {
+    value
+        .pointer(&format!("/data/{field}/success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Claim an unassigned issue as your own, the Linear side of picking it up.
+pub fn assign_to_me(issue_id: &str) -> Result<(), AppError> {
+    let me = viewer_id()?;
+    run_mutation(
+        &format!(
+            r#"mutation {{ issueUpdate(id: "{issue_id}", input: {{ assigneeId: "{me}" }}) {{ success }} }}"#
+        ),
+        "issueUpdate",
+    )
+}
+
+/// Move an issue to its team's "In Progress" state, fired when a card starts.
+pub fn move_to_started(issue_id: &str, team_key: &str) -> Result<(), AppError> {
+    let state_id = started_state_id(team_key)?;
+    run_mutation(
+        &format!(
+            r#"mutation {{ issueUpdate(id: "{issue_id}", input: {{ stateId: "{state_id}" }}) {{ success }} }}"#
+        ),
+        "issueUpdate",
+    )
+}
+
 // Serde types matching the GraphQL response shape
-
-#[derive(Deserialize)]
-struct GraphqlResponse {
-    data: GraphqlData,
-}
-
-#[derive(Deserialize)]
-struct GraphqlData {
-    viewer: Viewer,
-}
-
-#[derive(Deserialize)]
-struct Viewer {
-    #[serde(rename = "assignedIssues")]
-    assigned_issues: IssueConnection,
-}
-
-#[derive(Deserialize)]
-struct IssueConnection {
-    nodes: Vec<IssueNode>,
-}
 
 #[derive(Deserialize)]
 struct IssueNode {
@@ -523,6 +625,48 @@ mod tests {
         let err = parse_issues("<html>gateway timeout</html>").expect_err("not json");
 
         assert!(err.to_string().contains("gateway timeout"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_issues_at_reads_a_different_node_path() {
+        // The unassigned-issues query nests nodes under `issues`, not
+        // `viewer.assignedIssues` — same node shape, different pointer.
+        let body = r#"{"data":{"issues":{"nodes":[
+            {"id":"abc","identifier":"ENG-1","title":"Fix it","url":"https://linear.app/x",
+             "branchName":"eng-1-fix-it","priority":2,"state":{"name":"Backlog"},
+             "team":{"key":"ENG"}}]}}}"#;
+
+        let issues = parse_issues_at(body, "/data/issues/nodes").expect("should parse");
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].identifier, "ENG-1");
+    }
+
+    #[test]
+    fn parse_issues_at_defaults_to_empty_when_pointer_is_missing() {
+        let body = r#"{"data":{"issues":{"nodes":[]}}}"#;
+
+        let issues = parse_issues_at(body, "/data/nonexistent/nodes").expect("should parse");
+
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn mutation_succeeded_reads_the_named_field() {
+        let value = serde_json::json!({"data": {"issueUpdate": {"success": true}}});
+        assert!(mutation_succeeded(&value, "issueUpdate"));
+    }
+
+    #[test]
+    fn mutation_succeeded_is_false_on_explicit_failure() {
+        let value = serde_json::json!({"data": {"issueUpdate": {"success": false}}});
+        assert!(!mutation_succeeded(&value, "issueUpdate"));
+    }
+
+    #[test]
+    fn mutation_succeeded_is_false_when_the_field_is_absent() {
+        let value = serde_json::json!({"data": {}});
+        assert!(!mutation_succeeded(&value, "issueUpdate"));
     }
 }
 
