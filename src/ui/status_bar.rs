@@ -7,26 +7,25 @@ use ratatui::Frame;
 use crate::app::{App, InputMode, MessageKind};
 use crate::ui::styles;
 
-/// Dot-matrix Pillar Sweep spinner. Filled dots use ACCENT, empty dots use DIM.
+/// "bonk" letter-chase busy spinner.
 fn spinner_spans(app: &App) -> Vec<Span<'static>> {
-    let frame = app.spinner_frame();
-    let filled = Style::default().fg(styles::ACCENT);
-    let empty = Style::default().fg(styles::DIM);
-    let mut spans = Vec::with_capacity(frame.len());
-    for on in frame {
-        if on {
-            spans.push(Span::styled("\u{25cf}", filled));
-        } else {
-            spans.push(Span::styled("\u{25cb}", empty));
-        }
-    }
-    spans
+    const LETTERS: [&str; 4] = ["b", "o", "n", "k"];
+    let lit = (app.spinner_tick / 2) % LETTERS.len();
+    let lit_style = Style::default()
+        .fg(styles::ACCENT)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(styles::DIM);
+    LETTERS
+        .iter()
+        .enumerate()
+        .map(|(i, letter)| Span::styled(*letter, if i == lit { lit_style } else { dim_style }))
+        .collect()
 }
 
 pub fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let has_swimlanes = app.visible_swimlane_count() > 1;
     let mut title_spans = vec![Span::styled(
-        " BORK ",
+        " BONK ",
         Style::default()
             .fg(styles::ACCENT)
             .add_modifier(Modifier::BOLD),
