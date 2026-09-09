@@ -54,6 +54,7 @@ const SECTIONS: &[Section] = &[
             ("e", "Edit issue"),
             ("d", "Delete issue"),
             ("A", "Archive issue"),
+            ("Ctrl+d", "Clear Done column"),
         ],
     },
     Section {

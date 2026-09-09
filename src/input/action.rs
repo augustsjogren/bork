@@ -43,6 +43,7 @@ pub enum Action {
     EditIssue,
     DeleteIssue,
     ArchiveIssue,
+    ClearDoneColumn,
     ConfirmYes,
     /// Enter in a y/n prompt: yes, except for prompts that default to no.
     ConfirmDefault,
