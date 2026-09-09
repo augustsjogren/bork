@@ -939,6 +939,19 @@ fn handle_normal(
                 return PostAction::None;
             }
 
+            // An external-worktree project has no usable cwd without an
+            // attached worktree: project_root is the board's glue directory,
+            // not a checkout, so falling back to it silently strands the
+            // session somewhere the developer never chose. Orchestrators are
+            // the one issue kind with no worktree by design.
+            if issue.kind != IssueKind::Orchestrator
+                && issue.worktree.is_none()
+                && app.context_project(ctx).config.uses_external_worktrees()
+            {
+                app.set_warning(format!("{} has no worktree attached yet", issue.id));
+                return PostAction::None;
+            }
+
             let session_name = issue.session_name(&app.context_project(ctx).config.project_name);
             let popup_title = issue.popup_title();
 
