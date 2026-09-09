@@ -43,6 +43,7 @@ pub enum Action {
     EditIssue,
     DeleteIssue,
     ArchiveIssue,
+    ClearDoneColumn,
     ConfirmYes,
     ConfirmNo,
     DialogChar(char),

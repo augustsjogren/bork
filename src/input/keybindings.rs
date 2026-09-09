@@ -78,6 +78,7 @@ fn map_normal_key(key: KeyEvent, swimlane_count: usize) -> Action {
             KeyCode::Char('p') => Action::ToggleSidebar,
             KeyCode::Char('r') => Action::DebugReset,
             KeyCode::Char('e') => Action::DebugInspect,
+            KeyCode::Char('d') => Action::ClearDoneColumn,
             _ => Action::Noop,
         };
     }

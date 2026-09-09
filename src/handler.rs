@@ -792,6 +792,55 @@ fn handle_normal(
             PostAction::None
         }
 
+        Action::ClearDoneColumn => {
+            let project = app.context_project(ctx);
+            let project_name = project.config.project_name.clone();
+
+            let mut eligible: Vec<(String, String)> = Vec::new();
+            let mut holding_worktree = 0usize;
+            let mut pr_still_open = 0usize;
+            for issue in project.issues.iter().filter(|i| i.column == Column::Done) {
+                if issue.worktree.is_some() {
+                    holding_worktree += 1;
+                    continue;
+                }
+                // Deleting a card whose PR is still open only lasts until the
+                // next poll, which imports the PR again as a fresh card.
+                if project.has_open_pr(issue) {
+                    pr_still_open += 1;
+                    continue;
+                }
+                eligible.push((issue.id.clone(), issue.session_name(&project_name)));
+            }
+            let skip_note = clear_done_skip_note(holding_worktree, pr_still_open);
+
+            if eligible.is_empty() {
+                let message = match skip_note {
+                    Some(note) => format!("No Done cards to clear ({note})"),
+                    None => "No Done cards to clear".to_string(),
+                };
+                app.set_warning(message);
+                return PostAction::None;
+            }
+
+            let message = match skip_note {
+                Some(note) => format!(
+                    "Clear {} Done card(s)? (skipped: {note}) (y/n)",
+                    eligible.len()
+                ),
+                None => format!("Clear {} Done card(s)? (y/n)", eligible.len()),
+            };
+
+            app.start_confirm(
+                message,
+                ConfirmAction::ClearDoneColumn {
+                    issues: eligible,
+                    project_id: ctx.project_id.clone(),
+                },
+            );
+            PostAction::None
+        }
+
         Action::OpenLinearPicker => {
             app.open_import_picker(ctx);
             PostAction::None
@@ -1323,6 +1372,24 @@ fn handle_search(app: &mut App, action: Action, ctx: &ActionContext) {
         Action::SearchCancel => app.cancel_search(ctx),
         _ => {}
     }
+}
+
+fn clear_done_skip_note(holding_worktree: usize, pr_still_open: usize) -> Option<String> {
+    let mut reasons: Vec<String> = Vec::new();
+    if holding_worktree > 0 {
+        reasons.push(format!(
+            "{holding_worktree} still hold a worktree \u{2014} release with X first"
+        ));
+    }
+    if pr_still_open > 0 {
+        reasons.push(format!(
+            "{pr_still_open} with an open PR \u{2014} they would be re-imported"
+        ));
+    }
+    if reasons.is_empty() {
+        return None;
+    }
+    Some(reasons.join("; "))
 }
 
 fn handle_help(app: &mut App, action: Action) {
@@ -3018,6 +3085,57 @@ fn handle_confirm(
                             archive_issue_off_thread(config, project_id, issue, removal)
                         },
                     ),
+                    ConfirmAction::ClearDoneColumn { issues, project_id } => {
+                        let Some(p) = app.find_project(&project_id) else {
+                            app.set_warning("Project no longer available");
+                            return;
+                        };
+                        let project_root = p.config.project_root.clone();
+
+                        app.begin_busy();
+                        let tx = action_tx.clone();
+                        thread::spawn(move || {
+                            let mut deletable: Vec<(ProjectId, String)> = Vec::new();
+                            let mut killed = 0usize;
+                            let mut failed: Vec<String> = Vec::new();
+                            for (issue_id, session_name) in &issues {
+                                match agent::terminate_session(&project_root, session_name) {
+                                    Ok(true) => {
+                                        killed += 1;
+                                        deletable.push((project_id.clone(), issue_id.clone()));
+                                    }
+                                    Ok(false) => {
+                                        deletable.push((project_id.clone(), issue_id.clone()));
+                                    }
+                                    Err(e) => failed.push(format!("{issue_id}: {e}")),
+                                }
+                            }
+                            let message = if failed.is_empty() {
+                                format!(
+                                    "Cleared {} Done card(s) ({killed} session(s) killed)",
+                                    deletable.len()
+                                )
+                            } else {
+                                format!(
+                                    "Cleared {} Done card(s), {} kill failure(s): {}",
+                                    deletable.len(),
+                                    failed.len(),
+                                    failed.join(", ")
+                                )
+                            };
+                            let message_kind = if failed.is_empty() {
+                                MessageKind::Info
+                            } else {
+                                MessageKind::Error
+                            };
+                            let _ = tx.send(ActionResult {
+                                message,
+                                message_kind,
+                                issues_to_delete: deletable,
+                                ..Default::default()
+                            });
+                        });
+                    }
                     ConfirmAction::MoveWorktree {
                         issue_id,
                         project_id,
@@ -6376,6 +6494,117 @@ mod tests {
         let mut app = app_with_issues();
         let project_id = app.project().id();
         assert!(!archive_issue_in_app(&mut app, &project_id, "bork-99"));
+    }
+
+    #[test]
+    fn clear_done_column_with_no_done_cards_warns_without_confirm() {
+        let mut app = app_with_issues();
+        act(&mut app, Action::ClearDoneColumn);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.message.is_some());
+    }
+
+    #[test]
+    fn clear_done_column_opens_confirm_with_only_clean_done_cards() {
+        let mut app = app_with_issues();
+        app.project_mut().issues[0].column = Column::Done;
+        app.project_mut().issues[1].column = Column::Done;
+        app.project_mut().issues[1].worktree = Some("bork-2-slug".into());
+
+        act(&mut app, Action::ClearDoneColumn);
+
+        assert_eq!(app.input_mode, InputMode::Confirm);
+        match app.pending_confirm.as_ref().unwrap() {
+            ConfirmAction::ClearDoneColumn { issues, .. } => {
+                assert_eq!(issues.len(), 1);
+                assert_eq!(issues[0].0, "bork-1");
+            }
+            _ => panic!("expected ClearDoneColumn"),
+        }
+        let message = app.confirm_message.as_deref().expect("confirm open");
+        assert!(message.contains("skipped"), "got: {message}");
+    }
+
+    #[test]
+    fn clear_done_column_skips_cards_whose_pr_is_still_open() {
+        let mut app = app_with_issues();
+        for (idx, number) in [(0, 41), (1, 42)] {
+            let issue = &mut app.project_mut().issues[idx];
+            issue.column = Column::Done;
+            issue.github_pr_links.push(LinkedGithubPr {
+                number,
+                imported: true,
+                import_source: Some(PrImportSource::ReviewRequested),
+            });
+        }
+        let live = &mut app.project_mut().live;
+        live.review_requested_prs = vec![test_pr_status(41, crate::types::PrState::Open)];
+        live.pr_statuses_by_number
+            .insert(42, test_pr_status(42, crate::types::PrState::Merged));
+
+        act(&mut app, Action::ClearDoneColumn);
+
+        assert_eq!(app.input_mode, InputMode::Confirm);
+        match app.pending_confirm.as_ref().unwrap() {
+            ConfirmAction::ClearDoneColumn { issues, .. } => {
+                let ids: Vec<&str> = issues.iter().map(|(id, _)| id.as_str()).collect();
+                assert_eq!(ids, vec!["bork-2"]);
+            }
+            _ => panic!("expected ClearDoneColumn"),
+        }
+        let message = app.confirm_message.as_deref().expect("confirm open");
+        assert!(message.contains("1 with an open PR"), "got: {message}");
+    }
+
+    fn test_pr_status(number: u32, state: crate::types::PrState) -> crate::types::PrStatus {
+        crate::types::PrStatus {
+            number,
+            title: format!("PR #{number}"),
+            url: format!("https://github.com/test/repo/pull/{number}"),
+            author: "someone".to_string(),
+            state,
+            is_draft: false,
+            checks: None,
+            review: None,
+            additions: 0,
+            deletions: 0,
+            head_branch: format!("feature-{number}"),
+            is_cross_repository: false,
+            merge_blocker: None,
+            merge_queue: None,
+            unresolved_threads: 0,
+        }
+    }
+
+    #[test]
+    fn clear_done_column_confirm_waits_for_teardown_before_removing_issues() {
+        let mut app = app_with_issues();
+        app.project_mut().issues[0].column = Column::Done;
+        app.project_mut().issues[1].column = Column::Done;
+        let project_id = app.project().id();
+
+        act(&mut app, Action::ClearDoneColumn);
+        assert_eq!(app.input_mode, InputMode::Confirm);
+        act(&mut app, Action::ConfirmYes);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        // Nothing removed yet: the spawned thread hasn't reported back.
+        assert_eq!(app.project().issues.len(), 3);
+
+        assert!(delete_issue_from_app(&mut app, &project_id, "bork-1"));
+        assert!(delete_issue_from_app(&mut app, &project_id, "bork-2"));
+        assert_eq!(app.project().issues.len(), 1);
+        assert_eq!(app.project().issues[0].id, "bork-3");
+        assert!(app.project().state_dirty);
+    }
+
+    #[test]
+    fn clear_done_column_confirm_no_cancels() {
+        let mut app = app_with_issues();
+        app.project_mut().issues[0].column = Column::Done;
+        act(&mut app, Action::ClearDoneColumn);
+        act(&mut app, Action::ConfirmNo);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.project().issues.len(), 3);
     }
 
     #[test]

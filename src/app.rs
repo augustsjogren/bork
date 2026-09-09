@@ -1193,6 +1193,15 @@ impl Project {
             .ok_or("No PR found for this issue")
     }
 
+    pub fn has_open_pr(&self, issue: &Issue) -> bool {
+        let live = &self.live;
+        live.pr_statuses_by_number
+            .values()
+            .chain(live.user_prs.iter())
+            .chain(live.review_requested_prs.iter())
+            .any(|pr| pr.state == PrState::Open && issue.has_pr_number(pr.number))
+    }
+
     /// Why a card needs its owner right now, or `None` when it can wait. A
     /// blocked agent outranks its PR: the agent has stopped until you answer.
     /// Derived on every read from data the pollers already carry, so there is
@@ -2325,6 +2334,13 @@ pub enum ConfirmAction {
     },
     /// Unregister the project. Its files stay on disk.
     RemoveProject { project_id: ProjectId },
+    /// Snapshot of eligible (issue_id, session_name) pairs taken when the
+    /// prompt opens: cards that gain or drop a worktree while it's open are
+    /// still cleared or skipped based on that snapshot, not current state.
+    ClearDoneColumn {
+        issues: Vec<(String, String)>,
+        project_id: ProjectId,
+    },
     DetachWorktree {
         issue_id: String,
         project_id: ProjectId,
