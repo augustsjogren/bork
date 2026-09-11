@@ -114,6 +114,7 @@ pub fn apply_git_poll(live: &mut LiveState, result: crate::external::git::GitPol
 
     live.worktree_branches = branches;
     live.worktree_paths = result.paths;
+    live.worktree_existing = existing;
     live.git_poll_done = true;
     changed
 }
@@ -125,6 +126,12 @@ pub struct LiveState {
     pub listening_ports: HashMap<String, Vec<u16>>,
     pub worktree_statuses: HashMap<String, WorktreeStatus>,
     pub worktree_branches: HashMap<String, String>,
+    /// Every worktree the last poll saw, branch or no branch. Wider than
+    /// `worktree_branches`/`frozen_worktree_branches`: a worktree parked on a
+    /// detached HEAD (mid-rebase, mid worktree branch swap) has no branch
+    /// entry but still exists, and staleness must be judged on this set, not
+    /// on branch presence.
+    pub worktree_existing: HashSet<String>,
     /// Absolute path per worktree, from the provider. See
     /// `GitPollResult::paths`.
     pub worktree_paths: HashMap<String, String>,
@@ -1092,19 +1099,23 @@ impl Project {
 
     pub fn clear_stale_worktrees(&mut self) -> bool {
         let live = &self.live;
-        let live_branches = &live.worktree_branches;
-        let frozen_branches = &live.frozen_worktree_branches;
+        // A worktree on a detached HEAD (mid-rebase, mid worktree branch
+        // swap) drops out of the branch maps for a poll cycle but is still
+        // very much there — `existing` is the set that actually answers
+        // "gone or not". Keying eviction on branch presence would detach a
+        // card's worktree out from under it on every such transient, with no
+        // way back (see `detect_worktree`'s PR-only branch fallback).
+        let existing = &live.worktree_existing;
         let stale: Vec<usize> = self
             .issues
             .iter()
             .enumerate()
             .filter_map(|(i, issue)| {
                 let wt = issue.worktree.as_ref()?;
-                let exists = live_branches.contains_key(wt) || frozen_branches.contains_key(wt);
-                if !exists {
-                    Some(i)
-                } else {
+                if existing.contains(wt) {
                     None
+                } else {
+                    Some(i)
                 }
             })
             .collect();
@@ -2399,8 +2410,8 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
         column: _,
         agent_kind: _,
         agent_mode: _,
-        prompt: _,
         model: _,
+        prompt: _,
         worktree: _,
         worktree_path: _,
         worktree_target: _,
@@ -5377,6 +5388,10 @@ mod tests {
             .live
             .worktree_branches
             .insert("bork-1".into(), "bork-1/feature".into());
+        app.project_mut()
+            .live
+            .worktree_existing
+            .insert("bork-1".into());
         let changed = app.project_mut().clear_stale_worktrees();
         assert!(!changed);
         assert_eq!(app.project().issues[0].worktree, Some("bork-1".into()));
@@ -5387,11 +5402,33 @@ mod tests {
         let mut issue = test_issue("bork-1", Column::Done);
         issue.worktree = Some("bork-1".into());
         let mut app = test_app(vec![issue]);
-        // Not in worktree_branches, but in frozen
+        // Not in worktree_branches, but in frozen and still enumerated.
         app.project_mut()
             .live
             .frozen_worktree_branches
             .insert("bork-1".into(), "bork-1/feature".into());
+        app.project_mut()
+            .live
+            .worktree_existing
+            .insert("bork-1".into());
+        let changed = app.project_mut().clear_stale_worktrees();
+        assert!(!changed);
+        assert_eq!(app.project().issues[0].worktree, Some("bork-1".into()));
+    }
+
+    #[test]
+    fn test_clear_stale_keeps_worktree_on_detached_head() {
+        // Mid-rebase or mid worktree branch swap, a live worktree reports
+        // no branch for a poll cycle but is still enumerated. Losing the card
+        // link here has no way back (see `detect_worktree`'s PR-only branch
+        // fallback), so `existing`, not branch presence, must decide staleness.
+        let mut issue = test_issue("bork-1", Column::InProgress);
+        issue.worktree = Some("bork-1".into());
+        let mut app = test_app(vec![issue]);
+        app.project_mut()
+            .live
+            .worktree_existing
+            .insert("bork-1".into());
         let changed = app.project_mut().clear_stale_worktrees();
         assert!(!changed);
         assert_eq!(app.project().issues[0].worktree, Some("bork-1".into()));
@@ -6375,6 +6412,38 @@ mod tests {
         }
         assert_eq!(d.agent_kind, crate::types::AgentKind::Pi);
         assert_eq!(d.agent_mode, crate::types::AgentMode::Build);
+    }
+
+    #[test]
+    fn dialog_claude_model_cycles_and_wraps_through_default() {
+        let mut d = claude_dialog();
+        assert_eq!(d.model, None);
+        d.focused_field = 3; // Model field (Kind, Agent, Mode, Model)
+        d.push_char('l');
+        assert_eq!(d.model.as_deref(), Some("haiku"));
+        d.push_char('l');
+        assert_eq!(d.model.as_deref(), Some("sonnet"));
+        d.push_char('h');
+        assert_eq!(d.model.as_deref(), Some("haiku"));
+        d.push_char('h');
+        assert_eq!(d.model, None);
+    }
+
+    #[test]
+    fn dialog_opencode_hides_model_field() {
+        let d = opencode_dialog();
+        assert!(!d.ordered_fields().contains(&DialogField::Model));
+    }
+
+    #[test]
+    fn dialog_switching_agent_resets_model() {
+        let mut d = claude_dialog();
+        d.focused_field = 3; // Model field
+        d.push_char('l');
+        assert_eq!(d.model.as_deref(), Some("haiku"));
+        d.focused_field = 1; // Agent field
+        d.push_char('l'); // cycle off Claude
+        assert_eq!(d.model, None);
     }
 
     #[test]

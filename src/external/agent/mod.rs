@@ -750,6 +750,10 @@ fn build_agent_cmd(
 ///
 /// All configured args are individually shell-escaped so values containing
 /// spaces or quotes are passed through safely.
+///
+/// `model`, when set, is appended as `--model <value>` after the mode flags
+/// and base args, so a per-issue override always wins over anything a user
+/// configured in `[agent.<name>].args`.
 fn trailing_args(
     config: &AppConfig,
     kind: AgentKind,
@@ -1848,6 +1852,33 @@ mod tests {
     }
 
     // --- Codex ---
+
+    #[test]
+    fn claude_fresh_with_model_override() {
+        let mut issue = test_issue(AgentKind::Claude, AgentMode::Build);
+        issue.model = Some("opus".to_string());
+        let config = test_config();
+        let (cmd, _, _) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(cmd.contains("--model 'opus'"));
+    }
+
+    #[test]
+    fn claude_resume_with_model_override() {
+        let mut issue = resumable_issue(AgentKind::Claude, AgentMode::Plan, "uuid-123-456");
+        issue.model = Some("haiku".to_string());
+        let config = test_config();
+        let (cmd, _, _) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(cmd.contains("--resume 'uuid-123-456'"));
+        assert!(cmd.contains("--model 'haiku'"));
+    }
+
+    #[test]
+    fn no_model_override_omits_flag() {
+        let issue = test_issue(AgentKind::Claude, AgentMode::Build);
+        let config = test_config();
+        let (cmd, _, _) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        assert!(!cmd.contains("--model"));
+    }
 
     #[test]
     fn codex_fresh_plan() {

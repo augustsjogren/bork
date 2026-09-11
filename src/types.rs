@@ -95,6 +95,18 @@ impl AgentKind {
         crate::external::agent::has_modes(self)
     }
 
+    /// Quick-pick model aliases for the dialog's Model field, cheapest first.
+    /// Empty means the field is hidden and `--model` is only reachable via
+    /// `bork issue start/update --model <value>` with a provider-specific
+    /// string. Only Claude's aliases are stable enough across agent releases
+    /// to hardcode; the others vary too much by provider/version.
+    pub fn known_models(self) -> &'static [&'static str] {
+        match self {
+            AgentKind::Claude => &["haiku", "sonnet", "opus", "fable"],
+            AgentKind::OpenCode | AgentKind::Codex | AgentKind::Pi | AgentKind::Cursor => &[],
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim().to_ascii_lowercase();
         AgentKind::ALL
@@ -463,11 +475,13 @@ pub struct Issue {
     pub column: Column,
     pub agent_kind: AgentKind,
     pub agent_mode: AgentMode,
-    pub prompt: Option<String>,
-    /// Model passed to the agent's `--model` flag. Cleared on agent switch,
-    /// since model names are agent-specific.
+    /// Model override passed to the agent CLI as `--model <value>`. `None`
+    /// means the agent's own default. Free-form since model names/aliases
+    /// vary per agent and change independently of bork releases. Cleared on
+    /// agent switch, since model names are agent-specific.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    pub prompt: Option<String>,
     #[serde(default)]
     pub worktree: Option<String>,
     /// Absolute path of the attached worktree, when it does not live under the
@@ -553,8 +567,8 @@ pub struct IssueDraft {
     pub agent_kind: AgentKind,
     pub kind: IssueKind,
     pub agent_mode: AgentMode,
-    pub prompt: Option<String>,
     pub model: Option<String>,
+    pub prompt: Option<String>,
 }
 
 /// Resolve a worktree's absolute path. An external provider supplies `path`;
@@ -583,8 +597,8 @@ impl Issue {
             column,
             agent_kind,
             agent_mode: AgentMode::Plan,
-            prompt: None,
             model: None,
+            prompt: None,
             worktree: None,
             worktree_path: None,
             worktree_target: None,
@@ -646,14 +660,14 @@ impl Issue {
             agent_kind,
             kind,
             agent_mode,
-            prompt,
             model,
+            prompt,
         } = draft;
         Issue {
             kind,
             agent_mode,
-            prompt,
             model,
+            prompt,
             done_at: (column == Column::Done).then_some(now),
             ..Issue::new(id, title, column, agent_kind)
         }
@@ -1412,8 +1426,8 @@ mod tests {
             agent_kind: AgentKind::OpenCode,
             kind: IssueKind::Agentic,
             agent_mode: AgentMode::Plan,
-            prompt: prompt.map(str::to_string),
             model: None,
+            prompt: prompt.map(str::to_string),
         }
     }
 

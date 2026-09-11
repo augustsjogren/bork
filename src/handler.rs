@@ -976,6 +976,26 @@ fn handle_normal(
                 return PostAction::None;
             }
 
+            let session_name = issue.session_name(&app.context_project(ctx).config.project_name);
+            let popup_title = format!("{}: {}", issue.id, issue.title);
+
+            // A live session always wins over the worktree checks below: the
+            // developer needs to reach a session that is actually running
+            // regardless of how its issue's worktree field went stale (GC,
+            // an external provider's list script not recognizing the dir,
+            // etc). The worktree guards only protect a fresh launch, which
+            // needs a real cwd to start in.
+            if app.context_project(ctx).is_session_alive(&session_name) {
+                if open_popup {
+                    return PostAction::OpenTmuxPopup {
+                        session_name,
+                        popup_title,
+                    };
+                }
+                app.set_message("Session already running");
+                return PostAction::None;
+            }
+
             // A picked target that never landed must not silently launch
             // into project_root: that's a different cwd than the developer
             // chose, with no error to explain the mismatch.
@@ -998,20 +1018,6 @@ fn handle_normal(
                 && app.context_project(ctx).config.uses_external_worktrees()
             {
                 app.set_warning(format!("{} has no worktree attached yet", issue.id));
-                return PostAction::None;
-            }
-
-            let session_name = issue.session_name(&app.context_project(ctx).config.project_name);
-            let popup_title = issue.popup_title();
-
-            if app.context_project(ctx).is_session_alive(&session_name) {
-                if open_popup {
-                    return PostAction::OpenTmuxPopup {
-                        session_name,
-                        popup_title,
-                    };
-                }
-                app.set_message("Session already running");
                 return PostAction::None;
             }
 
@@ -1683,6 +1689,7 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
                 let _ = p.issues[idx].set_agent_kind(dialog.agent_kind);
             }
             p.issues[idx].agent_mode = dialog.agent_mode;
+            p.issues[idx].model = dialog.model.clone();
             let _ = p.issues[idx].set_kind(dialog.kind);
 
             apply_linear_fields(&mut p.issues[idx], &dialog);
@@ -1744,8 +1751,8 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
             agent_kind: dialog.agent_kind,
             kind: dialog.kind,
             agent_mode: dialog.agent_mode,
+            model: dialog.model.clone(),
             prompt,
-            model: None,
         },
         crate::app::unix_now(),
     );
@@ -5007,6 +5014,42 @@ mod tests {
                 MessageKind::Warning
             ))
         );
+    }
+
+    #[test]
+    fn open_session_on_live_session_wins_over_missing_worktree() {
+        let mut app = test_app();
+        app.project_mut().config.worktree_create_cmd = Some("true".to_string());
+        app.project_mut().issues.push(crate::types::Issue {
+            worktree: None,
+            ..test_issue_titled("bork-1", "Work", Column::Todo)
+        });
+
+        let session_name = app.project().issues[0].session_name(&app.project().config.project_name);
+        app.project_mut().live.active_sessions.insert(session_name);
+
+        let ctx = app.action_context();
+        let post = handle_action(&mut app, Action::OpenSession, &ctx, &test_channels());
+
+        assert!(matches!(post, PostAction::OpenTmuxPopup { .. }));
+    }
+
+    #[test]
+    fn start_session_without_worktree_and_no_live_session_warns() {
+        let mut app = test_app();
+        app.project_mut().config.worktree_create_cmd = Some("true".to_string());
+        app.project_mut().issues.push(crate::types::Issue {
+            worktree: None,
+            ..test_issue_titled("bork-1", "Work", Column::Todo)
+        });
+
+        let ctx = app.action_context();
+        let post = handle_action(&mut app, Action::StartSession, &ctx, &test_channels());
+
+        assert!(matches!(post, PostAction::None));
+        assert_eq!(app.busy_count, 0);
+        let (msg, _) = app.message.as_ref().expect("warning should be set");
+        assert!(msg.contains("no worktree attached"));
     }
 
     #[test]

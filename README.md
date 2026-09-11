@@ -218,11 +218,11 @@ bork issue archive bork-3                 # cleanup when work is merged
 bork issue delete bork-3
 ```
 
-**Create options:** `--column` (todo, in-progress, code-review, done), `--agent` (opencode, claude, codex, pi), `--mode` (plan, build, yolo), `--prompt`, `--model`, `--kind` (agentic, todo, orchestrator).
+**Create options:** `--column` (todo, in-progress, code-review, done), `--agent` (opencode, claude, codex, pi), `--mode` (plan, build, yolo), `--model` (agent's default unless set, e.g. `sonnet`/`opus`/`haiku` for Claude), `--prompt`, `--kind` (agentic, todo, orchestrator).
 
 **Start options:** `--prompt`, `--agent` (opencode, claude, codex), `--mode` (plan, build, yolo), `--model`, `--slug`, `--no-worktree`, `--project` (registered project name or path). `bork issue start` defaults to build mode and creates a worktree with a slug generated from the title. If a `setup_script` is configured, it runs inside the worktree before the agent starts.
 
-**Model per issue:** `--model <name>` on `create`, `start` and `update` is saved on the issue and passed to the agent as `--model <name>` on every launch and resume, e.g. `bork issue start "Review PR 42" --agent claude --model sonnet`. It replaces any `--model`/`-m` in `[agent.<name>].args`. Model names are agent-specific, so changing an issue's agent clears it. OpenCode's TUI has no `--model` flag, so `--model` on an opencode issue is an error. `bork issue update <id> --model ""` clears it.
+**Update options** also accept `--model`; pass an empty string (`--model ""`) to clear an override back to the agent's default.
 
 **Lost sessions:** if an issue's conversation is gone (Claude cleans up old transcripts after `cleanupPeriodDays`; Codex, Pi and Cursor sessions go when you delete them), bork notices on launch, starts a new session with the issue's prompt, and says so in the popup title and status bar. To start fresh on purpose, run `bork issue reset-session <id> [--agent <kind>]`, or edit the issue, focus the Agent field, press Backspace and save. If that agent's session is running, it's killed. The old conversation isn't deleted. OpenCode keeps sessions in a database bork doesn't read, so its sessions are always resumed.
 
@@ -311,7 +311,7 @@ With issues marked, `H`, `L`, `D`, `T`, `Shift+Enter`, `o`, `O`, `x`, `d` and `A
 | `Shift+Enter` | Submit from any field |
 | `Ctrl+e` | Open prompt in `$EDITOR` (on Prompt field) |
 | `Esc` / `Ctrl+c` | Cancel |
-| `Space` / `h` / `l` | Cycle agent (on Agent field); cycle mode (on Mode field); open Linear picker (on Linear field) |
+| `Space` / `h` / `l` | Cycle agent (on Agent field); cycle mode (on Mode field); cycle model (on Model field, Claude only); open Linear picker (on Linear field) |
 | `Backspace` | Start the selected agent's next launch in a new session, on save (on Agent field) |
 
 ### Sidebar Mode

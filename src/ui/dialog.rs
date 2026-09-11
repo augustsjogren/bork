@@ -163,6 +163,19 @@ pub fn render_dialog(frame: &mut Frame, app: &App) {
             label_width,
         );
         next_row += 2;
+
+        if !dialog.available_agents.is_empty() && !dialog.agent_kind.known_models().is_empty() {
+            let model_area = Rect::new(inner.x + 1, inner.y + next_row, inner.width - 2, 1);
+            render_model_field(
+                frame,
+                dialog.model.as_deref(),
+                dialog.agent_kind,
+                model_area,
+                dialog.current_field() == DialogField::Model,
+                label_width,
+            );
+            next_row += 2;
+        }
     }
 
     let is_title_focused = dialog.current_field() == DialogField::Title;
@@ -682,6 +695,54 @@ fn render_mode_field(
         spans.push(Span::styled(
             format!("[{} yolo]", indicator(yolo_selected)),
             if yolo_selected {
+                selected_style
+            } else {
+                unselected_style
+            },
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_model_field(
+    frame: &mut Frame,
+    model: Option<&str>,
+    agent_kind: AgentKind,
+    area: Rect,
+    focused: bool,
+    label_width: usize,
+) {
+    let label_style = field_label_style(focused);
+
+    let selected_style = Style::default()
+        .fg(styles::ACCENT)
+        .add_modifier(Modifier::BOLD);
+    let unselected_style = styles::dim_style();
+
+    let indicator = |selected: bool| if selected { "\u{25cf}" } else { "\u{25cb}" };
+
+    let mut spans = vec![Span::styled(
+        format!("{:<width$}", "Model:", width = label_width),
+        label_style,
+    )];
+
+    let default_selected = model.is_none();
+    spans.push(Span::styled(
+        format!("[{} default]", indicator(default_selected)),
+        if default_selected {
+            selected_style
+        } else {
+            unselected_style
+        },
+    ));
+
+    for name in agent_kind.known_models() {
+        let selected = model == Some(*name);
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("[{} {}]", indicator(selected), name),
+            if selected {
                 selected_style
             } else {
                 unselected_style
