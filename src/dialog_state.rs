@@ -17,6 +17,7 @@ pub enum DialogField {
     Kind,
     Agent,
     Mode,
+    Model,
     Linear,
     LinearProject,
     GithubPr,
@@ -32,6 +33,10 @@ pub struct DialogState {
     pub available_agents: Vec<AgentKind>,
     pub agent_mode: AgentMode,
     pub agent_kind: AgentKind,
+    /// `None` means "agent's own default"; `Some` cycles through
+    /// `AgentKind::known_models`. Reset to `None` whenever the agent changes
+    /// so a stale model name never carries over to a different CLI.
+    pub model: Option<String>,
     /// The agent shown when the dialog opened (post-normalization). Submit
     /// compares against this to tell a user-made switch from the silent
     /// fallback `resolve_agent_kind` applies when the stored agent isn't
@@ -102,6 +107,7 @@ impl DialogState {
             available_agents,
             agent_mode: Self::normalize_mode_for_agent(agent_mode, resolved_agent),
             agent_kind: resolved_agent,
+            model: None,
             initial_agent_kind: resolved_agent,
             focused_field: title_idx,
             editing_index: None,
@@ -168,6 +174,10 @@ impl DialogState {
             available_agents,
             agent_mode: Self::normalize_mode_for_agent(issue.agent_mode, resolved_agent),
             agent_kind: resolved_agent,
+            model: issue
+                .model
+                .clone()
+                .filter(|_| resolved_agent == issue.agent_kind),
             initial_agent_kind: resolved_agent,
             focused_field: title_idx,
             editing_index: Some(index),
@@ -210,6 +220,28 @@ impl DialogState {
     fn set_agent_at(&mut self, index: usize) {
         self.agent_kind = self.available_agents[index];
         self.agent_mode = Self::normalize_mode_for_agent(self.agent_mode, self.agent_kind);
+        self.model = None;
+    }
+
+    /// Cycle `self.model` through `agent_kind.known_models()`, wrapping
+    /// `None` (agent default) in on both ends.
+    fn cycle_model(&mut self, forward: bool) {
+        let models = self.agent_kind.known_models();
+        if models.is_empty() {
+            return;
+        }
+        let current = self
+            .model
+            .as_deref()
+            .and_then(|m| models.iter().position(|k| *k == m));
+        self.model = match (current, forward) {
+            (None, true) => Some(models[0].to_string()),
+            (None, false) => Some(models[models.len() - 1].to_string()),
+            (Some(idx), true) if idx + 1 < models.len() => Some(models[idx + 1].to_string()),
+            (Some(_), true) => None,
+            (Some(0), false) => None,
+            (Some(idx), false) => Some(models[idx - 1].to_string()),
+        };
     }
 
     fn cycle_agent_next(&mut self) {
@@ -270,6 +302,9 @@ impl DialogState {
             if !self.available_agents.is_empty() && self.agent_kind.has_modes() {
                 fields.push(DialogField::Mode);
             }
+            if !self.available_agents.is_empty() && !self.agent_kind.known_models().is_empty() {
+                fields.push(DialogField::Model);
+            }
         }
         fields.push(DialogField::Title);
         fields.push(DialogField::Prompt);
@@ -302,6 +337,11 @@ impl DialogState {
             // Mirror `ordered_fields`: the Mode field only exists for agents
             // with modes (Pi is single-mode and hides it).
             if !available_agents.is_empty() && agent_kind.has_modes() {
+                idx += 1;
+            }
+            // Mirror `ordered_fields`: the Model field only exists for agents
+            // with a known quick-pick list.
+            if !available_agents.is_empty() && !agent_kind.known_models().is_empty() {
                 idx += 1;
             }
         }
@@ -397,6 +437,11 @@ impl DialogState {
                     };
                 }
             }
+            DialogField::Model => match c {
+                ' ' | 'l' => self.cycle_model(true),
+                'h' => self.cycle_model(false),
+                _ => {}
+            },
             DialogField::Linear | DialogField::LinearProject | DialogField::GithubPr => {}
             DialogField::Title => insert_char(&mut self.title, &mut self.title_cursor, c),
             DialogField::Prompt => self.prompt.insert_char(c),

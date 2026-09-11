@@ -618,6 +618,9 @@ Start here (for AI agents):
   Agentic issues each run one coding agent. Pick which and how with:
     --agent   {agents}     # must be on your PATH
     --mode    plan (read-only), build, yolo          # yolo: claude/codex only
+    --model   agent's default unless set             # e.g. sonnet, opus, haiku
+                                                     # (Claude); passed through
+                                                     # as --model <value>
     --kind    agentic (default), todo, orchestrator  # todo: no agent;
                                                      # orchestrator: plans,
                                                      # spawns + monitors issues
@@ -632,7 +635,7 @@ Start here (for AI agents):
 /// One-line pointer shown before Options on every subcommand `--help`, so the
 /// quickstart is discoverable at any level without repeating the full block.
 const AGENTS_POINTER: &str =
-    "Agents: run 'bork --help' for the AI-agent quickstart (--agent / --mode).";
+    "Agents: run 'bork --help' for the AI-agent quickstart (--agent / --mode / --model).";
 
 /// Build a help template that injects `agents_block` between the usage line and
 /// the auto-generated argument/command listing. clap only substitutes its own
@@ -905,13 +908,15 @@ enum IssueCommand {
         #[arg(long, value_parser = parse_agent_mode)]
         mode: Option<AgentMode>,
 
+        /// Model override passed to the agent as --model <value> (e.g. sonnet,
+        /// opus, haiku). Provider-specific; only Claude's aliases are checked
+        /// by bork itself.
+        #[arg(long)]
+        model: Option<String>,
+
         /// Prompt text for the agent
         #[arg(long)]
         prompt: Option<String>,
-
-        /// Model passed to the agent's --model flag (e.g. sonnet). Not supported by opencode.
-        #[arg(long)]
-        model: Option<String>,
 
         /// Issue kind (agentic, todo, orchestrator)
         #[arg(long, value_parser = parse_issue_kind)]
@@ -936,7 +941,9 @@ enum IssueCommand {
         #[arg(long, value_parser = parse_agent_mode)]
         mode: Option<AgentMode>,
 
-        /// Model passed to the agent's --model flag (e.g. sonnet). Not supported by opencode.
+        /// Model override passed to the agent as --model <value> (e.g. sonnet,
+        /// opus, haiku). Provider-specific; only Claude's aliases are checked
+        /// by bork itself.
         #[arg(long)]
         model: Option<String>,
 
@@ -987,13 +994,14 @@ enum IssueCommand {
         #[arg(long, value_parser = parse_agent_mode)]
         mode: Option<AgentMode>,
 
+        /// Change model override (empty string clears it back to the agent's
+        /// default)
+        #[arg(long)]
+        model: Option<String>,
+
         /// Update prompt text (empty string clears it)
         #[arg(long)]
         prompt: Option<String>,
-
-        /// Change the model for the next launch (empty string clears it)
-        #[arg(long)]
-        model: Option<String>,
 
         /// Change issue kind (agentic, todo, orchestrator)
         #[arg(long, value_parser = parse_issue_kind)]
@@ -1845,8 +1853,8 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
             column,
             agent,
             mode,
-            prompt,
             model,
+            prompt,
             kind,
         } => {
             let issue = ops::create_issue(
@@ -1856,8 +1864,8 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
                     column,
                     agent_kind: agent,
                     agent_mode: mode,
-                    prompt,
                     model,
+                    prompt,
                     kind,
                 },
             )?;
@@ -1910,8 +1918,8 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
             column,
             agent,
             mode,
-            prompt,
             model,
+            prompt,
             kind,
             session,
         } => {
@@ -1924,8 +1932,8 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
                     column,
                     agent_kind: agent,
                     agent_mode: mode,
-                    prompt,
                     model,
+                    prompt,
                     kind,
                     session,
                 },
@@ -2147,8 +2155,8 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
             column: None,
             agent_kind: opts.agent_kind,
             agent_mode: opts.agent_mode,
-            prompt: opts.prompt,
             model: opts.model,
+            prompt: opts.prompt,
             kind: Some(IssueKind::Agentic),
         },
     )?;

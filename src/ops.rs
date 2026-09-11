@@ -226,8 +226,8 @@ pub struct CreateOptions {
     pub column: Option<Column>,
     pub agent_kind: Option<AgentKind>,
     pub agent_mode: Option<AgentMode>,
-    pub prompt: Option<String>,
     pub model: Option<String>,
+    pub prompt: Option<String>,
     pub kind: Option<IssueKind>,
 }
 
@@ -287,8 +287,8 @@ pub fn create_issue(project_root: &Path, opts: CreateOptions) -> anyhow::Result<
             agent_kind,
             kind,
             agent_mode,
-            prompt: opts.prompt,
             model: opts.model,
+            prompt: opts.prompt,
         },
         now_epoch(),
     );
@@ -305,9 +305,10 @@ pub struct UpdateOptions {
     pub column: Option<Column>,
     pub agent_kind: Option<AgentKind>,
     pub agent_mode: Option<AgentMode>,
-    pub prompt: Option<String>,
-    /// New model; an empty string clears it.
+    /// `Some("")` clears the override back to the agent's default, mirroring
+    /// how an empty `prompt` clears the prompt below.
     pub model: Option<String>,
+    pub prompt: Option<String>,
     pub kind: Option<IssueKind>,
     /// Existing session id to attach under the issue's (new) agent.
     pub session: Option<String>,
@@ -1373,8 +1374,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -1404,8 +1405,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: Some("Do the thing".into()),
                 model: None,
+                prompt: Some("Do the thing".into()),
                 kind: None,
             },
         )
@@ -1440,8 +1441,8 @@ mod tests {
                 column: Some(Column::Done),
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -1462,8 +1463,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -1478,8 +1479,8 @@ mod tests {
                 column: Some(Column::InProgress),
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -1501,8 +1502,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -1517,8 +1518,8 @@ mod tests {
                 column: Some(Column::Done),
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -1539,8 +1540,8 @@ mod tests {
                 column: Some(Column::Done),
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -1555,8 +1556,8 @@ mod tests {
                 column: Some(Column::Todo),
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -1577,8 +1578,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -1606,8 +1607,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: Some(IssueKind::Orchestrator),
                 session: None,
             },
@@ -2199,8 +2200,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: Some(IssueKind::Orchestrator),
             },
         )
@@ -2226,8 +2227,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -2487,8 +2488,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: Some("A prompt".into()),
                 model: None,
+                prompt: Some("A prompt".into()),
                 kind: None,
             },
         )
@@ -2512,8 +2513,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -2537,8 +2538,8 @@ mod tests {
                 column: Some(Column::Todo),
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -2550,8 +2551,8 @@ mod tests {
                 column: Some(Column::InProgress),
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -2582,8 +2583,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -2615,8 +2616,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -2639,8 +2640,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -2663,8 +2664,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         );
@@ -2683,8 +2684,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -2705,8 +2706,8 @@ mod tests {
                 column: Some(Column::InProgress),
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -2736,8 +2737,8 @@ mod tests {
                 column: Some(Column::InProgress),
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: Some(IssueKind::Orchestrator),
             },
         )
@@ -2770,8 +2771,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )
@@ -2792,8 +2793,8 @@ mod tests {
                 column: None,
                 agent_kind: None,
                 agent_mode: None,
-                prompt: None,
                 model: None,
+                prompt: None,
                 kind: None,
             },
         )

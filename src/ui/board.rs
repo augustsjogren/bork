@@ -152,12 +152,17 @@ fn render_column(
         return;
     }
 
-    let viewport_start = if selected_row < max_cards {
-        0
-    } else {
-        selected_row - max_cards + 1
-    };
-    let viewport_end = (viewport_start + max_cards).min(count);
+    let review_boundary = issues
+        .iter()
+        .position(|(_, issue)| issue.is_review_import());
+    let (viewport_start, viewport_end) = compute_viewport(
+        selected_row,
+        count,
+        max_cards,
+        card_h,
+        inner.height,
+        review_boundary,
+    );
 
     let has_above = viewport_start > 0;
     let has_below = viewport_end < count;
@@ -175,13 +180,10 @@ fn render_column(
     }
 
     // Own work sorts above review-imported cards (`review_cards_last`); a
-    // one-row rule marks the boundary. Only drawn between two visible cards:
-    // the overflow guard below drops a trailing card when the extra row
-    // pushes it past the column, the same way the scroll indicators do.
-    let review_divider_before = issues
-        .iter()
-        .position(|(_, issue)| issue.is_review_import())
-        .filter(|&boundary| boundary > viewport_start && boundary < viewport_end);
+    // one-row rule marks the boundary. `compute_viewport` already reserved
+    // room for it against the overflow guard below when it could.
+    let review_divider_before =
+        review_boundary.filter(|&boundary| boundary > viewport_start && boundary < viewport_end);
 
     for (visible_idx, (_global_idx, issue)) in
         issues[viewport_start..viewport_end].iter().enumerate()
@@ -244,5 +246,92 @@ fn render_column(
         ));
         let indicator_area = Rect::new(inner.x, indicator_y, inner.width, 1);
         frame.render_widget(Paragraph::new(indicator), indicator_area);
+    }
+}
+
+/// Compute the `[start, end)` window of cards to render, keeping
+/// `selected_row` visible.
+///
+/// `max_cards` is `inner_height / card_h` (a floor division), which already
+/// ignores any leftover slack rows. When a review-divider row falls inside
+/// the naive window and there truly isn't slack to absorb it, the window
+/// drops its top card to free a full card's height — always more than the
+/// single row the divider needs. Skipped when `selected_row` is the only
+/// row in the window: keeping the selection visible outranks the divider.
+fn compute_viewport(
+    selected_row: usize,
+    count: usize,
+    max_cards: usize,
+    card_h: u16,
+    inner_height: u16,
+    review_boundary: Option<usize>,
+) -> (usize, usize) {
+    let mut start = selected_row.saturating_sub(max_cards.saturating_sub(1));
+    let mut end = (start + max_cards).min(count);
+
+    if let Some(boundary) = review_boundary {
+        let divider_crossed = boundary > start && boundary < end;
+        let rows_needed = (end - start) as u16 * card_h + 1;
+        if divider_crossed && rows_needed > inner_height && start < selected_row {
+            start += 1;
+            end = (start + max_cards).min(count);
+        }
+    }
+
+    (start, end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewport_no_divider_shows_full_window_at_bottom() {
+        // 10 issues, 4-card window, scrolled to the last row.
+        let (start, end) = compute_viewport(9, 10, 4, 7, 28, None);
+        assert_eq!((start, end), (6, 10));
+    }
+
+    #[test]
+    fn viewport_divider_absorbed_by_slack_needs_no_shrink() {
+        // inner_height has slack beyond max_cards * card_h (29 vs 28), which
+        // covers the divider's one row for free.
+        let (start, end) = compute_viewport(9, 10, 4, 7, 29, Some(7));
+        assert_eq!((start, end), (6, 10));
+    }
+
+    #[test]
+    fn viewport_divider_without_slack_shrinks_to_keep_selection_visible() {
+        // No slack (inner_height == max_cards * card_h exactly): the divider
+        // crossing the window must shrink it by one card from the top.
+        let (start, end) = compute_viewport(9, 10, 4, 7, 28, Some(7));
+        assert_eq!((start, end), (7, 10));
+        assert!(end > 9); // selection (row 9) still inside [start, end)
+    }
+
+    #[test]
+    fn viewport_divider_outside_window_needs_no_shrink() {
+        // Boundary sits above the visible window entirely (already scrolled
+        // past it), so it draws no divider row here and needs no shrink.
+        let (start, end) = compute_viewport(9, 10, 4, 7, 28, Some(2));
+        assert_eq!((start, end), (6, 10));
+    }
+
+    #[test]
+    fn viewport_selection_is_top_row_keeps_it_over_divider() {
+        // The selected card is the window's own top row (row 0 of a fully
+        // shown 5-card list): dropping the top card to fit the divider would
+        // evict the selection itself, so the shrink is skipped even though
+        // the divider technically overflows (5 * 7 + 1 = 36 > 34).
+        let (start, end) = compute_viewport(0, 5, 5, 7, 34, Some(2));
+        assert_eq!((start, end), (0, 5));
+    }
+
+    #[test]
+    fn viewport_no_scroll_needed_ignores_divider_with_slack() {
+        // Everything fits already (count < max_cards): a divider mid-list
+        // must not artificially hide the first card.
+        let (start, end) = compute_viewport(4, 5, 10, 7, 70, Some(2));
+        assert_eq!((start, end), (0, 5));
     }
 }
