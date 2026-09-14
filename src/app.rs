@@ -905,6 +905,10 @@ impl Project {
     /// here, unlike the PR-lifecycle checks that only care about imports).
     /// Also queues a self-assign when the ticket isn't already yours —
     /// starting a card claims it, same as picking one up from the picker.
+    ///
+    /// A ticket still sitting in `Triage` is skipped for the status move: work
+    /// starting on it is investigative, not a commitment to the ticket's
+    /// workflow, so its state is left for the user to change by hand.
     pub fn queue_linear_start(&mut self, idx: usize) {
         let Some(link) = self.issues[idx].linear_links.first() else {
             return;
@@ -912,9 +916,19 @@ impl Project {
         let Some(team_key) = link.identifier.split('-').next() else {
             return;
         };
+        let current_state = self
+            .live
+            .linear_issues
+            .iter()
+            .chain(self.live.linear_unassigned_issues.iter())
+            .find(|i| i.id == link.id)
+            .map(|i| i.state_name.as_str());
         let already_mine = self.live.linear_issues.iter().any(|i| i.id == link.id);
         if !already_mine {
             self.pending_linear_assigns.push(link.id.clone());
+        }
+        if current_state.is_some_and(|s| s.eq_ignore_ascii_case("triage")) {
+            return;
         }
         self.pending_linear_starts
             .push((link.id.clone(), team_key.to_string()));
