@@ -921,10 +921,10 @@ fn handle_normal(
             app.begin_busy();
             app.set_message("Opening terminal...");
             let tx = ch.action_tx.clone();
-            let project_root = app.context_project(ctx).config.project_root.clone();
+            let main_dir = app.context_project(ctx).config.main_dir();
 
             thread::spawn(move || {
-                let result = match tmux::create_session(&session_name, &project_root) {
+                let result = match tmux::create_session(&session_name, &main_dir) {
                     Ok(()) => ActionResult {
                         message: format!("Terminal session '{}' ready", session_name),
                         session_to_open: Some(session_name),
