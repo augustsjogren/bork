@@ -1,4 +1,5 @@
 pub mod board;
+pub mod bonk_art;
 pub mod card;
 pub mod debug_inspector;
 pub mod dialog;
@@ -74,5 +75,6 @@ pub fn render(frame: &mut Frame, app: &App) {
     stack_details::render(frame, app);
     target_picker::render_target_picker(frame, app);
     help::render_help(frame, app);
+    bonk_art::render_bonk(frame, app);
     debug_inspector::render_debug_inspector(frame, app);
 }
