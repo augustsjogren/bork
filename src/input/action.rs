@@ -94,6 +94,8 @@ pub enum Action {
     LinkPickerBackspace,
     ShowHelp,
     CloseHelp,
+    ShowBonk,
+    CloseBonk,
     DebugReset,
     DebugInspect,
     DebugInspectorClose,

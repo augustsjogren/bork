@@ -33,6 +33,7 @@ pub fn map_key_to_action(
         },
         InputMode::LinkPicker => map_link_picker_key(key),
         InputMode::Help => map_help_key(key),
+        InputMode::Bonk => map_bonk_key(key),
         InputMode::DebugInspector => map_debug_inspector_key(key),
         InputMode::Sidebar => map_sidebar_key(key),
         // Rename is a one-line text field, same as search.
@@ -141,6 +142,7 @@ fn map_normal_key(key: KeyEvent, swimlane_count: usize) -> Action {
 
         KeyCode::Char('/') => Action::SearchStart,
         KeyCode::Char('?') => Action::ShowHelp,
+        KeyCode::Char('Z') => Action::ShowBonk,
         KeyCode::Esc => Action::ClearSearch,
         KeyCode::Char('I') => Action::OpenLinearPicker,
 
@@ -261,6 +263,13 @@ fn map_help_key(key: KeyEvent) -> Action {
         KeyCode::Esc | KeyCode::Char('q') => Action::CloseHelp,
         _ => Action::Noop,
     }
+}
+
+fn map_bonk_key(key: KeyEvent) -> Action {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return Action::Quit;
+    }
+    Action::CloseBonk
 }
 
 fn map_debug_inspector_key(key: KeyEvent) -> Action {
@@ -604,6 +613,12 @@ mod tests {
         );
         assert_eq!(map_normal_key(key(KeyCode::Char('?')), 1), Action::ShowHelp);
         assert_eq!(map_normal_key(key(KeyCode::Esc), 1), Action::ClearSearch);
+    }
+
+    #[test]
+    fn normal_bonk() {
+        assert_eq!(map_normal_key(key(KeyCode::Char('Z')), 1), Action::ShowBonk);
+        assert_eq!(map_bonk_key(key(KeyCode::Char('x'))), Action::CloseBonk);
     }
 
     #[test]

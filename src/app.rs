@@ -63,6 +63,7 @@ pub enum InputMode {
     LinkPicker,
     TargetPicker,
     Help,
+    Bonk,
     DebugInspector,
     Sidebar,
     SidebarRename,
@@ -3371,6 +3372,14 @@ impl App {
 
     pub fn open_help(&mut self) {
         self.input_mode = InputMode::Help;
+    }
+
+    pub fn open_bonk(&mut self) {
+        self.input_mode = InputMode::Bonk;
+    }
+
+    pub fn close_bonk(&mut self) {
+        self.input_mode = InputMode::Normal;
     }
 
     pub fn close_help(&mut self) {

@@ -138,6 +138,10 @@ pub fn handle_action(
             handle_help(app, action);
             PostAction::None
         }
+        InputMode::Bonk => {
+            handle_bonk(app, action);
+            PostAction::None
+        }
         InputMode::DebugInspector => {
             handle_debug_inspector(app, action);
             PostAction::None
@@ -871,6 +875,10 @@ fn handle_normal(
             app.open_help();
             PostAction::None
         }
+        Action::ShowBonk => {
+            app.open_bonk();
+            PostAction::None
+        }
 
         Action::ToggleSidebar => {
             if let Some(ref mut sidebar) = app.sidebar {
@@ -1484,6 +1492,16 @@ fn clear_done_skip_note(holding_worktree: usize, pr_still_open: usize) -> Option
 fn handle_help(app: &mut App, action: Action) {
     match action {
         Action::CloseHelp => app.close_help(),
+        Action::Quit => {
+            app.should_quit = true;
+        }
+        _ => {}
+    }
+}
+
+fn handle_bonk(app: &mut App, action: Action) {
+    match action {
+        Action::CloseBonk => app.close_bonk(),
         Action::Quit => {
             app.should_quit = true;
         }
@@ -6787,6 +6805,22 @@ mod tests {
         act(&mut app, Action::ShowHelp);
         assert_eq!(app.input_mode, InputMode::Help);
         act(&mut app, Action::CloseHelp);
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn show_bonk_enters_bonk_mode() {
+        let mut app = test_app();
+        act(&mut app, Action::ShowBonk);
+        assert_eq!(app.input_mode, InputMode::Bonk);
+    }
+
+    #[test]
+    fn close_bonk_returns_to_normal() {
+        let mut app = test_app();
+        act(&mut app, Action::ShowBonk);
+        assert_eq!(app.input_mode, InputMode::Bonk);
+        act(&mut app, Action::CloseBonk);
         assert_eq!(app.input_mode, InputMode::Normal);
     }
 
