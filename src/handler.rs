@@ -3025,6 +3025,9 @@ fn handle_confirm(
                         "session",
                         |config, _, issue| {
                             let session_name = issue.session_name(&config.project_name);
+                            if let Some(path) = issue.worktree_path_in(&config.project_root) {
+                                crate::worktree::run_session_kill_script(config, &path);
+                            }
                             terminate_to_result(
                                 &config.project_root,
                                 &session_name,
@@ -3606,6 +3609,7 @@ mod tests {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            session_kill_script: None,
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,
@@ -6898,6 +6902,7 @@ mod tests {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            session_kill_script: None,
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,

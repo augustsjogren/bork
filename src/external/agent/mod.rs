@@ -1556,6 +1556,7 @@ mod tests {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            session_kill_script: None,
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,

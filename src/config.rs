@@ -30,6 +30,12 @@ pub struct AppConfig {
     /// Shell command run inside a worktree right before it is removed by
     /// `bork issue archive` (e.g. stopping services, dropping databases).
     pub teardown_script: Option<String>,
+    /// Shell command run inside a worktree right after its session is killed
+    /// with `x`. The worktree is not removed, unlike `teardown_script` — this
+    /// is for reclaiming per-worktree background processes (e.g. `nx daemon
+    /// --stop`) while keeping the checkout for a later resume. Runs
+    /// best-effort: a nonzero exit or missing worktree never blocks the kill.
+    pub session_kill_script: Option<String>,
     /// Shell command that creates a worktree, replacing bork's own
     /// `git worktree add`. Run with the main checkout as its working directory
     /// and `BORK_ISSUE_ID`, `BORK_SLUG`, `BORK_BASE`, `BORK_TARGET` and
@@ -205,6 +211,7 @@ impl Default for AppConfig {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            session_kill_script: None,
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,
@@ -325,6 +332,7 @@ pub struct PartialConfig {
     pub orchestrator_prompt: Option<String>,
     pub setup_script: Option<String>,
     pub teardown_script: Option<String>,
+    pub session_kill_script: Option<String>,
     pub worktree_create_cmd: Option<String>,
     pub worktree_remove_cmd: Option<String>,
     pub worktree_list_cmd: Option<String>,
@@ -396,6 +404,7 @@ impl PartialConfig {
             orchestrator_prompt: other.orchestrator_prompt.or(self.orchestrator_prompt),
             setup_script: other.setup_script.or(self.setup_script),
             teardown_script: other.teardown_script.or(self.teardown_script),
+            session_kill_script: other.session_kill_script.or(self.session_kill_script),
             worktree_create_cmd: other.worktree_create_cmd.or(self.worktree_create_cmd),
             worktree_remove_cmd: other.worktree_remove_cmd.or(self.worktree_remove_cmd),
             worktree_list_cmd: other.worktree_list_cmd.or(self.worktree_list_cmd),
@@ -462,6 +471,7 @@ fn materialize(merged: PartialConfig, project_root: &Path) -> AppConfig {
         orchestrator_prompt: merged.orchestrator_prompt,
         setup_script: merged.setup_script,
         teardown_script: merged.teardown_script,
+        session_kill_script: merged.session_kill_script,
         worktree_create_cmd: merged.worktree_create_cmd,
         worktree_remove_cmd: merged.worktree_remove_cmd,
         worktree_list_cmd: merged.worktree_list_cmd,
@@ -575,6 +585,11 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
+    let session_kill_script = table
+        .get("session_kill_script")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
     let worktree_create_cmd = table
         .get("worktree_create_cmd")
         .and_then(|v| v.as_str())
@@ -641,6 +656,7 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         orchestrator_prompt,
         setup_script,
         teardown_script,
+        session_kill_script,
         worktree_create_cmd,
         worktree_remove_cmd,
         worktree_list_cmd,

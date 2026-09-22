@@ -394,6 +394,41 @@ pub enum Removal {
     ForceSkipTeardown,
 }
 
+/// Run the configured `session_kill_script` inside a worktree after its
+/// session is killed with `x`. Unlike `remove_worktree_in`'s teardown, the
+/// worktree stays — this is for reclaiming background processes (an Nx
+/// daemon, a dev server) that outlive the agent session but would otherwise
+/// sit idle until the worktree is archived or the machine reboots.
+///
+/// Best-effort: a missing worktree or a nonzero exit is logged, never
+/// returned as an error, so a broken hook can never block the session kill
+/// it is attached to.
+pub fn run_session_kill_script(config: &config::AppConfig, worktree_path: &Path) {
+    let Some(script) = config.session_kill_script.as_deref() else {
+        return;
+    };
+    if !worktree_path.exists() {
+        return;
+    }
+    match Command::new("sh")
+        .args(["-c", script])
+        .current_dir(worktree_path)
+        .status()
+    {
+        Ok(status) if !status.success() => {
+            eprintln!(
+                "bork: warning: session_kill_script exited {} in {}",
+                status.code().unwrap_or(-1),
+                worktree_path.display()
+            );
+        }
+        Err(e) => {
+            eprintln!("bork: warning: failed to run session_kill_script: {e}");
+        }
+        Ok(_) => {}
+    }
+}
+
 /// Remove `issue_id`'s worktree: save its plan, run the configured teardown
 /// script inside it, then `git worktree remove` it from main/.
 ///
@@ -638,6 +673,7 @@ mod tests {
             orchestrator_prompt: None,
             setup_script: None,
             teardown_script: None,
+            session_kill_script: None,
             worktree_create_cmd: None,
             worktree_remove_cmd: None,
             worktree_list_cmd: None,
@@ -1006,6 +1042,52 @@ mod tests {
 
         assert!(marker.exists(), "teardown_script should have run");
         assert!(!project.join("bork-1-fix-bug").exists());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn run_session_kill_script_runs_inside_worktree_and_leaves_it() {
+        let (tmp, project, mut cfg) = setup_test_project();
+        let marker = tmp.join("session-kill-ran");
+        cfg.session_kill_script = Some(format!("touch '{}'", marker.display()));
+
+        create_worktree_in(&cfg, "bork-1", Some("fix-bug"), None, None).unwrap();
+        run_session_kill_script(&cfg, &project.join("bork-1-fix-bug"));
+
+        assert!(marker.exists(), "session_kill_script should have run");
+        assert!(
+            project.join("bork-1-fix-bug").exists(),
+            "session kill must never remove the worktree"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn run_session_kill_script_ignores_a_failing_script() {
+        let (tmp, project, mut cfg) = setup_test_project();
+        cfg.session_kill_script = Some("exit 1".to_string());
+
+        create_worktree_in(&cfg, "bork-1", Some("fix-bug"), None, None).unwrap();
+        run_session_kill_script(&cfg, &project.join("bork-1-fix-bug"));
+
+        assert!(
+            project.join("bork-1-fix-bug").exists(),
+            "a failing session_kill_script must never remove the worktree"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn run_session_kill_script_is_a_noop_when_unset() {
+        let (tmp, project, cfg) = setup_test_project();
+
+        create_worktree_in(&cfg, "bork-1", Some("fix-bug"), None, None).unwrap();
+        run_session_kill_script(&cfg, &project.join("bork-1-fix-bug"));
+
+        assert!(project.join("bork-1-fix-bug").exists());
 
         let _ = fs::remove_dir_all(&tmp);
     }
