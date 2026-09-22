@@ -1051,10 +1051,79 @@ fn handle_normal(
             let Some(issue) = app.context_project(ctx).selected_issue(&q) else {
                 return PostAction::None;
             };
+            let pr_mode = action == Action::OpenReviewPR;
+            let popup_title = format!("{}: {}", issue.id, issue.title);
+            let tx = ch.action_tx.clone();
+
+            // Reading a diff needs a checkout on disk but nothing else a
+            // real work session would (no setup_script, no target, no
+            // ports/DB) — so a card with none gets the same fast,
+            // untargeted worktree an unattached card would if left to
+            // auto-detect. It is a completely ordinary worktree afterwards:
+            // 's' still moves it onto a target the normal way (release,
+            // provision, confirm-gated), so starting from review and
+            // deciding to make changes costs nothing extra.
             let Some(worktree_path) =
                 issue.worktree_path_in(&app.context_project(ctx).config.project_root)
             else {
-                app.set_warning("No worktree assigned");
+                let project = app.context_project(ctx);
+                let config = project.config.clone();
+                let project_id = ctx.project_id.clone();
+                let issue_id = issue.id.clone();
+                let slug = crate::worktree::slugify_title(&issue.title);
+                let branch = branch_for_issue(project, issue);
+                let session_name =
+                    issue.session_name(&app.context_project(ctx).config.project_name);
+
+                app.begin_busy();
+                app.set_message(format!("Provisioning a worktree to review {issue_id}..."));
+
+                thread::spawn(move || {
+                    let attached = crate::ops::attach_worktree(
+                        &config,
+                        &issue_id,
+                        &slug,
+                        branch.as_deref(),
+                        None,
+                    );
+                    let result = match attached {
+                        Ok(outcome) => {
+                            let path = outcome
+                                .worktree_path
+                                .clone()
+                                .unwrap_or_else(|| config.project_root.join(&outcome.worktree_dir));
+                            let worktree_attached = Some((
+                                project_id,
+                                issue_id,
+                                outcome.worktree_dir,
+                                outcome.worktree_path,
+                            ));
+                            match tuicr::launch_review_session(&session_name, &path, pr_mode) {
+                                Ok(()) => ActionResult {
+                                    message: "Provisioned worktree, tuicr ready".to_string(),
+                                    session_to_open: Some(session_name),
+                                    popup_title: Some(popup_title),
+                                    worktree_attached,
+                                    ..Default::default()
+                                },
+                                Err(e) => ActionResult {
+                                    message: format!(
+                                        "Worktree provisioned, but failed to open tuicr: {e}"
+                                    ),
+                                    message_kind: MessageKind::Error,
+                                    worktree_attached,
+                                    ..Default::default()
+                                },
+                            }
+                        }
+                        Err(e) => ActionResult {
+                            message: format!("Failed to provision a worktree for review: {e:#}"),
+                            message_kind: MessageKind::Error,
+                            ..Default::default()
+                        },
+                    };
+                    let _ = tx.send(result);
+                });
                 return PostAction::None;
             };
             let session_name = issue.session_name(&app.context_project(ctx).config.project_name);
@@ -6820,6 +6889,27 @@ mod tests {
         let (msg, kind) = app.message.as_ref().unwrap();
         assert!(msg.contains("No Linear issue linked"));
         assert_eq!(*kind, MessageKind::Warning);
+    }
+
+    #[test]
+    fn open_review_with_no_worktree_provisions_instead_of_warning() {
+        let mut app = app_with_issues();
+        app.project_mut().tuicr_available = true;
+        act(&mut app, Action::OpenReview);
+        let (msg, _) = app.message.as_ref().unwrap();
+        assert!(
+            msg.contains("Provisioning"),
+            "expected a provisioning message, got: {msg}"
+        );
+        assert_eq!(app.busy_count, 1);
+    }
+
+    #[test]
+    fn open_review_without_tuicr_does_nothing() {
+        let mut app = app_with_issues();
+        let post = act(&mut app, Action::OpenReview);
+        assert!(matches!(post, PostAction::None));
+        assert!(app.message.is_none());
     }
 
     // ================================================================
