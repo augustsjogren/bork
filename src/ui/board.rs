@@ -253,11 +253,13 @@ fn render_column(
 /// `selected_row` visible.
 ///
 /// `max_cards` is `inner_height / card_h` (a floor division), which already
-/// ignores any leftover slack rows. When a review-divider row falls inside
-/// the naive window and there truly isn't slack to absorb it, the window
-/// drops its top card to free a full card's height — always more than the
-/// single row the divider needs. Skipped when `selected_row` is the only
-/// row in the window: keeping the selection visible outranks the divider.
+/// ignores any leftover slack rows. Two things can each need one more row
+/// than that floor division leaves: the "N more above" indicator whenever
+/// the window doesn't start at row 0, and a review-divider row falling
+/// inside the window. When there truly isn't slack to absorb either, the
+/// window drops its top card to free a full card's height — always more
+/// than the single row either one needs. Skipped when `selected_row` is the
+/// only row in the window: keeping the selection visible outranks both.
 fn compute_viewport(
     selected_row: usize,
     count: usize,
@@ -267,14 +269,23 @@ fn compute_viewport(
     review_boundary: Option<usize>,
 ) -> (usize, usize) {
     let mut start = selected_row.saturating_sub(max_cards.saturating_sub(1));
-    let mut end = (start + max_cards).min(count);
+    let end = (start + max_cards).min(count);
+
+    // The window must not start scrolled past row 0 and still fill the
+    // available height exactly, or the "more above" indicator has no row to
+    // render into and the render loop drops the window's last card instead.
+    if start > 0 {
+        let rows_needed = (end - start) as u16 * card_h + 1;
+        if rows_needed > inner_height && start < selected_row {
+            start += 1;
+        }
+    }
 
     if let Some(boundary) = review_boundary {
         let divider_crossed = boundary > start && boundary < end;
         let rows_needed = (end - start) as u16 * card_h + 1;
         if divider_crossed && rows_needed > inner_height && start < selected_row {
             start += 1;
-            end = (start + max_cards).min(count);
         }
     }
 
@@ -286,10 +297,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn viewport_no_divider_shows_full_window_at_bottom() {
-        // 10 issues, 4-card window, scrolled to the last row.
+    fn viewport_no_divider_shrinks_for_the_above_indicator_row() {
+        // 10 issues, 4-card window, scrolled to the last row, zero slack
+        // (28 == 4 * 7): the naive window leaves no room for the "more
+        // above" indicator, so it drops to 3 cards to free one.
         let (start, end) = compute_viewport(9, 10, 4, 7, 28, None);
-        assert_eq!((start, end), (6, 10));
+        assert_eq!((start, end), (7, 10));
     }
 
     #[test]
@@ -310,11 +323,12 @@ mod tests {
     }
 
     #[test]
-    fn viewport_divider_outside_window_needs_no_shrink() {
+    fn viewport_divider_outside_window_still_shrinks_for_the_above_indicator() {
         // Boundary sits above the visible window entirely (already scrolled
-        // past it), so it draws no divider row here and needs no shrink.
+        // past it), so it draws no divider row here — but zero slack still
+        // forces the above-indicator shrink independent of the divider.
         let (start, end) = compute_viewport(9, 10, 4, 7, 28, Some(2));
-        assert_eq!((start, end), (6, 10));
+        assert_eq!((start, end), (7, 10));
     }
 
     #[test]
@@ -333,5 +347,26 @@ mod tests {
         // must not artificially hide the first card.
         let (start, end) = compute_viewport(4, 5, 10, 7, 70, Some(2));
         assert_eq!((start, end), (0, 5));
+    }
+
+    /// Mirrors `render_column`'s per-card row math to prove the selected
+    /// card's `card_y + card_h` always stays within `inner_height`. Before
+    /// the above-indicator fix, scrolling to the last card in a zero-slack
+    /// column computed a window whose bottom card overflowed and was
+    /// silently skipped by the render loop's overflow guard — the
+    /// selection simply never appeared.
+    #[test]
+    fn selected_card_row_never_overflows_inner_height() {
+        let (max_cards, card_h, inner_height) = (4u16, 7u16, 28u16);
+        let (start, end) = compute_viewport(9, 10, max_cards as usize, card_h, inner_height, None);
+        let has_above = start > 0;
+        let y_offset = if has_above { 1 } else { 0 };
+        let selected_visible_idx = (9 - start) as u16;
+        let card_y = y_offset + selected_visible_idx * card_h;
+        assert!(end > 9, "selection must stay inside the rendered window");
+        assert!(
+            card_y + card_h <= inner_height,
+            "selected card at row {card_y} (height {card_h}) overflows inner_height {inner_height}"
+        );
     }
 }
