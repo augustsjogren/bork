@@ -701,6 +701,7 @@ mod tests {
             auto_prune_check_interval: crate::config::DEFAULT_AUTO_PRUNE_CHECK_INTERVAL,
             keep_deleted_days: crate::config::DEFAULT_KEEP_DELETED_DAYS,
             cloud_agents: false,
+            popup_max_width_cols: crate::config::DEFAULT_POPUP_MAX_WIDTH_COLS,
             agent_launch: std::collections::HashMap::new(),
         }
     }

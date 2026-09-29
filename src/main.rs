@@ -3075,6 +3075,8 @@ fn run_tui() -> anyhow::Result<()> {
                                     &popup_title,
                                     app.project().display_name(),
                                     &shared.poll_suspended,
+                                    app.popup_width_mode,
+                                    app.project().config.popup_max_width_cols,
                                 )?;
                                 app.message = None;
                             }
@@ -3307,6 +3309,8 @@ fn run_tui() -> anyhow::Result<()> {
                 &popup_title,
                 app.project().display_name(),
                 &shared.poll_suspended,
+                app.popup_width_mode,
+                app.project().config.popup_max_width_cols,
             )?;
             app.message = None;
             needs_redraw = true;
@@ -3797,13 +3801,15 @@ fn open_tmux_popup(
     title: &str,
     display_name: &str,
     suspended: &AtomicBool,
+    popup_width_mode: external::tmux::PopupWidthMode,
+    popup_max_width_cols: u64,
 ) -> anyhow::Result<()> {
     let _guard = SuspendGuard::new(suspended);
     pop_kitty_flags(terminal.backend_mut());
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
-    let _ = external::tmux::open_popup(session_name, title);
+    let _ = external::tmux::open_popup(session_name, title, popup_width_mode, popup_max_width_cols);
 
     enable_raw_mode()?;
     execute!(

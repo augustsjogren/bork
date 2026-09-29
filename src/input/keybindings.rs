@@ -79,6 +79,7 @@ fn map_normal_key(key: KeyEvent, swimlane_count: usize) -> Action {
             KeyCode::Char('r') => Action::DebugReset,
             KeyCode::Char('e') => Action::DebugInspect,
             KeyCode::Char('d') => Action::ClearDoneColumn,
+            KeyCode::Char('w') => Action::TogglePopupWidth,
             _ => Action::Noop,
         };
     }

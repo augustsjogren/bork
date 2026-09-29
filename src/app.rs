@@ -2776,6 +2776,9 @@ pub struct App {
     /// Header warning derived from `backup` and the clock; refreshed by
     /// `refresh_backup_warning` so rendering stays pure.
     pub backup_warning: Option<String>,
+    /// Manual override for the tmux popup width, toggled with Ctrl+w. Session
+    /// scoped only; not persisted.
+    pub popup_width_mode: crate::external::tmux::PopupWidthMode,
 }
 
 impl App {
@@ -2820,6 +2823,7 @@ impl App {
             backup_warning: None,
             backup_local_only: Vec::new(),
             backup_status_warning: None,
+            popup_width_mode: crate::external::tmux::PopupWidthMode::default(),
         }
     }
 
@@ -3610,6 +3614,11 @@ impl App {
             .keep_selected_issue(&query, |project| project.link_filter = Some(anchor));
     }
 
+    pub fn toggle_popup_width_mode(&mut self) {
+        self.popup_width_mode = self.popup_width_mode.cycle();
+        self.set_message(format!("Popup width: {}", self.popup_width_mode.label()));
+    }
+
     /// Cards that need you across the visible swimlanes only.
     pub fn visible_attention_count(&self) -> usize {
         self.visible_swimlanes()
@@ -3815,6 +3824,7 @@ mod tests {
             auto_prune_check_interval: crate::config::DEFAULT_AUTO_PRUNE_CHECK_INTERVAL,
             keep_deleted_days: crate::config::DEFAULT_KEEP_DELETED_DAYS,
             cloud_agents: false,
+            popup_max_width_cols: crate::config::DEFAULT_POPUP_MAX_WIDTH_COLS,
             agent_launch: std::collections::HashMap::new(),
         }
     }
@@ -9090,6 +9100,7 @@ mod tests {
             auto_prune_check_interval: crate::config::DEFAULT_AUTO_PRUNE_CHECK_INTERVAL,
             keep_deleted_days: crate::config::DEFAULT_KEEP_DELETED_DAYS,
             cloud_agents: false,
+            popup_max_width_cols: crate::config::DEFAULT_POPUP_MAX_WIDTH_COLS,
             agent_launch: std::collections::HashMap::new(),
         }
     }

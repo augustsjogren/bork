@@ -100,6 +100,9 @@ pub struct AppConfig {
     /// project's `.bork/config.toml` to try it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cloud_agents: bool,
+    /// Width, in columns, the tmux popup is capped to on a client wider than
+    /// this when popup width mode is `Auto`. Ignored by `ForceFull`.
+    pub popup_max_width_cols: u64,
     /// Per-agent launch overrides. Keyed by `AgentKind`. Use
     /// [`AppConfig::launch_args_for`] to resolve mode-specific args.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -184,6 +187,9 @@ pub const DEFAULT_BASE_FETCH_INTERVAL_SECS: u64 = 900;
 pub const DEFAULT_PRUNE_THRESHOLD: u64 = 10;
 pub const DEFAULT_AUTO_PRUNE_CHECK_INTERVAL: u64 = 86_400;
 pub const DEFAULT_KEEP_DELETED_DAYS: u64 = 30;
+/// A 4K monitor at a small font reports 400+ columns; capping the popup keeps
+/// line length readable instead of stretching one pane edge to edge.
+pub const DEFAULT_POPUP_MAX_WIDTH_COLS: u64 = 180;
 
 pub const DEFAULT_PROMPT_FALLBACK: &str = "The source code is in main/. Use `bork issue start \"Title\" --project <name-or-path> --prompt \"Details...\"` to spin off new issues with their own worktrees and agents.";
 
@@ -232,6 +238,7 @@ impl Default for AppConfig {
             auto_prune_check_interval: DEFAULT_AUTO_PRUNE_CHECK_INTERVAL,
             keep_deleted_days: DEFAULT_KEEP_DELETED_DAYS,
             cloud_agents: false,
+            popup_max_width_cols: DEFAULT_POPUP_MAX_WIDTH_COLS,
             agent_launch: HashMap::new(),
         }
     }
@@ -357,6 +364,7 @@ pub struct PartialConfig {
     pub auto_prune_check_interval: Option<u64>,
     pub keep_deleted_days: Option<u64>,
     pub cloud_agents: Option<bool>,
+    pub popup_max_width_cols: Option<u64>,
     /// Per-agent launch overrides parsed from `[agent.<name>]` sections.
     pub agent_launch: HashMap<AgentKind, PartialAgentLaunch>,
 }
@@ -436,6 +444,7 @@ impl PartialConfig {
                 .or(self.auto_prune_check_interval),
             keep_deleted_days: other.keep_deleted_days.or(self.keep_deleted_days),
             cloud_agents: other.cloud_agents.or(self.cloud_agents),
+            popup_max_width_cols: other.popup_max_width_cols.or(self.popup_max_width_cols),
             agent_launch,
         }
     }
@@ -506,6 +515,9 @@ fn materialize(merged: PartialConfig, project_root: &Path) -> AppConfig {
             .keep_deleted_days
             .unwrap_or(DEFAULT_KEEP_DELETED_DAYS),
         cloud_agents: merged.cloud_agents.unwrap_or(false),
+        popup_max_width_cols: merged
+            .popup_max_width_cols
+            .unwrap_or(DEFAULT_POPUP_MAX_WIDTH_COLS),
         agent_launch,
     }
 }
@@ -656,6 +668,7 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         .and_then(|v| v.as_u64());
     let keep_deleted_days = table.get("keep_deleted_days").and_then(|v| v.as_u64());
     let cloud_agents = table.get("cloud_agents").and_then(|v| v.as_bool());
+    let popup_max_width_cols = table.get("popup_max_width_cols").and_then(|v| v.as_u64());
     let agent_launch = collect_agent_launch(table);
 
     PartialConfig {
@@ -687,6 +700,7 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         auto_prune_check_interval,
         keep_deleted_days,
         cloud_agents,
+        popup_max_width_cols,
         agent_launch,
     }
 }
@@ -1495,6 +1509,18 @@ auto_prune_check_interval = 3600
         assert!(old.deleted_issues.is_empty());
         let empty = serde_json::to_string(&old).unwrap();
         assert!(!empty.contains("deleted_issues"));
+    }
+
+    #[test]
+    fn parse_partial_popup_max_width_cols() {
+        let p = parse_partial("popup_max_width_cols = 160\n");
+        assert_eq!(p.popup_max_width_cols, Some(160));
+    }
+
+    #[test]
+    fn materialize_defaults_popup_max_width_cols() {
+        let cfg = materialize(PartialConfig::default(), Path::new("/tmp/test-bork"));
+        assert_eq!(cfg.popup_max_width_cols, DEFAULT_POPUP_MAX_WIDTH_COLS);
     }
 
     #[test]
