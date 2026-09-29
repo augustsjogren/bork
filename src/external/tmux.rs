@@ -494,9 +494,51 @@ pub fn select_window(session: &str, window_name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Open a session as a tmux popup overlay (95% of the screen).
+pub const TUICR_WINDOW: &str = "tuicr";
+const POPUP_TUICR_OPTION: &str = "@bork_popup_tuicr";
+const POPUP_REOPEN_OPTION: &str = "@bork_reopen";
+
+/// How wide the popup opens. `Auto` narrows and centers it on a client wider
+/// than the project's `popup_max_width_cols`; a manual toggle (Ctrl+w) can
+/// pin either extreme for the rest of the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PopupWidthMode {
+    #[default]
+    Auto,
+    ForceFull,
+    ForceCapped,
+}
+
+impl PopupWidthMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            PopupWidthMode::Auto => PopupWidthMode::ForceCapped,
+            PopupWidthMode::ForceCapped => PopupWidthMode::ForceFull,
+            PopupWidthMode::ForceFull => PopupWidthMode::Auto,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PopupWidthMode::Auto => "auto (centered on wide displays)",
+            PopupWidthMode::ForceCapped => "capped + centered",
+            PopupWidthMode::ForceFull => "full width",
+        }
+    }
+}
+
+/// Open a session as a tmux popup overlay: 95% of the client, or capped to
+/// `max_width_cols` per `mode` (see `resolve_capped_width`). The tuicr window
+/// always gets the full 95%. A popup's size is fixed once open, so switching
+/// windows across that boundary (`C-b n`) detaches the popup through a
+/// session hook and it reopens at the width the new window needs.
 /// This blocks until the user detaches or the popup closes.
-pub fn open_popup(session: &str, title: &str) -> Result<(), AppError> {
+pub fn open_popup(
+    session: &str,
+    title: &str,
+    mode: PopupWidthMode,
+    max_width_cols: u64,
+) -> Result<(), AppError> {
     if !is_inside_tmux() {
         // Fallback: just attach directly
         let _ = tmux()
@@ -506,6 +548,120 @@ pub fn open_popup(session: &str, title: &str) -> Result<(), AppError> {
         return Ok(());
     }
 
+    let capped_width = resolve_capped_width(mode, max_width_cols);
+    if capped_width.is_some() {
+        install_reopen_hook(session);
+    }
+
+    let result = loop {
+        let showing_tuicr = active_window_name(session).as_deref() == Some(TUICR_WINDOW);
+        let width = match capped_width {
+            Some(cols) if !showing_tuicr => cols.to_string(),
+            _ => "95%".to_string(),
+        };
+
+        set_session_option(
+            session,
+            POPUP_TUICR_OPTION,
+            if showing_tuicr { "1" } else { "0" },
+        );
+        set_session_option(session, POPUP_REOPEN_OPTION, "0");
+
+        if let Err(e) = display_popup(session, title, &width) {
+            break Err(e);
+        }
+        if session_option(session, POPUP_REOPEN_OPTION).as_deref() != Some("1") {
+            break Ok(());
+        }
+    };
+
+    if capped_width.is_some() {
+        let _ = Command::new("tmux")
+            .args(["set-hook", "-u", "-t", session, "session-window-changed"])
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    result
+}
+
+/// Columns available to the tmux client that will host the popup. `None`
+/// when the query fails (e.g. no attached client yet).
+fn client_width_cols() -> Option<u64> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "#{client_width}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// Popup width in columns when `mode` calls for a capped popup, or `None`
+/// when it should take the usual 95%. tmux centers a popup narrower than the
+/// client on its own.
+fn resolve_capped_width(mode: PopupWidthMode, max_width_cols: u64) -> Option<u64> {
+    match mode {
+        PopupWidthMode::ForceFull => None,
+        PopupWidthMode::ForceCapped => Some(max_width_cols),
+        PopupWidthMode::Auto => match client_width_cols() {
+            Some(width) if width > max_width_cols => Some(max_width_cols),
+            _ => None,
+        },
+    }
+}
+
+/// Flags a reopen and detaches the popup's client when the session's current
+/// window crosses between tuicr and anything else. Switches that keep the
+/// same width (agent to terminal) leave the popup alone.
+fn install_reopen_hook(session: &str) {
+    let _ = Command::new("tmux")
+        .args([
+            "set-hook",
+            "-t",
+            session,
+            "session-window-changed",
+            &reopen_hook_command(session),
+        ])
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn reopen_hook_command(session: &str) -> String {
+    format!(
+        "if-shell -F '#{{!=:#{{==:#{{window_name}},{TUICR_WINDOW}}},#{{{POPUP_TUICR_OPTION}}}}}' \
+         \"set-option -t {session} {POPUP_REOPEN_OPTION} 1 ; detach-client -s {session}\""
+    )
+}
+
+pub(super) fn active_window_name(session: &str) -> Option<String> {
+    let output = tmux()
+        .args(["display-message", "-p", "-t", session, "#{window_name}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn session_option(session: &str, name: &str) -> Option<String> {
+    let output = tmux()
+        .args(["show-option", "-qv", "-t", session, name])
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub(super) fn set_session_option(session: &str, name: &str, value: &str) {
+    let _ = tmux()
+        .args(["set-option", "-t", session, name, value])
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn display_popup(session: &str, title: &str, width: &str) -> Result<(), AppError> {
     let attach_cmd = format!("tmux attach -t {}", shell_escape(session));
     let popup_title = format!(" {} ", title);
 
@@ -514,7 +670,7 @@ pub fn open_popup(session: &str, title: &str) -> Result<(), AppError> {
             "display-popup",
             "-E",
             "-w",
-            "95%",
+            width,
             "-h",
             "95%",
             "-T",
@@ -556,27 +712,6 @@ fn tmux() -> Command {
 #[cfg(test)]
 pub(super) fn tmux_available() -> bool {
     tmux().arg("-V").output().is_ok_and(|o| o.status.success())
-}
-
-#[cfg(test)]
-pub(super) fn active_window_name(session: &str) -> Option<String> {
-    let output = tmux()
-        .args(["display-message", "-p", "-t", session, "#{window_name}"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-#[cfg(test)]
-pub(super) fn set_session_option(session: &str, option: &str, value: &str) {
-    let _ = tmux()
-        .args(["set-option", "-t", session, option, value])
-        .status();
 }
 
 #[cfg(test)]
@@ -680,5 +815,37 @@ mod tests {
         assert!(!is_missing_session_error(
             "error connecting to /tmp/tmux/default (Operation not permitted)"
         ));
+    }
+
+    #[test]
+    fn force_full_ignores_the_configured_cap() {
+        assert_eq!(resolve_capped_width(PopupWidthMode::ForceFull, 180), None);
+    }
+
+    #[test]
+    fn force_capped_uses_the_configured_cap() {
+        assert_eq!(
+            resolve_capped_width(PopupWidthMode::ForceCapped, 180),
+            Some(180)
+        );
+    }
+
+    #[test]
+    fn reopen_hook_flags_and_detaches_on_tuicr_boundary() {
+        assert_eq!(
+            reopen_hook_command("demo-bork-1"),
+            "if-shell -F '#{!=:#{==:#{window_name},tuicr},#{@bork_popup_tuicr}}' \
+             \"set-option -t demo-bork-1 @bork_reopen 1 ; detach-client -s demo-bork-1\""
+        );
+    }
+
+    #[test]
+    fn width_mode_cycles_auto_capped_full_auto() {
+        assert_eq!(PopupWidthMode::Auto.cycle(), PopupWidthMode::ForceCapped);
+        assert_eq!(
+            PopupWidthMode::ForceCapped.cycle(),
+            PopupWidthMode::ForceFull
+        );
+        assert_eq!(PopupWidthMode::ForceFull.cycle(), PopupWidthMode::Auto);
     }
 }

@@ -858,6 +858,10 @@ fn handle_normal(
             app.toggle_attention_filter(ctx);
             PostAction::None
         }
+        Action::TogglePopupWidth => {
+            app.toggle_popup_width_mode();
+            PostAction::None
+        }
         Action::OpenLinkPicker => {
             app.open_link_picker(ctx);
             PostAction::None
@@ -1051,7 +1055,17 @@ fn handle_normal(
             let Some(issue) = app.context_project(ctx).selected_issue(&q) else {
                 return PostAction::None;
             };
-            let pr_mode = action == Action::OpenReviewPR;
+            let pr = if action == Action::OpenReviewPR {
+                match app.context_project(ctx).detail_open_numbers(issue) {
+                    Ok(numbers) => numbers.first().copied(),
+                    Err(message) => {
+                        app.set_warning(message);
+                        return PostAction::None;
+                    }
+                }
+            } else {
+                None
+            };
             let popup_title = format!("{}: {}", issue.id, issue.title);
             let tx = ch.action_tx.clone();
 
@@ -1098,7 +1112,7 @@ fn handle_normal(
                                 outcome.worktree_dir,
                                 outcome.worktree_path,
                             ));
-                            match tuicr::launch_review_session(&session_name, &path, pr_mode) {
+                            match tuicr::launch_review_session(&session_name, &path, pr) {
                                 Ok(()) => ActionResult {
                                     message: "Provisioned worktree, tuicr ready".to_string(),
                                     session_to_open: Some(session_name),
@@ -3696,6 +3710,7 @@ mod tests {
             prune_threshold: crate::config::DEFAULT_PRUNE_THRESHOLD,
             auto_prune_check_interval: crate::config::DEFAULT_AUTO_PRUNE_CHECK_INTERVAL,
             cloud_agents: false,
+            popup_max_width_cols: crate::config::DEFAULT_POPUP_MAX_WIDTH_COLS,
             agent_launch: std::collections::HashMap::new(),
         }
     }
@@ -7010,6 +7025,7 @@ mod tests {
             prune_threshold: crate::config::DEFAULT_PRUNE_THRESHOLD,
             auto_prune_check_interval: crate::config::DEFAULT_AUTO_PRUNE_CHECK_INTERVAL,
             cloud_agents: false,
+            popup_max_width_cols: crate::config::DEFAULT_POPUP_MAX_WIDTH_COLS,
             agent_launch: std::collections::HashMap::new(),
         }
     }

@@ -16,7 +16,6 @@ pub fn check_available() -> bool {
         .is_ok_and(|s| s.success())
 }
 
-const TUICR_WINDOW: &str = "tuicr";
 const MODE_OPTION: &str = "@bork-tuicr-mode";
 
 const SHELLS: &[&str] = &[
@@ -25,10 +24,13 @@ const SHELLS: &[&str] = &[
 
 /// Show tuicr in `session`, reusing its tuicr window when there is one.
 pub fn open_in_session(session: &str, cwd: &Path, pr: Option<u32>) -> Result<(), AppError> {
-    let Some(window) = tmux::window_ids(session, TUICR_WINDOW)?.into_iter().next() else {
-        tmux::create_window(session, TUICR_WINDOW, cwd)?;
-        start_tuicr(&format!("{session}:{TUICR_WINDOW}"), pr)?;
-        return tmux::select_window(session, TUICR_WINDOW);
+    let Some(window) = tmux::window_ids(session, tmux::TUICR_WINDOW)?
+        .into_iter()
+        .next()
+    else {
+        tmux::create_window(session, tmux::TUICR_WINDOW, cwd)?;
+        start_tuicr(&format!("{session}:{}", tmux::TUICR_WINDOW), pr)?;
+        return tmux::select_window(session, tmux::TUICR_WINDOW);
     };
 
     resume_tuicr(&format!("{session}:{window}"), cwd, pr)?;
@@ -57,7 +59,7 @@ fn resume_tuicr(target: &str, cwd: &Path, pr: Option<u32>) -> Result<(), AppErro
 /// Used when there is no agent session for the issue but the user wants to review.
 pub fn launch_review_session(session: &str, cwd: &Path, pr: Option<u32>) -> Result<(), AppError> {
     tmux::create_session(session, cwd)?;
-    tmux::rename_window(session, TUICR_WINDOW)?;
+    tmux::rename_window(session, tmux::TUICR_WINDOW)?;
     start_tuicr(session, pr)?;
     tmux::create_window(session, "terminal", cwd)?;
     Ok(())
