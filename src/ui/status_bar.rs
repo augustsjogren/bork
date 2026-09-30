@@ -43,18 +43,6 @@ pub fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(ratatui::style::Color::Yellow),
         ));
     }
-    if let Some((in_use, size)) = app.active_project().worktree_pool_usage() {
-        let exhausted = in_use as u64 >= size;
-        let colour = if exhausted {
-            ratatui::style::Color::Yellow
-        } else {
-            styles::DIM
-        };
-        title_spans.push(Span::styled(
-            format!(" wt {in_use}/{size} "),
-            Style::default().fg(colour),
-        ));
-    }
     if let Some(base) = app.active_project().live.base_sync.as_ref() {
         if base.behind > 0 {
             title_spans.push(Span::styled(

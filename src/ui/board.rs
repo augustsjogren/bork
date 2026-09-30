@@ -217,7 +217,6 @@ fn render_column(
         let marked = project.marked_issues.contains(&issue.id.to_lowercase());
 
         let pr = project.pr_for(issue);
-        let target_label = project.placement_label(issue);
         let ctx = card::CardContext {
             issue,
             selected: is_selected,
@@ -230,7 +229,6 @@ fn render_column(
             pr,
             project,
             ports: project.listening_ports_for(issue),
-            target_label,
             search_query,
         };
 

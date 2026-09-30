@@ -1,52 +1,24 @@
-//! The single definition of "which worktrees exist".
-//!
-//! By default a worktree is a child directory of the project root. An external
-//! provider places them wherever it likes, so it has to enumerate them itself;
-//! scanning the project root would find nothing.
+//! The single definition of "which worktrees exist": every child directory of
+//! the project root holding a `.git`, except `main/` and dotdirs.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::config::AppConfig;
-use crate::external::worktree_provider::WorktreeBackend;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeEntry {
     pub name: String,
     pub path: PathBuf,
-    /// Provider-supplied description of what this worktree is, e.g. the slot
-    /// it occupies and the port it serves. Shown on the card.
-    pub label: Option<String>,
 }
 
 /// Every worktree currently on disk, sorted by name.
 pub fn enumerate(config: &AppConfig) -> Vec<WorktreeEntry> {
-    let mut entries = match WorktreeBackend::resolve(config) {
-        WorktreeBackend::Provider(provider) => provider.list(),
-        WorktreeBackend::Native => scan_project_root(config),
-    };
+    let mut entries = scan_project_root(config);
 
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     entries
 }
 
-/// Name-to-path lookup, surfacing a failing provider rather than reporting an
-/// empty layout: an empty map reads as "every worktree is already gone", which
-/// is the wrong answer for anything deciding whether one still exists.
-pub fn path_index(config: &AppConfig) -> anyhow::Result<HashMap<String, PathBuf>> {
-    let entries = match WorktreeBackend::resolve(config) {
-        WorktreeBackend::Provider(provider) => provider.list_checked()?,
-        WorktreeBackend::Native => scan_project_root(config),
-    };
-
-    Ok(entries
-        .into_iter()
-        .map(|entry| (entry.name, entry.path))
-        .collect())
-}
-
-/// Every child directory of the project root holding a `.git`, except `main/`
-/// and dotdirs.
 fn scan_project_root(config: &AppConfig) -> Vec<WorktreeEntry> {
     let Ok(dir_entries) = std::fs::read_dir(&config.project_root) else {
         return Vec::new();
@@ -64,11 +36,7 @@ fn scan_project_root(config: &AppConfig) -> Vec<WorktreeEntry> {
             if !path.join(".git").exists() {
                 return None;
             }
-            Some(WorktreeEntry {
-                name,
-                path,
-                label: None,
-            })
+            Some(WorktreeEntry { name, path })
         })
         .collect()
 }
@@ -150,50 +118,6 @@ mod tests {
             .collect();
 
         assert_eq!(names, vec!["wt-dir", "wt-file"]);
-        let _ = fs::remove_dir_all(&project);
-    }
-
-    #[test]
-    fn enumerate_uses_the_provider_and_ignores_the_project_root() {
-        let project = temp_project();
-        // A project-root child must not leak into an external provider's list:
-        // mixing layouts would make the board poll a worktree the provider
-        // does not manage.
-        worktree_dir(&project, "bork-9-stale");
-        // The provider command runs from the main checkout.
-        fs::create_dir_all(project.join("main")).unwrap();
-
-        let config = AppConfig {
-            worktree_create_cmd: Some("true".into()),
-            worktree_list_cmd: Some(
-                r#"printf '{"name":"wt--pool-a","path":"/elsewhere/wt--pool-a"}\n'"#.into(),
-            ),
-            ..config_for(&project)
-        };
-
-        assert_eq!(
-            enumerate(&config),
-            vec![WorktreeEntry {
-                name: "wt--pool-a".into(),
-                path: PathBuf::from("/elsewhere/wt--pool-a"),
-                label: None,
-            }]
-        );
-        let _ = fs::remove_dir_all(&project);
-    }
-
-    #[test]
-    fn path_index_maps_names_to_paths() {
-        let project = temp_project();
-        worktree_dir(&project, "bork-1-first");
-
-        let index = path_index(&config_for(&project)).expect("a plain scan cannot fail");
-
-        assert_eq!(
-            index.get("bork-1-first"),
-            Some(&project.join("bork-1-first"))
-        );
-        assert_eq!(index.len(), 1);
         let _ = fs::remove_dir_all(&project);
     }
 
