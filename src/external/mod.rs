@@ -8,7 +8,6 @@ pub mod ports;
 pub mod process;
 pub mod tmux;
 pub mod tuicr;
-pub mod worktree_provider;
 
 use std::process::{Command, Stdio};
 

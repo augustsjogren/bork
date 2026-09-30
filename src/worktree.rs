@@ -1,11 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context};
 
 use crate::agent_config;
 use crate::config;
-use crate::external::worktree_provider::{ProviderCommands, WorktreeBackend};
 use crate::types::{Column, Issue, IssueKind};
 
 /// Create a git worktree and register it with bork's state.json.
@@ -29,9 +28,6 @@ pub fn run_worktree(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeResult {
     pub worktree_dir: String,
-    /// Absolute path, when an external provider chose it. `None` means the
-    /// worktree sits at `project_root/<worktree_dir>`.
-    pub worktree_path: Option<PathBuf>,
     pub branch_name: String,
 }
 
@@ -143,18 +139,6 @@ pub fn create_worktree_with_branch(
         );
     }
 
-    if let WorktreeBackend::Provider(provider) = WorktreeBackend::resolve(config) {
-        return create_via_provider(
-            &provider,
-            &mut state,
-            issue_id,
-            slug,
-            title,
-            base_branch,
-            branch_override,
-        );
-    }
-
     let worktree_dir = match slug {
         Some(s) => format!("{}-{}", issue_id, s),
         None => issue_id.to_string(),
@@ -181,18 +165,26 @@ pub fn create_worktree_with_branch(
         }
     }
 
-    let branch_name = match slug {
-        Some(s) => format!("{}/{}", issue_id, s),
-        None => issue_id.to_string(),
+    let branch_name = match (branch_override, slug) {
+        (Some(branch), _) => branch.to_string(),
+        (None, Some(s)) => format!("{}/{}", issue_id, s),
+        (None, None) => issue_id.to_string(),
     };
 
     let worktree_path = format!("../{}", worktree_dir);
-    let mut args = vec!["worktree", "add", &worktree_path, "-b", &branch_name];
-    // When a base branch is given, pass it as the start-point so the new branch
-    // is created from it. Without one, git branches off main/'s current HEAD
-    // (the main/master branch by bork convention).
-    if let Some(base) = base_branch {
-        args.push(base);
+    let mut args = vec!["worktree", "add", &worktree_path];
+    if branch_override.is_some() {
+        // An existing branch is checked out as-is; git creates a local
+        // tracking branch when only `origin/<branch>` exists.
+        args.push(&branch_name);
+    } else {
+        args.extend(["-b", &branch_name]);
+        // When a base branch is given, pass it as the start-point so the new branch
+        // is created from it. Without one, git branches off main/'s current HEAD
+        // (the main/master branch by bork convention).
+        if let Some(base) = base_branch {
+            args.push(base);
+        }
     }
 
     let status = crate::external::git_command()
@@ -205,124 +197,6 @@ pub fn create_worktree_with_branch(
         bail!("git worktree add failed");
     }
 
-    link_worktree(config, &mut state, issue_id, title, &worktree_dir, None)?;
-
-    Ok(WorktreeResult {
-        worktree_dir,
-        worktree_path: None,
-        branch_name,
-    })
-}
-
-/// Create a worktree through the configured external provider, which owns
-/// naming, layout and any per-worktree provisioning.
-fn create_via_provider(
-    provider: &ProviderCommands,
-    state: &mut config::AppState,
-    issue_id: &str,
-    slug: Option<&str>,
-    title: Option<&str>,
-    base_branch: Option<&str>,
-    branch_override: Option<&str>,
-) -> anyhow::Result<WorktreeResult> {
-    let config = provider.config();
-
-    let target = state
-        .issues
-        .iter()
-        .find(|issue| issue.id.eq_ignore_ascii_case(issue_id))
-        .and_then(|issue| issue.worktree_target.clone());
-
-    if let Some(target) = target.as_deref() {
-        // A target names a worktree that already exists and can hold one card
-        // at a time. Catching the clash here beats surfacing the provider's
-        // own error from several layers down.
-        let occupant = state.issues.iter().find(|issue| {
-            !issue.id.eq_ignore_ascii_case(issue_id)
-                && issue.worktree.is_some()
-                && issue.worktree_target.as_deref() == Some(target)
-        });
-        if let Some(occupant) = occupant {
-            bail!(
-                "Target '{}' is already held by {}. Detach that card first.",
-                target,
-                occupant.id
-            );
-        }
-    }
-
-    // The pool ceiling counts worktrees the provider allocates. A targeted
-    // create reuses one that already exists and already holds its slot, so
-    // counting it against the ceiling would refuse a create that costs
-    // nothing.
-    if let (None, Some(limit)) = (target.as_deref(), config.worktree_pool_size) {
-        // Fails closed: a list command that errors must not read as an empty
-        // pool and wave the create through the ceiling it exists to enforce.
-        let in_use = provider
-            .list_checked()
-            .context("Cannot check the worktree pool before creating")?
-            .len() as u64;
-        if in_use >= limit {
-            bail!(
-                "All {} worktrees in the pool are in use. \
-                 Detach one from its card (or prune it) to free a slot.",
-                limit
-            );
-        }
-    }
-
-    let created = provider.create(
-        issue_id,
-        slug,
-        base_branch,
-        target.as_deref(),
-        branch_override,
-    )?;
-    let branch_name = git_stdout(&created.path, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .filter(|branch| !branch.is_empty() && branch != "HEAD")
-        .unwrap_or_else(|| created.name.clone());
-
-    link_worktree(
-        config,
-        state,
-        issue_id,
-        title,
-        &created.name,
-        Some(created.path.clone()),
-    )?;
-
-    Ok(WorktreeResult {
-        worktree_dir: created.name,
-        worktree_path: Some(created.path),
-        branch_name,
-    })
-}
-
-/// Attach the new worktree to its issue, creating the issue when a title is
-/// given, then persist. Shared by both creation paths so an externally
-/// provided worktree lands on the board identically.
-fn link_worktree(
-    config: &config::AppConfig,
-    state: &mut config::AppState,
-    issue_id: &str,
-    title: Option<&str>,
-    name: &str,
-    path: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    // One worktree, one card. A provider hands back a worktree it already owns
-    // — a slot swapping branches — and the card that had it may have been
-    // matched by branch rather than by target, so the target check upstream of
-    // here cannot see it. Its branch has just moved, so it no longer has a
-    // worktree either way.
-    for issue in state
-        .issues
-        .iter_mut()
-        .filter(|i| !i.id.eq_ignore_ascii_case(issue_id))
-        .filter(|i| i.worktree.as_deref() == Some(name))
-    {
-        issue.detach_worktree();
-    }
-
     // Match case-insensitively: stored ids are lowercase but users may type
     // e.g. `bork worktree BORK-1` or a Linear identifier like `VIL-123`.
     if let Some(issue) = state
@@ -330,15 +204,17 @@ fn link_worktree(
         .iter_mut()
         .find(|i| i.id.eq_ignore_ascii_case(issue_id))
     {
-        issue.attach_worktree_at(name.to_string(), path);
+        issue.attach_worktree(worktree_dir.to_string());
     } else if let Some(title) = title {
-        let mut issue = Issue::new(
-            issue_id,
-            title,
-            Column::Todo,
-            agent_config::default_agent_for(config),
-        );
-        issue.attach_worktree_at(name.to_string(), path);
+        let issue = Issue {
+            worktree: Some(worktree_dir.to_string()),
+            ..Issue::new(
+                issue_id,
+                title,
+                Column::Todo,
+                agent_config::default_agent_for(config),
+            )
+        };
         state.issues.push(issue);
     } else {
         println!(
@@ -349,7 +225,12 @@ fn link_worktree(
         );
     }
 
-    config::save_state(state, &config.project_root)
+    config::save_state(&state, &config.project_root)?;
+
+    Ok(WorktreeResult {
+        worktree_dir,
+        branch_name,
+    })
 }
 
 /// A removal that `--force` would push through: the issue's plan couldn't be
@@ -443,17 +324,6 @@ pub fn remove_worktree_in(
     worktree_dir: &str,
     removal: Removal,
 ) -> anyhow::Result<Removed> {
-    remove_worktree_at(config, worktree_dir, None, removal)
-}
-
-/// Remove a worktree whose path is known, for providers that place worktrees
-/// outside the project root.
-pub fn remove_worktree_at(
-    config: &config::AppConfig,
-    worktree_dir: &str,
-    worktree_path: Option<&Path>,
-    removal: Removal,
-) -> anyhow::Result<Removed> {
     let force = removal != Removal::Safe;
     let main_dir = config.main_dir();
     if !main_dir.join(".git").exists() {
@@ -463,10 +333,7 @@ pub fn remove_worktree_at(
         );
     }
 
-    let worktree_path = match worktree_path {
-        Some(path) => path.to_path_buf(),
-        None => config.project_root.join(worktree_dir),
-    };
+    let worktree_path = config.project_root.join(worktree_dir);
     if !worktree_path.exists() {
         // Directory already gone; clean up any stale worktree metadata.
         let _ = crate::external::git_command()
@@ -517,14 +384,6 @@ pub fn remove_worktree_at(
             dirty: has_uncommitted_changes(&worktree_path),
         }
         .into());
-    }
-
-    // An external provider's removal has to release whatever it allocated
-    // alongside the checkout, so it replaces `git worktree remove` outright
-    // rather than running before it.
-    if let WorktreeBackend::Provider(provider) = WorktreeBackend::resolve(config) {
-        provider.remove(worktree_dir, &worktree_path, force)?;
-        return Ok(Removed::default());
     }
 
     let worktree_arg = format!("../{}", worktree_dir);
@@ -674,12 +533,6 @@ mod tests {
             setup_script: None,
             teardown_script: None,
             session_kill_script: None,
-            worktree_create_cmd: None,
-            worktree_remove_cmd: None,
-            worktree_list_cmd: None,
-            worktree_targets_cmd: None,
-            worktree_target_label: None,
-            worktree_pool_size: None,
             base_branch: "main".to_string(),
             base_fetch_interval_secs: 900,
             done_session_ttl: 300,
@@ -694,137 +547,6 @@ mod tests {
             popup_max_width_cols: crate::config::DEFAULT_POPUP_MAX_WIDTH_COLS,
             agent_launch: std::collections::HashMap::new(),
         }
-    }
-
-    /// Config whose provider echoes BORK_TARGET into a directory it creates,
-    /// so a test can prove the target reached the command.
-    fn targeting_config(project: &Path) -> config::AppConfig {
-        let script = format!(
-            r#"d={}/target-$BORK_TARGET; mkdir -p "$d"; printf '{{"path":"%s"}}\n' "$d""#,
-            project.display()
-        );
-        config::AppConfig {
-            worktree_create_cmd: Some(script),
-            worktree_list_cmd: Some("true".into()),
-            ..test_config(project)
-        }
-    }
-
-    #[test]
-    fn targeted_create_passes_the_target_to_the_provider() {
-        let (tmp, project, _cfg) = setup_test_project();
-        let cfg = targeting_config(&project);
-
-        let mut state = config::load_state(&project);
-        state.issues[0].worktree_target = Some("slot-a".into());
-        config::save_state(&state, &project).unwrap();
-
-        let result = create_worktree_in(&cfg, "bork-1", None, None, None).unwrap();
-
-        assert_eq!(result.worktree_dir, "target-slot-a");
-        assert_eq!(result.worktree_path, Some(project.join("target-slot-a")));
-
-        let state = config::load_state(&project);
-        let issue = state.issues.iter().find(|i| i.id == "bork-1").unwrap();
-        assert_eq!(issue.worktree.as_deref(), Some("target-slot-a"));
-
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn targeted_create_is_refused_when_another_card_holds_the_target() {
-        let (tmp, project, _cfg) = setup_test_project();
-        let cfg = targeting_config(&project);
-
-        let mut state = config::load_state(&project);
-        state.issues[0].worktree_target = Some("slot-a".into());
-        let mut holder = Issue::new("bork-9", "Holder", Column::InProgress, cfg.agent_kind);
-        holder.worktree_target = Some("slot-a".into());
-        holder.attach_worktree("target-slot-a".into());
-        state.issues.push(holder);
-        config::save_state(&state, &project).unwrap();
-
-        let err = create_worktree_in(&cfg, "bork-1", None, None, None)
-            .expect_err("a target held by another card must be refused");
-
-        assert!(err.to_string().contains("bork-9"), "got: {err}");
-
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn a_create_takes_the_worktree_off_the_card_that_held_it() {
-        let (tmp, project, _cfg) = setup_test_project();
-        let cfg = targeting_config(&project);
-
-        // The holder was matched to the slot by its branch, so it carries no
-        // target and the occupancy check above cannot see it. Its branch is
-        // gone once the provider swaps in this card's, so it must not be left
-        // claiming the worktree too.
-        let mut state = config::load_state(&project);
-        state.issues[0].worktree_target = Some("slot-a".into());
-        let mut holder = Issue::new("bork-9", "Holder", Column::InProgress, cfg.agent_kind);
-        holder.attach_worktree("target-slot-a".into());
-        state.issues.push(holder);
-        config::save_state(&state, &project).unwrap();
-
-        create_worktree_in(&cfg, "bork-1", None, None, None).unwrap();
-
-        let state = config::load_state(&project);
-        let holder = state.issues.iter().find(|i| i.id == "bork-9").unwrap();
-        assert_eq!(holder.worktree, None);
-        assert_eq!(holder.worktree_path, None);
-
-        let taker = state.issues.iter().find(|i| i.id == "bork-1").unwrap();
-        assert_eq!(taker.worktree.as_deref(), Some("target-slot-a"));
-
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn targeted_create_ignores_a_full_pool() {
-        let (tmp, project, _cfg) = setup_test_project();
-        // Pool reported full: an untargeted create would be refused, but a
-        // targeted one reuses an existing worktree and costs no slot.
-        let cfg = config::AppConfig {
-            worktree_list_cmd: Some(r#"printf '{"path":"/tmp/a"}\n'"#.into()),
-            worktree_pool_size: Some(1),
-            base_branch: "main".to_string(),
-            base_fetch_interval_secs: 900,
-            ..targeting_config(&project)
-        };
-
-        let mut state = config::load_state(&project);
-        state.issues[0].worktree_target = Some("slot-a".into());
-        config::save_state(&state, &project).unwrap();
-
-        let result = create_worktree_in(&cfg, "bork-1", None, None, None);
-
-        assert!(result.is_ok(), "targeted create failed: {:?}", result.err());
-
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn untargeted_create_is_refused_when_the_pool_is_full() {
-        let (tmp, project, _cfg) = setup_test_project();
-        let cfg = config::AppConfig {
-            worktree_list_cmd: Some(r#"printf '{"path":"/tmp/a"}\n'"#.into()),
-            worktree_pool_size: Some(1),
-            base_branch: "main".to_string(),
-            base_fetch_interval_secs: 900,
-            ..targeting_config(&project)
-        };
-
-        let err = create_worktree_in(&cfg, "bork-1", None, None, None)
-            .expect_err("a full pool must refuse an untargeted create");
-
-        assert!(
-            err.to_string().contains("in the pool are in use"),
-            "got: {err}"
-        );
-
-        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -962,6 +684,33 @@ mod tests {
 
         // The new worktree should contain the marker file only present on the base.
         assert!(project.join("bork-1-fix-bug/BASE_MARKER.md").exists());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_worktree_checks_out_an_existing_branch_verbatim() {
+        let (tmp, project, cfg) = setup_test_project();
+        let main_dir = project.join("main");
+
+        git_in(&main_dir, &["checkout", "-b", "someone/pr-branch"]);
+        fs::write(main_dir.join("PR_MARKER.md"), "marker").unwrap();
+        git_in(&main_dir, &["add", "."]);
+        git_in(&main_dir, &["commit", "-m", "pr marker"]);
+        git_in(&main_dir, &["checkout", "-"]);
+
+        let result = create_worktree_with_branch(
+            &cfg,
+            "bork-1",
+            Some("review"),
+            None,
+            None,
+            Some("someone/pr-branch"),
+        )
+        .expect("create failed");
+
+        assert_eq!(result.branch_name, "someone/pr-branch");
+        assert!(project.join("bork-1-review/PR_MARKER.md").exists());
 
         let _ = fs::remove_dir_all(&tmp);
     }

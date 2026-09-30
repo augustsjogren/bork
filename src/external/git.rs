@@ -89,18 +89,8 @@ impl Drop for PoolPermit<'_> {
 pub struct GitPollResult {
     pub statuses: HashMap<String, WorktreeStatus>,
     pub branches: HashMap<String, String>,
-    /// Absolute path per worktree, from the provider. An external provider's
-    /// worktrees live outside `project_root`, so a card auto-assigned by
-    /// name/branch match must carry this rather than let
-    /// `Issue::worktree_path_in` fall back to `project_root/<name>` — a path
-    /// that does not exist for them.
-    pub paths: HashMap<String, String>,
-    /// Provider-supplied descriptions, keyed like the others. Complete on
-    /// every poll, since enumeration is cheap.
-    pub labels: HashMap<String, String>,
     /// Every worktree this poll saw. Wider than `branches`, which omits a
-    /// worktree sitting on a detached HEAD — a state a provider parks a shared
-    /// worktree in between branches.
+    /// worktree sitting on a detached HEAD (mid-rebase, for instance).
     pub existing: HashSet<String>,
     /// How far the main checkout is behind `origin/<base_branch>`. `None`
     /// when the remote branch cannot be resolved (no remote, unfetched, or a
@@ -161,18 +151,11 @@ impl GitPoller {
     /// Run one poll cycle. `classify` maps a worktree directory name to its
     /// poll class; `force_all` refreshes every non-skipped worktree regardless
     /// of cadence (used after a wake so user actions get an immediate refresh).
-    ///
-    /// Worktrees come from `worktrees::enumerate`, not a `project_root` scan:
-    /// an external provider's worktrees live outside `project_root`, and that
-    /// abstraction already knows how to list them (`worktree_list_cmd`) or
-    /// fall back to a directory scan when there is no provider.
     pub fn poll(&mut self, classify: &dyn Fn(&str) -> PollClass, force_all: bool) -> GitPollResult {
         self.cycle = self.cycle.wrapping_add(1);
 
         let mut statuses = HashMap::new();
         let mut branches = HashMap::new();
-        let mut paths = HashMap::new();
-        let mut labels = HashMap::new();
         let mut existing = HashSet::new();
 
         // One `git worktree list --porcelain` resolves every worktree's branch,
@@ -185,13 +168,6 @@ impl GitPoller {
             let dir_name = entry.name;
             let path = entry.path;
 
-            // Complete on every poll, since enumeration is cheap: a card
-            // needs its worktree's absolute path and provider label even
-            // when the worktree is skipped/cold this cycle.
-            paths.insert(dir_name.clone(), path.to_string_lossy().into_owned());
-            if let Some(label) = entry.label {
-                labels.insert(dir_name.clone(), label);
-            }
             existing.insert(dir_name.clone());
 
             let class = classify(&dir_name);
@@ -229,8 +205,6 @@ impl GitPoller {
         GitPollResult {
             statuses,
             branches,
-            paths,
-            labels,
             existing,
             base,
         }

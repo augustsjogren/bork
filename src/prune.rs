@@ -9,7 +9,6 @@ use std::path::Path;
 
 use crate::app::Project;
 use crate::config::AppConfig;
-use crate::external::worktree_provider::WorktreeBackend;
 use crate::types::{Column, Issue, WorktreeStatus};
 use crate::worktrees;
 
@@ -194,20 +193,6 @@ impl PruneOutcome {
                 _ => None,
             })
             .collect()
-    }
-
-    /// One `Failed` per requested worktree, for a failure that happened before
-    /// any of them could be attempted.
-    fn all_failed(worktrees: &[String], reason: &str) -> Self {
-        PruneOutcome {
-            results: worktrees
-                .iter()
-                .map(|name| PruneResult {
-                    worktree: name.clone(),
-                    outcome: RemoveOutcome::Failed(reason.to_string()),
-                })
-                .collect(),
-        }
     }
 
     pub fn removed_worktrees(&self) -> Vec<&str> {

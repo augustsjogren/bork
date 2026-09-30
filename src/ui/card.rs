@@ -25,9 +25,6 @@ pub struct CardContext<'a> {
     pub project: &'a Project,
     pub ports: Option<&'a Vec<u16>>,
     pub search_query: &'a str,
-    /// The card's worktree target already rendered for display, so the card
-    /// needs no opinion about what a target means.
-    pub target_label: Option<String>,
 }
 
 pub fn render_card(frame: &mut Frame, ctx: &CardContext, area: Rect, card_size: CardSize) {
@@ -251,9 +248,6 @@ fn format_bottom_line(ctx: &CardContext, max_width: usize) -> Line<'static> {
     if let Some(text) = pruned_indicator_text(issue) {
         right.push(text);
     }
-    if let Some(text) = target_indicator_text(issue, ctx.target_label.as_deref()) {
-        right.push(text);
-    }
     if ctx.ports.is_some_and(|ports| !ports.is_empty()) {
         right.push("🔌".to_string());
     }
@@ -318,17 +312,6 @@ fn pruned_indicator_text(issue: &Issue) -> Option<String> {
         "pruned {}",
         humanize_age(now.saturating_sub(pruned_at))
     ))
-}
-
-/// Worktree-target indicator: `on a` once the card sits on that target, `→ a`
-/// while it is still only intent. Both are worth showing — the target is where
-/// a card lives, not merely where it is headed.
-fn target_indicator_text(issue: &Issue, target_label: Option<&str>) -> Option<String> {
-    let label = target_label?;
-    if issue.worktree.is_some() {
-        return Some(format!("on {label}"));
-    }
-    Some(format!("\u{2192} {label}"))
 }
 
 pub(crate) fn humanize_age(secs: u64) -> String {
@@ -621,49 +604,6 @@ mod tests {
     fn humanize_age_months() {
         assert_eq!(humanize_age(30 * 86_400), "1mo ago");
         assert_eq!(humanize_age(90 * 86_400), "3mo ago");
-    }
-
-    fn issue_for_target_indicator(worktree: Option<&str>, target: Option<&str>) -> Issue {
-        Issue {
-            worktree: worktree.map(String::from),
-            worktree_target: target.map(String::from),
-            ..Issue::new(
-                "bork-1",
-                "t",
-                crate::types::Column::Todo,
-                crate::types::AgentKind::OpenCode,
-            )
-        }
-    }
-
-    #[test]
-    fn target_indicator_shown_while_detached() {
-        let issue = issue_for_target_indicator(None, Some("a"));
-        assert_eq!(
-            target_indicator_text(&issue, Some("a")).as_deref(),
-            Some("\u{2192} a")
-        );
-    }
-
-    #[test]
-    fn target_indicator_reads_as_placement_once_attached() {
-        let issue = issue_for_target_indicator(Some("wt-1"), Some("a"));
-        assert_eq!(
-            target_indicator_text(&issue, Some("a")).as_deref(),
-            Some("on a")
-        );
-    }
-
-    #[test]
-    fn target_indicator_absent_when_attached_without_a_target() {
-        let issue = issue_for_target_indicator(Some("wt-1"), None);
-        assert!(target_indicator_text(&issue, issue.worktree_target.as_deref()).is_none());
-    }
-
-    #[test]
-    fn target_indicator_absent_without_a_target() {
-        let issue = issue_for_target_indicator(None, None);
-        assert!(target_indicator_text(&issue, issue.worktree_target.as_deref()).is_none());
     }
 
     fn issue_for_prune_indicator(worktree: Option<&str>, pruned_at: Option<u64>) -> Issue {

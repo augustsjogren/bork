@@ -11,7 +11,6 @@ pub mod sidebar;
 pub mod stack_details;
 pub mod status_bar;
 pub mod styles;
-pub mod target_picker;
 
 use ratatui::layout::{Constraint, Layout};
 use ratatui::Frame;
@@ -73,7 +72,6 @@ pub fn render(frame: &mut Frame, app: &App) {
     link_picker::render_link_picker(frame, app);
     prune_dialog::render_prune_dialog(frame, app);
     stack_details::render(frame, app);
-    target_picker::render_target_picker(frame, app);
     help::render_help(frame, app);
     bonk_art::render_bonk(frame, app);
     debug_inspector::render_debug_inspector(frame, app);

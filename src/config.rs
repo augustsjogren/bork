@@ -36,39 +36,6 @@ pub struct AppConfig {
     /// --stop`) while keeping the checkout for a later resume. Runs
     /// best-effort: a nonzero exit or missing worktree never blocks the kill.
     pub session_kill_script: Option<String>,
-    /// Shell command that creates a worktree, replacing bork's own
-    /// `git worktree add`. Run with the main checkout as its working directory
-    /// and `BORK_ISSUE_ID`, `BORK_SLUG`, `BORK_BASE`, `BORK_TARGET` and
-    /// `BORK_BRANCH` in the environment. It must print the new worktree as a
-    /// JSON object on the last line of stdout:
-    /// `{"path": "...", "name": "...", "label": "..."}`, name and label
-    /// optional. Configuring it hands directory layout, naming and any
-    /// per-worktree provisioning to an external tool.
-    pub worktree_create_cmd: Option<String>,
-    /// Shell command that removes a worktree created by
-    /// `worktree_create_cmd`. Receives `BORK_WORKTREE_NAME`,
-    /// `BORK_WORKTREE_PATH` and `BORK_FORCE`.
-    pub worktree_remove_cmd: Option<String>,
-    /// Shell command that enumerates existing worktrees, one JSON object per
-    /// line in the same shape `worktree_create_cmd` returns. Required
-    /// alongside `worktree_create_cmd`, because worktrees outside the project
-    /// root cannot be discovered by scanning it.
-    pub worktree_list_cmd: Option<String>,
-    /// Shell command that enumerates the targets a card may be pointed at, one
-    /// JSON object per line: `{"target": "a", "label": "..."}`. Unset means
-    /// the target picker has nothing to offer, so targets can only be set from
-    /// the CLI.
-    pub worktree_targets_cmd: Option<String>,
-    /// How a target is written in the UI. `{target}` is replaced with the
-    /// target itself, so a provider whose targets are bare letters can render
-    /// them as something a reader recognises. Defaults to the target alone.
-    pub worktree_target_label: Option<String>,
-    /// Total worktrees the external provider can hand out. `None` means
-    /// unbounded. A provider that allocates from a fixed pool of ports or
-    /// databases has a hard ceiling well below the number of cards a board
-    /// can hold, so bork refuses an attach at the ceiling rather than
-    /// letting the create command fail mid-launch.
-    pub worktree_pool_size: Option<u64>,
     /// Branch whose remote counterpart the header tracks and `p` pulls.
     /// The git poller fetches `origin/<base_branch>` every
     /// `base_fetch_interval_secs` and the header shows how far the main
@@ -144,24 +111,8 @@ impl AppConfig {
         (&cfg.args, mode_args)
     }
 
-    /// The main checkout. May be a symlink to a repo outside the project
-    /// root, which is how an external provider's checkout is reached.
     pub fn main_dir(&self) -> PathBuf {
         self.project_root.join("main")
-    }
-
-    /// Render `target` for display, via `worktree_target_label`.
-    pub fn target_label(&self, target: &str) -> String {
-        match self.worktree_target_label.as_deref() {
-            Some(template) if template.contains("{target}") => template.replace("{target}", target),
-            _ => target.to_string(),
-        }
-    }
-
-    /// Whether worktree creation, removal and discovery are delegated to
-    /// external commands.
-    pub fn uses_external_worktrees(&self) -> bool {
-        self.worktree_create_cmd.is_some()
     }
 
     /// Defaults with a fixed `project_root`, so tests never depend on the
@@ -218,12 +169,6 @@ impl Default for AppConfig {
             setup_script: None,
             teardown_script: None,
             session_kill_script: None,
-            worktree_create_cmd: None,
-            worktree_remove_cmd: None,
-            worktree_list_cmd: None,
-            worktree_targets_cmd: None,
-            worktree_target_label: None,
-            worktree_pool_size: None,
             base_branch: DEFAULT_BASE_BRANCH.to_string(),
             base_fetch_interval_secs: DEFAULT_BASE_FETCH_INTERVAL_SECS,
             done_session_ttl: DEFAULT_DONE_SESSION_TTL,
@@ -340,12 +285,6 @@ pub struct PartialConfig {
     pub setup_script: Option<String>,
     pub teardown_script: Option<String>,
     pub session_kill_script: Option<String>,
-    pub worktree_create_cmd: Option<String>,
-    pub worktree_remove_cmd: Option<String>,
-    pub worktree_list_cmd: Option<String>,
-    pub worktree_targets_cmd: Option<String>,
-    pub worktree_target_label: Option<String>,
-    pub worktree_pool_size: Option<u64>,
     pub base_branch: Option<String>,
     pub base_fetch_interval_secs: Option<u64>,
     pub done_session_ttl: Option<u64>,
@@ -413,12 +352,6 @@ impl PartialConfig {
             setup_script: other.setup_script.or(self.setup_script),
             teardown_script: other.teardown_script.or(self.teardown_script),
             session_kill_script: other.session_kill_script.or(self.session_kill_script),
-            worktree_create_cmd: other.worktree_create_cmd.or(self.worktree_create_cmd),
-            worktree_remove_cmd: other.worktree_remove_cmd.or(self.worktree_remove_cmd),
-            worktree_list_cmd: other.worktree_list_cmd.or(self.worktree_list_cmd),
-            worktree_targets_cmd: other.worktree_targets_cmd.or(self.worktree_targets_cmd),
-            worktree_target_label: other.worktree_target_label.or(self.worktree_target_label),
-            worktree_pool_size: other.worktree_pool_size.or(self.worktree_pool_size),
             base_branch: other.base_branch.or(self.base_branch),
             base_fetch_interval_secs: other
                 .base_fetch_interval_secs
@@ -481,12 +414,6 @@ fn materialize(merged: PartialConfig, project_root: &Path) -> AppConfig {
         setup_script: merged.setup_script,
         teardown_script: merged.teardown_script,
         session_kill_script: merged.session_kill_script,
-        worktree_create_cmd: merged.worktree_create_cmd,
-        worktree_remove_cmd: merged.worktree_remove_cmd,
-        worktree_list_cmd: merged.worktree_list_cmd,
-        worktree_targets_cmd: merged.worktree_targets_cmd,
-        worktree_target_label: merged.worktree_target_label,
-        worktree_pool_size: merged.worktree_pool_size,
         base_branch: merged
             .base_branch
             .unwrap_or_else(|| DEFAULT_BASE_BRANCH.to_string()),
@@ -602,32 +529,6 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
-    let worktree_create_cmd = table
-        .get("worktree_create_cmd")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let worktree_remove_cmd = table
-        .get("worktree_remove_cmd")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let worktree_list_cmd = table
-        .get("worktree_list_cmd")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let worktree_targets_cmd = table
-        .get("worktree_targets_cmd")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let worktree_target_label = table
-        .get("worktree_target_label")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let worktree_pool_size = table.get("worktree_pool_size").and_then(|v| v.as_u64());
     let base_branch = table
         .get("base_branch")
         .and_then(|v| v.as_str())
@@ -670,12 +571,6 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         setup_script,
         teardown_script,
         session_kill_script,
-        worktree_create_cmd,
-        worktree_remove_cmd,
-        worktree_list_cmd,
-        worktree_targets_cmd,
-        worktree_target_label,
-        worktree_pool_size,
         base_branch,
         base_fetch_interval_secs,
         done_session_ttl,
@@ -996,79 +891,6 @@ agent_kind = "opencode"
 "#,
         );
         assert_eq!(p.done_session_ttl, None);
-    }
-
-    #[test]
-    fn worktree_provider_fields_reach_app_config() {
-        let config = merge_to_app(
-            "",
-            r#"
-worktree_create_cmd = "contrib/example-provider/create.sh"
-worktree_remove_cmd = "contrib/example-provider/remove.sh"
-worktree_list_cmd = "contrib/example-provider/list.sh"
-worktree_pool_size = "4"
-"#,
-        );
-
-        assert_eq!(
-            config.worktree_create_cmd.as_deref(),
-            Some("contrib/example-provider/create.sh")
-        );
-        assert_eq!(
-            config.worktree_remove_cmd.as_deref(),
-            Some("contrib/example-provider/remove.sh")
-        );
-        assert_eq!(
-            config.worktree_list_cmd.as_deref(),
-            Some("contrib/example-provider/list.sh")
-        );
-        assert_eq!(config.worktree_pool_size, Some(4));
-        assert!(config.uses_external_worktrees());
-    }
-
-    #[test]
-    fn target_label_substitutes_the_target() {
-        let config = merge_to_app("", "worktree_target_label = \"wt slot {target}\"\n");
-
-        assert_eq!(config.target_label("b"), "wt slot b");
-    }
-
-    #[test]
-    fn target_label_defaults_to_the_target_alone() {
-        let config = merge_to_app("", "");
-
-        assert_eq!(config.target_label("b"), "b");
-    }
-
-    #[test]
-    fn target_label_ignores_a_template_without_a_placeholder() {
-        // A template that drops the target would render every row alike.
-        let config = merge_to_app("", "worktree_target_label = \"slot\"\n");
-
-        assert_eq!(config.target_label("b"), "b");
-    }
-
-    #[test]
-    fn worktree_provider_is_off_by_default() {
-        let config = merge_to_app("", "project_name = \"bork\"\n");
-
-        assert!(!config.uses_external_worktrees());
-        assert_eq!(config.worktree_pool_size, None);
-    }
-
-    #[test]
-    fn project_worktree_provider_overrides_global() {
-        let config = merge_to_app(
-            "worktree_create_cmd = \"global-create\"\nworktree_pool_size = \"4\"\n",
-            "worktree_create_cmd = \"project-create\"\n",
-        );
-
-        assert_eq!(
-            config.worktree_create_cmd.as_deref(),
-            Some("project-create")
-        );
-        // Unset in the project layer, so the global pool size still applies.
-        assert_eq!(config.worktree_pool_size, Some(4));
     }
 
     #[test]
