@@ -17,6 +17,9 @@ pub fn run_worktree(
     let config = config::load_config();
     let result = create_worktree_in(&config, issue_id, slug, title, base_branch)?;
 
+    for note in &result.notes {
+        println!("{note}");
+    }
     println!(
         "Created worktree: {}/ on branch {}",
         result.worktree_dir, result.branch_name
@@ -29,6 +32,9 @@ pub fn run_worktree(
 pub struct WorktreeResult {
     pub worktree_dir: String,
     pub branch_name: String,
+    /// Warnings for the caller to show. Returned rather than printed because
+    /// the TUI creates worktrees too, and stray output corrupts its screen.
+    pub notes: Vec<String>,
 }
 
 const SLUG_MAX_LEN: usize = 48;
@@ -153,15 +159,16 @@ pub fn create_worktree_with_branch(
     // Refresh remote refs before branching so the new worktree isn't based on
     // a stale view of the remote. Only warn about being behind when branching
     // off main/'s HEAD (the default); a custom --base picks its own start.
+    let mut notes = Vec::new();
     if fetch_origin(&main_dir) && base_branch.is_none() {
         let behind_upstream = commits_behind_upstream(&main_dir).filter(|(_, count)| *count > 0);
         if let Some((upstream, behind)) = behind_upstream {
-            println!(
+            notes.push(format!(
                 "Warning: main is {} commit(s) behind {}. \
                  New branch will be based on the local HEAD. \
                  Run 'git pull' in main/ to sync first.",
                 behind, upstream
-            );
+            ));
         }
     }
 
@@ -187,14 +194,23 @@ pub fn create_worktree_with_branch(
         }
     }
 
-    let status = crate::external::git_command()
+    // Capture rather than inherit stdio: git's checkout progress and
+    // "HEAD is now at" lines would otherwise land on the TUI's screen.
+    let output = crate::external::git_command()
         .args(&args)
         .current_dir(&main_dir)
-        .status()
+        .output()
         .context("Failed to run git worktree add")?;
 
-    if !status.success() {
-        bail!("git worktree add failed");
+    if !output.status.success() {
+        // git prints "Preparing worktree ..." first; the reason comes last.
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .rfind(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        bail!("git worktree add failed. ({stderr})");
     }
 
     // Match case-insensitively: stored ids are lowercase but users may type
@@ -217,12 +233,12 @@ pub fn create_worktree_with_branch(
         };
         state.issues.push(issue);
     } else {
-        println!(
+        notes.push(format!(
             "Note: Issue '{}' not found in state.json. \
              The worktree was created but not linked to an issue. \
              Use --title to create the issue, or create it in the bork TUI.",
             issue_id
-        );
+        ));
     }
 
     config::save_state(&state, &config.project_root)?;
@@ -230,6 +246,7 @@ pub fn create_worktree_with_branch(
     Ok(WorktreeResult {
         worktree_dir,
         branch_name,
+        notes,
     })
 }
 
@@ -603,6 +620,19 @@ mod tests {
     }
 
     #[test]
+    fn test_worktree_add_failure_carries_gits_reason() {
+        let (tmp, project, cfg) = setup_test_project();
+        git_in(&project.join("main"), &["branch", "bork-1/fix-bug"]);
+
+        let result = create_worktree_in(&cfg, "bork-1", Some("fix-bug"), None, None);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("git worktree add failed"), "{err}");
+        assert!(err.contains("already exists"), "{err}");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_worktree_clears_pruned_at_on_existing_issue() {
         let (tmp, project, cfg) = setup_test_project();
 
@@ -749,6 +779,13 @@ mod tests {
         assert!(project.join("bork-1-fix-bug").exists());
         // Default base is still local HEAD, not origin: remote-only file absent.
         assert!(!project.join("bork-1-fix-bug/AHEAD.md").exists());
+        // The warning is returned for the caller to show, not printed: the
+        // TUI calls this too, and stray stdout corrupts its screen.
+        let notes = result.unwrap().notes;
+        assert!(
+            notes.iter().any(|n| n.contains("1 commit(s) behind")),
+            "missing behind warning: {notes:?}"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }

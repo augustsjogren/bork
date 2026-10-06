@@ -2024,6 +2024,9 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
             None,
             opts.base_branch.as_deref(),
         )?;
+        for note in &result.notes {
+            println!("{note}");
+        }
         issue.attach_worktree(result.worktree_dir.clone());
         Some(result.worktree_dir)
     };
