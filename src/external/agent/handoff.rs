@@ -10,6 +10,17 @@ use crate::error::AppError;
 use crate::external::process;
 use crate::types::Issue;
 
+use super::LaunchOptions;
+
+/// What the caller stages for the launch command: the issue to launch, plus
+/// any per-launch tweaks it needs to carry across the process boundary.
+#[derive(Debug, Serialize, Deserialize)]
+struct Request {
+    issue: Issue,
+    #[serde(default)]
+    options: LaunchOptions,
+}
+
 /// How long the launch command gets to show up in the pane. Covers slow
 /// shell rc files; setup time doesn't count once the command has started.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -52,12 +63,20 @@ impl Handoff {
 
     /// Caller side: stage `issue` for the launch command. Clears anything a
     /// previous launch of the same issue left behind.
-    pub(super) fn prepare(status_dir: &Path, issue: &Issue) -> Result<Self, AppError> {
+    pub(super) fn prepare(
+        status_dir: &Path,
+        issue: &Issue,
+        options: LaunchOptions,
+    ) -> Result<Self, AppError> {
         let dir = Self::dir(status_dir, &issue.id);
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir)?;
         let handoff = Self { dir };
-        let request = serde_json::to_string(issue)
+        let request = Request {
+            issue: issue.clone(),
+            options,
+        };
+        let request = serde_json::to_string(&request)
             .map_err(|e| AppError::Launch(format!("failed to stage launch: {e}")))?;
         write_atomic(&handoff.dir.join("request.json"), &request)?;
         Ok(handoff)
@@ -122,16 +141,16 @@ impl Claim {
     /// Claim a staged launch. `None` when the command was run by hand, with
     /// nobody waiting on a report. The rename makes the claim one-shot, so a
     /// re-run in the pane can't take a request the caller is about to remove.
-    pub(super) fn take(status_dir: &Path, issue_id: &str) -> Option<(Self, Issue)> {
+    pub(super) fn take(status_dir: &Path, issue_id: &str) -> Option<(Self, Issue, LaunchOptions)> {
         let dir = Handoff::dir(status_dir, issue_id);
         let claimed = dir.join("request.claimed");
         fs::rename(dir.join("request.json"), &claimed).ok()?;
         let request = fs::read_to_string(claimed).ok()?;
-        let issue: Issue = serde_json::from_str(&request).ok()?;
+        let request: Request = serde_json::from_str(&request).ok()?;
         // Without the pid the caller times out, so a failed write fails the
         // launch either way.
         write_atomic(&dir.join("pid"), &std::process::id().to_string()).ok()?;
-        Some((Self { dir }, issue))
+        Some((Self { dir }, request.issue, request.options))
     }
 
     /// Publish the report the caller is waiting on.
@@ -177,19 +196,29 @@ mod tests {
     #[test]
     fn claimed_request_round_trips_the_issue() {
         let status = tempfile::TempDir::new().unwrap();
-        let _caller = Handoff::prepare(status.path(), &issue()).unwrap();
+        let _caller = Handoff::prepare(status.path(), &issue(), LaunchOptions::default()).unwrap();
 
-        let (_command, claimed) = Claim::take(status.path(), "bork-7").unwrap();
+        let (_command, claimed, _options) = Claim::take(status.path(), "bork-7").unwrap();
         assert_eq!(claimed, issue());
     }
 
     #[test]
     fn a_staged_launch_can_only_be_claimed_once() {
         let status = tempfile::TempDir::new().unwrap();
-        let _caller = Handoff::prepare(status.path(), &issue()).unwrap();
+        let _caller = Handoff::prepare(status.path(), &issue(), LaunchOptions::default()).unwrap();
 
         let _first = Claim::take(status.path(), "bork-7").unwrap();
         assert!(Claim::take(status.path(), "bork-7").is_none());
+    }
+
+    #[test]
+    fn claimed_request_round_trips_the_options() {
+        let status = tempfile::TempDir::new().unwrap();
+        let options = LaunchOptions { skip_setup: true };
+        let _caller = Handoff::prepare(status.path(), &issue(), options).unwrap();
+
+        let (_command, _claimed, claimed_options) = Claim::take(status.path(), "bork-7").unwrap();
+        assert!(claimed_options.skip_setup);
     }
 
     #[test]
@@ -201,8 +230,8 @@ mod tests {
     #[test]
     fn wait_returns_the_report() {
         let status = tempfile::TempDir::new().unwrap();
-        let caller = Handoff::prepare(status.path(), &issue()).unwrap();
-        let (command, _) = Claim::take(status.path(), "bork-7").unwrap();
+        let caller = Handoff::prepare(status.path(), &issue(), LaunchOptions::default()).unwrap();
+        let (command, _, _) = Claim::take(status.path(), "bork-7").unwrap();
 
         command.report(&started(Some("ses_1"))).unwrap();
         assert_eq!(caller.wait(|| true).unwrap(), started(Some("ses_1")));
@@ -211,8 +240,8 @@ mod tests {
     #[test]
     fn wait_returns_a_failure_report() {
         let status = tempfile::TempDir::new().unwrap();
-        let caller = Handoff::prepare(status.path(), &issue()).unwrap();
-        let (command, _) = Claim::take(status.path(), "bork-7").unwrap();
+        let caller = Handoff::prepare(status.path(), &issue(), LaunchOptions::default()).unwrap();
+        let (command, _, _) = Claim::take(status.path(), "bork-7").unwrap();
 
         let failed = Report::Failed {
             error: "setup error: script exited with status 7".into(),
@@ -224,7 +253,7 @@ mod tests {
     #[test]
     fn wait_fails_when_the_command_exits_without_reporting() {
         let status = tempfile::TempDir::new().unwrap();
-        let caller = Handoff::prepare(status.path(), &issue()).unwrap();
+        let caller = Handoff::prepare(status.path(), &issue(), LaunchOptions::default()).unwrap();
         let mut child = std::process::Command::new("true").spawn().unwrap();
         child.wait().unwrap();
         fs::write(caller.dir.join("pid"), child.id().to_string()).unwrap();
@@ -236,7 +265,7 @@ mod tests {
     #[test]
     fn wait_fails_when_the_pane_ends() {
         let status = tempfile::TempDir::new().unwrap();
-        let caller = Handoff::prepare(status.path(), &issue()).unwrap();
+        let caller = Handoff::prepare(status.path(), &issue(), LaunchOptions::default()).unwrap();
 
         assert!(caller.wait(|| false).is_err());
     }
@@ -244,11 +273,11 @@ mod tests {
     #[test]
     fn prepare_clears_an_earlier_report() {
         let status = tempfile::TempDir::new().unwrap();
-        let _first = Handoff::prepare(status.path(), &issue()).unwrap();
-        let (command, _) = Claim::take(status.path(), "bork-7").unwrap();
+        let _first = Handoff::prepare(status.path(), &issue(), LaunchOptions::default()).unwrap();
+        let (command, _, _) = Claim::take(status.path(), "bork-7").unwrap();
         command.report(&started(None)).unwrap();
 
-        let retry = Handoff::prepare(status.path(), &issue()).unwrap();
+        let retry = Handoff::prepare(status.path(), &issue(), LaunchOptions::default()).unwrap();
         assert!(retry.read_report().unwrap().is_none());
     }
 }
