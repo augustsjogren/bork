@@ -84,7 +84,7 @@ fn build_cmd_with_minter(
     }
 
     let prompt = ctx.build_prompt();
-    match mint(ctx.project_root) {
+    match mint(ctx.launch_dir) {
         Some(chat_id) => {
             let escaped_id = shell_escape_single_quotes(&chat_id);
             let cmd = format!(
@@ -166,7 +166,7 @@ mod tests {
         );
         let ctx = LaunchContext {
             issue: &issue,
-            project_root: Path::new("/project-root"),
+            launch_dir: Path::new("/project-root"),
             env_prefix: "export BORK_SESSION='test'",
             trailing: " --trust --mode plan",
             prompt_subst: "\"$(cat '/prompt')\"",

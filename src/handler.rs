@@ -34,6 +34,7 @@ pub struct LaunchedSession {
     pub agent: AgentKind,
     pub kind: IssueKind,
     pub session_id: String,
+    pub session_dir: Option<String>,
 }
 
 #[derive(Default)]
@@ -3302,6 +3303,7 @@ fn launch_result(issue: Issue, outcome: agent::LaunchOutcome) -> ActionResult {
             agent: issue.agent_kind,
             kind: issue.kind,
             session_id: sid,
+            session_dir: outcome.session_dir,
         }),
         launched_issue_id: Some(issue.id),
         ..Default::default()
@@ -5123,6 +5125,7 @@ mod tests {
             agent_session_id: agent_session_id.map(str::to_string),
             setup_ran: false,
             replaced_lost_session: lost,
+            session_dir: None,
         }
     }
 

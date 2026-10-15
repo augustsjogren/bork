@@ -2054,6 +2054,7 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
             issue.kind,
             launched_agent,
             outcome.agent_session_id,
+            outcome.session_dir,
             outcome.setup_ran,
         );
     }
@@ -3079,7 +3080,11 @@ fn run_tui() -> anyhow::Result<()> {
                     }
                     if let Some(launched) = result.launched_session.filter(|_| !invalidated) {
                         if issue.accepts_launch_result(launched.kind, launched.agent) {
-                            issue.sessions.insert(launched.agent, launched.session_id);
+                            issue.record_session(
+                                launched.agent,
+                                launched.session_id,
+                                launched.session_dir,
+                            );
                             dirty = true;
                         }
                     }

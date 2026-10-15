@@ -59,7 +59,7 @@ pub trait AgentProvider {
     fn build_cmd(&self, ctx: &LaunchContext) -> (String, Option<String>, Option<String>);
 
     /// Capture existing IDs before sending a fresh launch to tmux.
-    fn snapshot_session_ids(&self, _project_root: &Path) -> HashSet<String> {
+    fn snapshot_session_ids(&self, _launch_dir: &Path) -> HashSet<String> {
         HashSet::new()
     }
 
@@ -93,7 +93,7 @@ pub trait AgentProvider {
 pub struct LaunchContext<'a> {
     pub issue: &'a Issue,
     /// The tmux launch cwd, also used when minting workspace-scoped chat ids.
-    pub project_root: &'a Path,
+    pub launch_dir: &'a Path,
     /// `export BORK_SESSION=... BORK_STATUS_DIR=... BORK_ISSUE_ID=...`
     pub env_prefix: &'a str,
     /// Trailing args (leading space when non-empty).
@@ -116,7 +116,7 @@ impl LaunchContext<'_> {
 
 /// Context for post-launch session-id detection.
 pub struct DetectContext<'a> {
-    pub project_root: &'a Path,
+    pub launch_dir: &'a Path,
     /// Session ids visible before launch, excluded from post-launch detection.
     pub before: &'a HashSet<String>,
 }
@@ -212,11 +212,16 @@ pub struct LaunchOutcome {
     pub setup_ran: bool,
     /// The stored session was gone, so this launch started a new one.
     pub replaced_lost_session: bool,
+    /// Where the agent started, relative to the project root; `None` for the
+    /// project root itself. Recorded with the session id via
+    /// `Issue::record_session`.
+    pub session_dir: Option<String>,
 }
 
 /// Launch an agent session for an issue.
-/// Creates a tmux session with two windows:
-///   1. The agent launched at the project root with issue context
+/// Creates a tmux session with two windows, both in the launch directory (see
+/// `launch_dir`):
+///   1. The agent with issue context
 ///   2. A bare terminal
 ///
 /// The pane only gets a short `bork issue launch <id>` line; that command
@@ -227,7 +232,11 @@ pub struct LaunchOutcome {
 /// other's ids.
 pub fn launch_session(issue: &Issue, config: &AppConfig) -> Result<LaunchOutcome, AppError> {
     let session_name = issue.session_name(&config.project_name);
-    let cwd = &config.project_root;
+    let session_dir = launch_dir(issue, config);
+    let cwd = match &session_dir {
+        Some(dir) => config.project_root.join(dir),
+        None => config.project_root.clone(),
+    };
 
     if tmux::session_exists(&session_name) {
         return Ok(LaunchOutcome {
@@ -235,6 +244,7 @@ pub fn launch_session(issue: &Issue, config: &AppConfig) -> Result<LaunchOutcome
             agent_session_id: issue.current_session_id().map(str::to_string),
             setup_ran: false,
             replaced_lost_session: false,
+            session_dir,
         });
     }
 
@@ -245,10 +255,10 @@ pub fn launch_session(issue: &Issue, config: &AppConfig) -> Result<LaunchOutcome
     // Snapshot resumes too: the launch command starts fresh when the stored
     // session turns out to be gone.
     let provider = provider(issue.agent_kind);
-    let before = provider.snapshot_session_ids(&config.project_root);
+    let before = provider.snapshot_session_ids(&cwd);
 
-    tmux::create_session(&session_name, cwd)?;
-    let started = start_in_session(&session_name, cwd, &launch_cmd, &handoff);
+    tmux::create_session(&session_name, &cwd)?;
+    let started = start_in_session(&session_name, &cwd, &launch_cmd, &handoff);
     let (session_id, setup_ran, replaced_lost_session) = match started {
         Ok(started) => started,
         Err(err) => {
@@ -266,7 +276,7 @@ pub fn launch_session(issue: &Issue, config: &AppConfig) -> Result<LaunchOutcome
     // For OpenCode/Codex/Pi, detect session IDs after launch.
     let agent_session_id = session_id.or_else(|| {
         provider.detect_session_id(&DetectContext {
-            project_root: &config.project_root,
+            launch_dir: &cwd,
             before: &before,
         })
     });
@@ -276,6 +286,7 @@ pub fn launch_session(issue: &Issue, config: &AppConfig) -> Result<LaunchOutcome
         agent_session_id,
         setup_ran,
         replaced_lost_session,
+        session_dir,
     })
 }
 
@@ -356,6 +367,12 @@ fn launch_command(issue_id: &str) -> Result<String, AppError> {
 #[derive(Debug)]
 struct Prepared {
     agent_cmd: String,
+    /// Where the agent execs, matching the tmux pane's own cwd (see
+    /// `launch_dir`).
+    cwd: PathBuf,
+    /// `cwd`, relative to the project root (`None` for the root itself), for
+    /// recording on the issue via `Issue::record_session`.
+    session_dir: Option<String>,
     session_id: Option<String>,
     setup_ran: bool,
     replaced_lost_session: bool,
@@ -408,6 +425,7 @@ pub fn exec_launch(project_root: &Path, issue_id: &str) -> anyhow::Result<()> {
             project_root,
             &issue,
             prepared.session_id,
+            prepared.session_dir.clone(),
             prepared.setup_ran,
             prepared.replaced_lost_session,
         )?,
@@ -416,7 +434,7 @@ pub fn exec_launch(project_root: &Path, issue_id: &str) -> anyhow::Result<()> {
     let err = Command::new("/bin/sh")
         .arg("-c")
         .arg(&prepared.agent_cmd)
-        .current_dir(project_root)
+        .current_dir(&prepared.cwd)
         .exec();
     Err(anyhow::anyhow!(
         "failed to start {}: {err}",
@@ -430,10 +448,15 @@ fn prepare_launch(
     status_dir: &Path,
 ) -> Result<Prepared, AppError> {
     let session_name = issue.session_name(&config.project_name);
+    let session_dir = launch_dir(issue, config);
+    let cwd = match &session_dir {
+        Some(dir) => config.project_root.join(dir),
+        None => config.project_root.clone(),
+    };
 
     let setup = setup_prefix(issue, config);
     if let Some(prefix) = &setup {
-        run_setup(prefix, &config.project_root)?;
+        run_setup(prefix, &cwd)?;
     }
 
     // A stored session the agent no longer has (e.g. Claude cleaned up the
@@ -452,6 +475,7 @@ fn prepare_launch(
         issue,
         resume_session,
         config,
+        &cwd,
         &session_name,
         status_dir_str,
         prompt_path_str,
@@ -465,6 +489,8 @@ fn prepare_launch(
 
     Ok(Prepared {
         agent_cmd,
+        cwd,
+        session_dir,
         session_id,
         setup_ran: setup.is_some(),
         replaced_lost_session,
@@ -487,7 +513,7 @@ fn ensure_agent_installed(
 
 /// Run the setup script in the user's shell with the pane's stdio, so its
 /// output shows above the agent. A non-zero exit blocks the launch.
-fn run_setup(prefix: &str, project_root: &Path) -> Result<(), AppError> {
+fn run_setup(prefix: &str, cwd: &Path) -> Result<(), AppError> {
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|shell| !shell.is_empty())
@@ -495,7 +521,7 @@ fn run_setup(prefix: &str, project_root: &Path) -> Result<(), AppError> {
     let status = Command::new(shell)
         .arg("-c")
         .arg(prefix)
-        .current_dir(project_root)
+        .current_dir(cwd)
         .status()?;
     setup_result(status)
 }
@@ -509,6 +535,25 @@ fn setup_result(status: std::process::ExitStatus) -> Result<(), AppError> {
         None => "script was interrupted".to_string(),
     };
     Err(AppError::Setup(reason))
+}
+
+/// Where a launch starts the agent, relative to the project root (`None` for
+/// the root itself). A resume goes back to the directory its session started
+/// in. A fresh session starts in the card's worktree, or the main checkout
+/// without one: the project root is a bare container, so an agent started
+/// there misses the repo's own agent config (`.mcp.json`, `.claude/`).
+fn launch_dir(issue: &Issue, config: &AppConfig) -> Option<String> {
+    if issue.current_session_id().is_some() {
+        return issue.session_dirs.get(&issue.agent_kind).cloned();
+    }
+    if let Some(worktree) = &issue.worktree {
+        return Some(worktree.clone());
+    }
+    config
+        .main_dir()
+        .strip_prefix(&config.project_root)
+        .ok()
+        .map(|dir| dir.to_string_lossy().into_owned())
 }
 
 /// Kill an issue's tmux session and remove its transient hook/prompt files.
@@ -555,17 +600,17 @@ fn kill_tmux_session(_session_name: &str) -> Result<bool, AppError> {
 /// Build the setup-script prefix for a launch command, if applicable.
 /// Skipped once `setup_ran` is set — see `Issue::attach_worktree` for the
 /// once-per-worktree rule. The script itself is user-authored shell and is
-/// inserted verbatim; the worktree dir is escaped. The tmux session's cwd is
-/// the project root, so the relative worktree dir resolves correctly.
+/// inserted verbatim; the worktree path is escaped and absolute, since the
+/// launch cwd varies (see `launch_dir`).
 fn setup_prefix(issue: &Issue, config: &AppConfig) -> Option<String> {
     if issue.setup_ran {
         return None;
     }
-    let worktree = issue.worktree.as_deref()?;
+    let worktree = issue.worktree_path_in(&config.project_root)?;
     let script = config.setup_script.as_deref()?;
     Some(format!(
         "(cd '{}' && {})",
-        shell_escape_single_quotes(worktree),
+        shell_escape_single_quotes(&worktree.to_string_lossy()),
         script
     ))
 }
@@ -594,6 +639,7 @@ fn build_agent_cmd(
     issue: &Issue,
     resume_session: Option<&str>,
     config: &AppConfig,
+    launch_dir: &Path,
     session_name: &str,
     status_dir_str: &str,
     prompt_path_str: &str,
@@ -632,9 +678,9 @@ fn build_agent_cmd(
         );
         prompt.push_str("\n\nBork project: ");
         prompt.push_str(&config.project_name);
-        if let Some(worktree) = issue.worktree.as_deref() {
+        if let Some(worktree) = issue.worktree_path_in(&config.project_root) {
             prompt.push_str("\n\nAssigned worktree: ");
-            prompt.push_str(worktree);
+            prompt.push_str(&worktree.to_string_lossy());
             prompt.push_str(". Do all work for this issue inside that directory.");
         }
         let is_review = issue.primary_pr_import_source() == Some(PrImportSource::ReviewRequested);
@@ -690,7 +736,7 @@ fn build_agent_cmd(
 
     let ctx = LaunchContext {
         issue,
-        project_root: &config.project_root,
+        launch_dir,
         env_prefix: &env_prefix,
         trailing: &trailing,
         prompt_subst: &prompt_subst,
@@ -1555,6 +1601,7 @@ mod tests {
             issue,
             issue.current_session_id(),
             config,
+            &config.project_root,
             session,
             status_dir,
             TEST_PROMPT_PATH,
@@ -1600,7 +1647,7 @@ mod tests {
         let config = test_config();
         let (_, _, prompt) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
         let prompt = prompt.unwrap();
-        assert!(prompt.contains("Assigned worktree: bork-1-fix-bug"));
+        assert!(prompt.contains("Assigned worktree: /tmp/test/bork-1-fix-bug"));
         assert!(prompt.contains("inside that directory"));
     }
 
@@ -2056,6 +2103,35 @@ mod tests {
         assert!(prompt.is_none());
     }
 
+    // --- launch_dir ---
+
+    #[test]
+    fn a_fresh_session_starts_in_the_cards_checkout() {
+        let config = test_config();
+        let mut issue = test_issue(AgentKind::Claude, AgentMode::Build);
+        assert_eq!(launch_dir(&issue, &config).as_deref(), Some("main"));
+
+        issue.worktree = Some("bork-1-fix-bug".to_string());
+        assert_eq!(
+            launch_dir(&issue, &config).as_deref(),
+            Some("bork-1-fix-bug")
+        );
+    }
+
+    #[test]
+    fn a_resume_starts_where_its_session_started() {
+        let config = test_config();
+        let mut issue = test_issue(AgentKind::Claude, AgentMode::Build);
+        issue.worktree = Some("bork-1-fix-bug".to_string());
+
+        issue.record_session(AgentKind::Claude, "sid".into(), Some("main".into()));
+        assert_eq!(launch_dir(&issue, &config).as_deref(), Some("main"));
+
+        // Sessions recorded without a directory started in the project root.
+        issue.record_session(AgentKind::Claude, "sid".into(), None);
+        assert_eq!(launch_dir(&issue, &config), None);
+    }
+
     // --- setup_prefix ---
 
     #[test]
@@ -2066,7 +2142,7 @@ mod tests {
         config.setup_script = Some("npm install".to_string());
         assert_eq!(
             setup_prefix(&issue, &config),
-            Some("(cd 'bork-1-fix-bug' && npm install)".to_string())
+            Some("(cd '/tmp/test/bork-1-fix-bug' && npm install)".to_string())
         );
     }
 
@@ -2093,7 +2169,7 @@ mod tests {
         config.setup_script = Some("npm install".to_string());
         assert_eq!(
             setup_prefix(&issue, &config),
-            Some("(cd 'bork-1-fix-bug' && npm install)".to_string())
+            Some("(cd '/tmp/test/bork-1-fix-bug' && npm install)".to_string())
         );
     }
 
@@ -2136,7 +2212,7 @@ mod tests {
         config.setup_script = Some("bin/setup".to_string());
         assert_eq!(
             setup_prefix(&issue, &config),
-            Some("(cd 'it'\\''s-a-dir' && bin/setup)".to_string())
+            Some("(cd '/tmp/test/it'\\''s-a-dir' && bin/setup)".to_string())
         );
     }
 

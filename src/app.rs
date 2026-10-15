@@ -2288,6 +2288,7 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
         cloud: _,
         // Merged entry-wise, interleaved with the kind/orchestrator logic below.
         sessions: _,
+        session_dirs: _,
         // Legacy fields are zeroed on both sides by migrate_legacy_fields at
         // load (types.rs), so they never diverge and need no merge.
         session_id: _,
@@ -2351,6 +2352,10 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
                     Some(sid) => memory.sessions.insert(agent, sid.clone()),
                     None => memory.sessions.remove(&agent),
                 };
+                match file.session_dirs.get(&agent) {
+                    Some(dir) => memory.session_dirs.insert(agent, dir.clone()),
+                    None => memory.session_dirs.remove(&agent),
+                };
             }
         }
     }
@@ -2366,6 +2371,7 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
     // orchestrator's session) is newer than the file's empty map.
     if file_crossed_boundary && !memory_crossed_boundary && memory.kind == file.kind {
         memory.sessions = file.sessions.clone();
+        memory.session_dirs = file.session_dirs.clone();
     }
 
     // Kind and projects merge separately, so a kind change on one side and a
