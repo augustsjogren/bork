@@ -1042,6 +1042,33 @@ impl Project {
         });
         let removed = before - self.issues.len();
 
+        // A ReviewRequested tag is a one-time snapshot taken at import, and
+        // saved state can hold one on a card for your own PR. Left alone it
+        // sorts behind your real work forever, so retag it whenever the PR's
+        // known author is you.
+        let mut retagged = 0usize;
+        if let Some(me) = self.live.github_user.clone() {
+            let authors_by_number: HashMap<u32, &str> = self
+                .live
+                .pr_statuses_by_number
+                .iter()
+                .map(|(n, pr)| (*n, pr.author.as_str()))
+                .collect();
+            for issue in &mut self.issues {
+                if issue.primary_pr_import_source() != Some(PrImportSource::ReviewRequested) {
+                    continue;
+                }
+                for link in &mut issue.github_pr_links {
+                    if authors_by_number.get(&link.number) == Some(&me.as_str()) {
+                        link.import_source = Some(PrImportSource::Authored);
+                    }
+                }
+                if issue.primary_pr_import_source() == Some(PrImportSource::Authored) {
+                    retagged += 1;
+                }
+            }
+        }
+
         // Move review-requested issues to Done when no longer pending
         let now = unix_now();
         let mut completed = 0usize;
@@ -1188,7 +1215,7 @@ impl Project {
         let added = new_issues.len();
         self.issues.append(&mut new_issues);
 
-        if added == 0 && removed == 0 && completed == 0 {
+        if added == 0 && removed == 0 && completed == 0 && retagged == 0 {
             return (false, None);
         }
 
@@ -1213,6 +1240,9 @@ impl Project {
                 completed,
                 if completed == 1 { "" } else { "s" }
             ));
+        }
+        if parts.is_empty() {
+            return (true, None);
         }
         (true, Some(parts.join(", ")))
     }
@@ -3501,6 +3531,31 @@ mod tests {
         assert_eq!(
             app.project().issues[0].primary_pr_import_source(),
             Some(PrImportSource::ReviewRequested)
+        );
+    }
+
+    #[test]
+    fn sync_prs_reconciles_stale_review_tag_on_own_pr() {
+        let mut existing = test_issue("bork-1", Column::CodeReview);
+        existing.github_pr_links = vec![LinkedGithubPr {
+            number: 7,
+            imported: true,
+            import_source: Some(PrImportSource::ReviewRequested),
+        }];
+        let mut app = test_app(vec![existing]);
+        app.project_mut().live.github_user = Some("testuser".into());
+        app.project_mut()
+            .live
+            .pr_statuses_by_number
+            .insert(7, test_pr(7, "feature"));
+        app.project_mut().live.pr_poll_done = true;
+
+        let (changed, _) = app.project_mut().sync_prs_as_issues();
+
+        assert!(changed, "a retag must be persisted");
+        assert_eq!(
+            app.project().issues[0].primary_pr_import_source(),
+            Some(PrImportSource::Authored)
         );
     }
 
