@@ -79,10 +79,13 @@ fn mode(pr: Option<u32>) -> String {
 
 /// Falls back to the local review when tuicr can't load the PR.
 fn tuicr_cmd(pr: Option<u32>) -> String {
-    match pr {
+    let cmd = match pr {
         Some(number) => format!("tuicr pr {number} || tuicr"),
         None => "tuicr".to_string(),
-    }
+    };
+    // `export` (not a `VAR=1 cmd` prefix) so the var still applies to the
+    // `|| tuicr` fallback branch, not just the first command before `||`.
+    format!("export TUICR_FULLWIDTH=1; {cmd}")
 }
 
 pub fn open_stack(session: &str, cwd: &Path, numbers: &[u32], alive: bool) -> Result<(), AppError> {

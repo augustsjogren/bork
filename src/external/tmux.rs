@@ -554,7 +554,7 @@ pub fn open_popup(
     }
 
     let result = loop {
-        let showing_tuicr = active_window_name(session).as_deref() == Some(TUICR_WINDOW);
+        let showing_tuicr = showing_tuicr(session);
         let width = match capped_width {
             Some(cols) if !showing_tuicr => cols.to_string(),
             _ => "95%".to_string(),
@@ -630,11 +630,37 @@ fn install_reopen_hook(session: &str) {
 
 fn reopen_hook_command(session: &str) -> String {
     format!(
-        "if-shell -F '#{{!=:#{{==:#{{window_name}},{TUICR_WINDOW}}},#{{{POPUP_TUICR_OPTION}}}}}' \
-         \"set-option -t {session} {POPUP_REOPEN_OPTION} 1 ; detach-client -s {session}\""
+        "if-shell -F '#{{!=:{},#{{{POPUP_TUICR_OPTION}}}}}' \
+         \"set-option -t {session} {POPUP_REOPEN_OPTION} 1 ; detach-client -s {session}\"",
+        showing_tuicr_format()
     )
 }
 
+/// tmux format that expands to `1` when the current window shows tuicr: either
+/// bork's own tuicr window, or tuicr run by hand in any other window.
+fn showing_tuicr_format() -> String {
+    format!(
+        "#{{||:#{{==:#{{window_name}},{TUICR_WINDOW}}},#{{==:#{{pane_current_command}},tuicr}}}}"
+    )
+}
+
+fn showing_tuicr(session: &str) -> bool {
+    let Ok(output) = tmux()
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            &showing_tuicr_format(),
+        ])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1"
+}
+
+#[cfg(test)]
 pub(super) fn active_window_name(session: &str) -> Option<String> {
     let output = tmux()
         .args(["display-message", "-p", "-t", session, "#{window_name}"])
@@ -834,7 +860,7 @@ mod tests {
     fn reopen_hook_flags_and_detaches_on_tuicr_boundary() {
         assert_eq!(
             reopen_hook_command("demo-bork-1"),
-            "if-shell -F '#{!=:#{==:#{window_name},tuicr},#{@bork_popup_tuicr}}' \
+            "if-shell -F '#{!=:#{||:#{==:#{window_name},tuicr},#{==:#{pane_current_command},tuicr}},#{@bork_popup_tuicr}}' \
              \"set-option -t demo-bork-1 @bork_reopen 1 ; detach-client -s demo-bork-1\""
         );
     }
