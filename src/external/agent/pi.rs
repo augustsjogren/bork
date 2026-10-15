@@ -67,7 +67,7 @@ impl AgentProvider for Pi {
     }
 
     fn detect_session_id(&self, ctx: &DetectContext) -> Option<String> {
-        let dir = sessions_dir(ctx.project_root)?;
+        let dir = sessions_dir(ctx.launch_dir)?;
         detect_session_id(&dir, ctx.before)
     }
 

@@ -491,6 +491,12 @@ pub struct Issue {
     /// current `agent_kind` is ever used to resume.
     #[serde(default)]
     pub sessions: BTreeMap<AgentKind, String>,
+    /// Directory, relative to the project root, each agent's recorded session
+    /// started in. Agents scope resumable conversations to their launch
+    /// directory, so a resume has to start there again. A session with no
+    /// entry started in the project root itself.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_dirs: BTreeMap<AgentKind, String>,
     /// Timestamp of the last time this issue's worktree was pruned.
     /// Cleared when a new worktree is assigned.
     #[serde(default)]
@@ -591,6 +597,7 @@ impl Issue {
             worktree: None,
             done_at: None,
             sessions: BTreeMap::new(),
+            session_dirs: BTreeMap::new(),
             pruned_at: None,
             setup_ran: false,
             linear_links: Vec::new(),
@@ -701,6 +708,17 @@ impl Issue {
     /// check `forgetting_kills_session()` first and kill before forgetting.
     pub fn forget_session(&mut self, agent: AgentKind) {
         self.sessions.remove(&agent);
+        self.session_dirs.remove(&agent);
+    }
+
+    /// Record `agent`'s session together with the directory it started in
+    /// (`None` for the project root), so a later resume starts there too.
+    pub fn record_session(&mut self, agent: AgentKind, session_id: String, dir: Option<String>) {
+        self.sessions.insert(agent, session_id);
+        match dir {
+            Some(dir) => self.session_dirs.insert(agent, dir),
+            None => self.session_dirs.remove(&agent),
+        };
     }
 
     /// Store `session_id` as the current agent's session so its next launch
@@ -735,6 +753,7 @@ impl Issue {
         launched_kind: IssueKind,
         launched_agent: AgentKind,
         session_id: Option<String>,
+        session_dir: Option<String>,
         setup_ran: bool,
     ) {
         if setup_ran && self.kind == launched_kind {
@@ -743,7 +762,7 @@ impl Issue {
         if let Some(sid) =
             session_id.filter(|_| self.accepts_launch_result(launched_kind, launched_agent))
         {
-            self.sessions.insert(launched_agent, sid);
+            self.record_session(launched_agent, sid, session_dir);
         }
     }
 
@@ -841,6 +860,7 @@ impl Issue {
             return false;
         }
         self.sessions.clear();
+        self.session_dirs.clear();
         if kind == IssueKind::Orchestrator {
             self.worktree = None;
             self.github_pr_links.clear();

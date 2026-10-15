@@ -426,6 +426,7 @@ pub fn record_launch(
     project_root: &Path,
     launched: &Issue,
     session_id: Option<String>,
+    session_dir: Option<String>,
     setup_ran: bool,
     replaced_lost_session: bool,
 ) -> anyhow::Result<()> {
@@ -438,7 +439,13 @@ pub fn record_launch(
         && session_id.is_none()
         && issue.accepts_launch_result(launched.kind, launched.agent_kind)
         && issue.current_session_id() == launched.current_session_id();
-    issue.record_launch(launched.kind, launched.agent_kind, session_id, setup_ran);
+    issue.record_launch(
+        launched.kind,
+        launched.agent_kind,
+        session_id,
+        session_dir,
+        setup_ran,
+    );
     if forget_lost {
         issue.forget_session(launched.agent_kind);
     }
@@ -1606,7 +1613,7 @@ mod tests {
         let root = dir.path();
         let launched = issue_with_session(root, AgentKind::OpenCode, "ses_dead");
 
-        record_launch(root, &launched, None, false, true).unwrap();
+        record_launch(root, &launched, None, None, false, true).unwrap();
         assert_eq!(
             config::load_state(root).issues[0].current_session_id(),
             None
@@ -1625,7 +1632,7 @@ mod tests {
                 .insert(AgentKind::OpenCode, "ses_newer".into());
         });
 
-        record_launch(root, &launched, None, false, true).unwrap();
+        record_launch(root, &launched, None, None, false, true).unwrap();
         assert_eq!(
             config::load_state(root).issues[0].current_session_id(),
             Some("ses_newer")
@@ -1638,7 +1645,7 @@ mod tests {
         let root = dir.path();
         let launched = issue_with_session(root, AgentKind::OpenCode, "ses_live");
 
-        record_launch(root, &launched, None, false, false).unwrap();
+        record_launch(root, &launched, None, None, false, false).unwrap();
         assert_eq!(
             config::load_state(root).issues[0].current_session_id(),
             Some("ses_live")
@@ -1651,7 +1658,7 @@ mod tests {
         let root = dir.path();
         let launched = issue_with_session(root, AgentKind::Claude, "dead-uuid");
 
-        record_launch(root, &launched, Some("new-uuid".into()), false, true).unwrap();
+        record_launch(root, &launched, Some("new-uuid".into()), None, false, true).unwrap();
         assert_eq!(
             config::load_state(root).issues[0].current_session_id(),
             Some("new-uuid")
@@ -1667,7 +1674,7 @@ mod tests {
             issue.sessions.insert(AgentKind::Claude, "uuid-1".into());
         });
 
-        record_launch(root, &launched, None, false, true).unwrap();
+        record_launch(root, &launched, None, None, false, true).unwrap();
         let sessions = &config::load_state(root).issues[0].sessions;
         assert!(!sessions.contains_key(&AgentKind::OpenCode));
         assert_eq!(
@@ -1686,7 +1693,7 @@ mod tests {
         let launched = issue_without_session(root, AgentKind::OpenCode);
         assert!(!launched.setup_ran);
 
-        record_launch(root, &launched, None, true, false).unwrap();
+        record_launch(root, &launched, None, None, true, false).unwrap();
         let issue = &config::load_state(root).issues[0];
         assert!(issue.setup_ran);
         assert!(issue.sessions.is_empty());
@@ -1699,7 +1706,7 @@ mod tests {
         let launched = issue_without_session(root, AgentKind::OpenCode);
         edit_stored_issue(root, |issue| issue.kind = IssueKind::NonAgentic);
 
-        record_launch(root, &launched, Some("ses_new".into()), true, false).unwrap();
+        record_launch(root, &launched, Some("ses_new".into()), None, true, false).unwrap();
         let issue = &config::load_state(root).issues[0];
         assert!(!issue.setup_ran);
         assert!(issue.sessions.is_empty());
@@ -1712,7 +1719,7 @@ mod tests {
         let launched = issue_without_session(root, AgentKind::OpenCode);
         edit_stored_issue(root, |issue| issue.agent_kind = AgentKind::Claude);
 
-        record_launch(root, &launched, Some("ses_new".into()), true, false).unwrap();
+        record_launch(root, &launched, Some("ses_new".into()), None, true, false).unwrap();
         let issue = &config::load_state(root).issues[0];
         assert!(issue.setup_ran);
         assert!(issue.sessions.is_empty());
@@ -1725,7 +1732,7 @@ mod tests {
         let launched = issue_with_session(root, AgentKind::OpenCode, "ses_dead");
         edit_stored_issue(root, |issue| issue.agent_kind = AgentKind::Claude);
 
-        record_launch(root, &launched, None, false, true).unwrap();
+        record_launch(root, &launched, None, None, false, true).unwrap();
         assert_eq!(
             config::load_state(root).issues[0]
                 .sessions
