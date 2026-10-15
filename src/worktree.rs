@@ -255,16 +255,25 @@ pub fn remove_worktree_in(
         args.push("--force");
     }
 
-    let status = crate::external::git_command()
+    let output = crate::external::git_command()
         .args(&args)
         .current_dir(&main_dir)
-        .status()
+        .output()
         .context("Failed to run git worktree remove")?;
 
-    if !status.success() {
-        bail!(
-            "git worktree remove failed. The worktree may have uncommitted changes; re-run with --force to discard them."
-        );
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if stderr.is_empty() {
+            bail!(
+                "git worktree remove failed. The worktree may have uncommitted changes; re-run with --force to discard them."
+            );
+        }
+        bail!("{stderr}");
     }
 
     Ok(())
@@ -634,8 +643,13 @@ mod tests {
         create_worktree_in(&cfg, "bork-1", Some("fix-bug"), None, None).unwrap();
         fs::write(project.join("bork-1-fix-bug/dirty.txt"), "uncommitted").unwrap();
 
-        let without_force = remove_worktree_in(&cfg, "bork-1-fix-bug", false);
-        assert!(without_force.is_err());
+        let message = remove_worktree_in(&cfg, "bork-1-fix-bug", false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.starts_with("fatal: ") && message.contains("untracked files"),
+            "expected git's diagnostic first: {message}"
+        );
         assert!(project.join("bork-1-fix-bug").exists());
 
         let with_force = remove_worktree_in(&cfg, "bork-1-fix-bug", true);
