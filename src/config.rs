@@ -144,7 +144,7 @@ pub const DEFAULT_PROMPT_FALLBACK: &str = "The source code is in main/. Use `bor
 
 pub const DEFAULT_STACK_REVIEW_PROMPT: &str = "Review this PR stack in dependency order. Read all members for context, focusing your review on the PRs where your review is requested. Check each PR against its own base, and check for bugs introduced by interactions between stack members. Report actionable findings against the relevant PR, with severity and file/line references. Do not submit reviews or modify code unless explicitly asked.";
 
-pub const DEFAULT_REVIEW_PROMPT: &str = "Use the tuicr-review skill to review this PR and leave draft comments in tuicr. Read the diff, check for correctness, regressions, missing tests, and edge cases. Categorize call outs in High, Medium, Low importance. Add file name, linenumber to each call out.";
+pub const DEFAULT_REVIEW_PROMPT: &str = "Use the tuicr-review skill to review this PR and leave draft comments in tuicr. Read the diff, check for correctness, regressions, missing tests, and edge cases. Use any code review skills that might be installed. Categorize call outs in High, Medium, Low importance. Add file name, linenumber to each call out.";
 
 pub const DEFAULT_ORCHESTRATOR_PROMPT: &str = "You are an orchestrator agent: you coordinate work across multiple bork issues instead of writing code yourself. \
 Maintain a planning file (path given below) that holds the overarching goal, a task breakdown, and a status log; keep it updated as work progresses. \
