@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::{self, AppConfig};
 use crate::error::AppError;
 use crate::external::process::{self, BORK_ISSUE_ID_VAR, BORK_SESSION_VAR};
@@ -224,6 +226,15 @@ pub struct LaunchOutcome {
 ///   1. The agent with issue context
 ///   2. A bare terminal
 ///
+/// Per-launch tweaks to [`launch_session`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct LaunchOptions {
+    /// Start the agent without the worktree's `setup_script`, and without
+    /// recording it as run, so the next ordinary launch still runs it. For
+    /// sessions that only read code, like reviews.
+    pub skip_setup: bool,
+}
+
 /// The pane only gets a short `bork issue launch <id>` line; that command
 /// (`exec_launch`) runs setup, builds the agent command and execs it. The
 /// issue is staged for it in a handoff dir because this copy may hold edits
@@ -231,6 +242,14 @@ pub struct LaunchOutcome {
 /// so bulk launches, which run one after another, can't pick up each
 /// other's ids.
 pub fn launch_session(issue: &Issue, config: &AppConfig) -> Result<LaunchOutcome, AppError> {
+    launch_session_with(issue, config, LaunchOptions::default())
+}
+
+pub fn launch_session_with(
+    issue: &Issue,
+    config: &AppConfig,
+    options: LaunchOptions,
+) -> Result<LaunchOutcome, AppError> {
     let session_name = issue.session_name(&config.project_name);
     let session_dir = launch_dir(issue, config);
     let cwd = match &session_dir {
@@ -249,7 +268,7 @@ pub fn launch_session(issue: &Issue, config: &AppConfig) -> Result<LaunchOutcome
     }
 
     let status_dir = config::agent_status_dir(&config.project_root);
-    let handoff = handoff::Handoff::prepare(&status_dir, issue)?;
+    let handoff = handoff::Handoff::prepare(&status_dir, issue, options)?;
     let launch_cmd = launch_command(&issue.id)?;
 
     // Snapshot resumes too: the launch command starts fresh when the stored
@@ -386,8 +405,8 @@ pub fn exec_launch(project_root: &Path, issue_id: &str) -> anyhow::Result<()> {
     let config = config::load_config_from(project_root);
     let status_dir = config::agent_status_dir(project_root);
 
-    let (claim, issue) = match handoff::Claim::take(&status_dir, issue_id) {
-        Some((claim, issue)) => (Some(claim), issue),
+    let (claim, issue, options) = match handoff::Claim::take(&status_dir, issue_id) {
+        Some((claim, issue, options)) => (Some(claim), issue, options),
         None => {
             let state = config::load_state(project_root);
             let issue = state
@@ -395,14 +414,14 @@ pub fn exec_launch(project_root: &Path, issue_id: &str) -> anyhow::Result<()> {
                 .into_iter()
                 .find(|i| i.id.eq_ignore_ascii_case(issue_id))
                 .ok_or_else(|| anyhow::anyhow!("Issue '{}' not found", issue_id))?;
-            (None, issue)
+            (None, issue, LaunchOptions::default())
         }
     };
 
     // The agent runs through `/bin/sh -c`, so a missing binary would only
     // surface as the shell's "command not found" after reporting success.
     let prepared = match ensure_agent_installed(&issue, crate::agent_config::command_exists)
-        .and_then(|()| prepare_launch(&issue, &config, &status_dir))
+        .and_then(|()| prepare_launch(&issue, &config, &status_dir, options))
     {
         Ok(prepared) => prepared,
         Err(e) => {
@@ -446,6 +465,7 @@ fn prepare_launch(
     issue: &Issue,
     config: &AppConfig,
     status_dir: &Path,
+    options: LaunchOptions,
 ) -> Result<Prepared, AppError> {
     let session_name = issue.session_name(&config.project_name);
     let session_dir = launch_dir(issue, config);
@@ -454,7 +474,7 @@ fn prepare_launch(
         None => config.project_root.clone(),
     };
 
-    let setup = setup_prefix(issue, config);
+    let setup = setup_prefix(issue, config).filter(|_| !options.skip_setup);
     if let Some(prefix) = &setup {
         run_setup(prefix, &cwd)?;
     }

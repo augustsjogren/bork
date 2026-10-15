@@ -245,6 +245,16 @@ impl LiveState {
     }
 }
 
+/// The prompt an agent reviewing `pr` starts with: the configured review
+/// instructions, or bork's tuicr-review default.
+pub fn review_prompt(config: &AppConfig, pr: &PrStatus) -> String {
+    let body = config
+        .review_prompt
+        .as_deref()
+        .unwrap_or(DEFAULT_REVIEW_PROMPT);
+    format!("Review this PR: #{} ({}). {}", pr.number, pr.url, body)
+}
+
 pub struct Project {
     /// Canonicalized project root, computed once at construction. `id()` is
     /// called in per-frame render paths, so it must not hit the filesystem.
@@ -1667,17 +1677,7 @@ impl Project {
     fn imported_pr_issue(&self, id: String, pr: &PrStatus, source: PrImportSource) -> Issue {
         let prompt = match source {
             PrImportSource::Authored => None,
-            PrImportSource::ReviewRequested => {
-                let body = self
-                    .config
-                    .review_prompt
-                    .as_deref()
-                    .unwrap_or(DEFAULT_REVIEW_PROMPT);
-                Some(format!(
-                    "Review this PR: #{} ({}). {}",
-                    pr.number, pr.url, body
-                ))
-            }
+            PrImportSource::ReviewRequested => Some(review_prompt(&self.config, pr)),
         };
         let agent_kind = self.default_agent();
         Issue {

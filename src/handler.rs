@@ -13,6 +13,7 @@ use crate::global_config::ReloadResult;
 use crate::input::Action;
 use crate::types::{
     AgentKind, Column, Issue, IssueDraft, IssueKind, LinkedGithubPr, LinkedLinear, PrImportSource,
+    PrState,
 };
 use crate::undo::{self, Change, ColumnSnapshot, UndoEntry, UNDO_WINDOW};
 use crate::worktree::{ForceRequired, Removal};
@@ -989,6 +990,10 @@ fn handle_normal(
                 }
                 app.set_message("Session already running");
                 return PostAction::None;
+            }
+
+            if is_fresh_review(&issue) {
+                return start_review_session(app, ctx, ch, issue, open_popup);
             }
 
             let config = app.context_project(ctx).config.clone();
@@ -2970,8 +2975,15 @@ fn handle_confirm(
 
                         let tx = action_tx.clone();
                         thread::spawn(move || {
-                            let outcome =
-                                crate::prune::execute_removals(&config.project_root, &[name], &[]);
+                            let outcome = crate::prune::execute_removals(
+                                &config.project_root,
+                                &[crate::prune::PruneTarget {
+                                    worktree: name,
+                                    issue_id: Some(issue_id),
+                                }],
+                                &[],
+                                false,
+                            );
                             let (message, message_kind) = format_prune_result(&outcome, "Detached");
                             let _ = tx.send(ActionResult {
                                 message,
@@ -3254,8 +3266,136 @@ pub fn delete_issue_from_app(app: &mut App, project_id: &ProjectId, issue_id: &s
     true
 }
 
+/// Whether a fresh launch of `issue` reviews someone else's code: an imported
+/// review request or stack review that has not run yet.
+fn is_fresh_review(issue: &Issue) -> bool {
+    issue.is_review_import() && issue.current_session_id().is_none()
+}
+
+/// The branch a review card's worktree checks out: its PR's head, or the top
+/// open member of its stack, which carries every member's changes.
+fn review_branch(project: &Project, issue: &Issue) -> Option<String> {
+    let Some(number) = issue
+        .github_stack
+        .filter(|_| issue.stack_review_import.is_some())
+    else {
+        return branch_for_issue(project, issue);
+    };
+    let stack = project
+        .live
+        .github_stacks
+        .iter()
+        .find(|stack| stack.number == number)?;
+    stack
+        .pull_requests
+        .iter()
+        .rev()
+        .find(|pr| pr.state == PrState::Open)
+        .map(|pr| pr.head_branch.clone())
+}
+
+/// Launch a review card's agent in a worktree on the reviewed branch, without
+/// the setup script. Pressing `R` afterwards opens tuicr in the same worktree,
+/// where the agent's draft comments land.
+fn start_review_session(
+    app: &mut App,
+    ctx: &ActionContext,
+    ch: &ActionChannels<'_>,
+    issue: Issue,
+    open_popup: bool,
+) -> PostAction {
+    let project = app.context_project(ctx);
+    let branch = review_branch(project, &issue);
+    if issue.worktree.is_none() && branch.is_none() {
+        app.set_warning("The PR's branch hasn't loaded yet, try again in a moment");
+        return PostAction::None;
+    }
+    let config = project.config.clone();
+    let project_id = ctx.project_id.clone();
+    let issue_id = issue.id.clone();
+    let popup_title = issue.popup_title();
+
+    if !app.launches_in_flight.insert(issue_id.clone()) {
+        app.set_message("Session launch already in progress");
+        return PostAction::None;
+    }
+    app.begin_busy();
+    app.set_message(format!("Starting a review of {issue_id}..."));
+
+    let tx = ch.action_tx.clone();
+    let panic_issue_id = issue_id.clone();
+    thread::spawn(move || {
+        // A panic must still deliver a result, or the in-flight guard leaks.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            provision_and_launch_review(issue, config, branch, project_id)
+        }))
+        .unwrap_or_else(|_| ActionResult {
+            message: "Launch failed unexpectedly (internal panic)".to_string(),
+            message_kind: MessageKind::Error,
+            launched_issue_id: Some(panic_issue_id),
+            ..Default::default()
+        });
+        let _ = tx.send(result);
+    });
+
+    PostAction::Launch {
+        launches: vec![(issue_id, popup_title)],
+        open_popup,
+    }
+}
+
+/// Background half of `start_review_session`: give the card the same cheap,
+/// untargeted worktree `R` would, then launch the agent there without the
+/// setup script.
+fn provision_and_launch_review(
+    mut issue: Issue,
+    config: AppConfig,
+    branch: Option<String>,
+    project_id: ProjectId,
+) -> ActionResult {
+    let mut worktree_attached = None;
+    if issue.worktree.is_none() {
+        let slug = crate::worktree::slugify_title(&issue.title);
+        let created = crate::worktree::create_worktree_with_branch(
+            &config,
+            &issue.id,
+            Some(&slug),
+            None,
+            None,
+            branch.as_deref(),
+        );
+        let created = match created {
+            Ok(created) => created,
+            Err(e) => {
+                return ActionResult {
+                    message: format!("Failed to provision a worktree for review: {e:#}"),
+                    message_kind: MessageKind::Error,
+                    launched_issue_id: Some(issue.id),
+                    ..Default::default()
+                };
+            }
+        };
+        issue.attach_worktree(created.worktree_dir.clone());
+        worktree_attached = Some((project_id, issue.id.clone(), created.worktree_dir));
+    }
+
+    let options = agent::LaunchOptions { skip_setup: true };
+    ActionResult {
+        worktree_attached,
+        ..launch_and_report_with(issue, config, options)
+    }
+}
+
 fn launch_and_report(issue: Issue, config: AppConfig) -> ActionResult {
-    match agent::launch_session(&issue, &config) {
+    launch_and_report_with(issue, config, agent::LaunchOptions::default())
+}
+
+fn launch_and_report_with(
+    issue: Issue,
+    config: AppConfig,
+    options: agent::LaunchOptions,
+) -> ActionResult {
+    match agent::launch_session_with(&issue, &config, options) {
         Ok(outcome) => launch_result(issue, outcome),
         Err(e) => ActionResult {
             message: format!("Failed to launch: {e}"),
@@ -6377,6 +6517,95 @@ mod tests {
             "expected a provisioning message, got: {msg}"
         );
         assert_eq!(app.busy_count, 1);
+    }
+
+    fn review_requested_card(app: &mut App) {
+        app.project_mut().issues.truncate(1);
+        let issue = &mut app.project_mut().issues[0];
+        issue.github_pr_links.push(LinkedGithubPr {
+            number: 7,
+            imported: true,
+            import_source: Some(PrImportSource::ReviewRequested),
+        });
+        issue.prompt = Some("Review this PR: #7".to_string());
+    }
+
+    #[test]
+    fn starting_a_review_before_its_pr_loads_warns_instead_of_launching_in_main() {
+        let mut app = app_with_issues();
+        review_requested_card(&mut app);
+
+        let post = act(&mut app, Action::OpenSession);
+
+        assert!(matches!(post, PostAction::None));
+        assert_eq!(
+            app.message,
+            Some((
+                "The PR's branch hasn't loaded yet, try again in a moment".to_string(),
+                MessageKind::Warning
+            ))
+        );
+        assert!(app.launches_in_flight.is_empty());
+    }
+
+    #[test]
+    fn starting_a_review_provisions_a_worktree_on_the_prs_branch() {
+        let mut app = app_with_issues();
+        review_requested_card(&mut app);
+        app.project_mut()
+            .live
+            .pr_statuses_by_number
+            .insert(7, test_pr_status(7, PrState::Open));
+
+        let post = act(&mut app, Action::OpenSession);
+
+        assert!(matches!(
+            post,
+            PostAction::Launch {
+                open_popup: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            app.message.as_ref().unwrap().0,
+            "Starting a review of bork-1..."
+        );
+        assert_eq!(app.busy_count, 1);
+    }
+
+    #[test]
+    fn a_review_card_that_already_ran_resumes_where_it_was() {
+        let mut issue = test_issue("bork-1", Column::CodeReview);
+        issue.github_pr_links.push(LinkedGithubPr {
+            number: 7,
+            imported: true,
+            import_source: Some(PrImportSource::ReviewRequested),
+        });
+        assert!(is_fresh_review(&issue));
+
+        issue
+            .sessions
+            .insert(issue.agent_kind, "earlier".to_string());
+
+        assert!(!is_fresh_review(&issue));
+    }
+
+    #[test]
+    fn a_stack_review_checks_out_the_top_open_member() {
+        let mut app = stack_test_app(3);
+        app.project_mut().live.github_stacks[0].pull_requests[2].state = PrState::Merged;
+        let mut issue = test_issue("bork-1", Column::CodeReview);
+        issue.github_stack = Some(42);
+        issue.stack_review_import = Some(crate::types::StackReviewImport {
+            stack_number: 42,
+            requested_prs: vec![1],
+            generated_prompt: String::new(),
+        });
+
+        assert_eq!(
+            review_branch(app.project(), &issue),
+            Some("branch-2".to_string())
+        );
     }
 
     #[test]
