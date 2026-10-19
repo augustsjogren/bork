@@ -349,20 +349,86 @@ pub fn create_window(session: &str, window_name: &str, cwd: &Path) -> Result<(),
     Ok(())
 }
 
-/// Names of `session`'s windows, in index order. Empty when the session is
-/// missing.
-pub fn window_names(session: &str) -> Vec<String> {
+/// Ids (`@3`) of `session`'s windows named `name`, in index order. Targeting
+/// by id keeps working when two windows share the name.
+pub fn window_ids(session: &str, name: &str) -> Result<Vec<String>, AppError> {
     let output = tmux()
-        .args(["list-windows", "-t", session, "-F", "#{window_name}"])
-        .output();
+        .args([
+            "list-windows",
+            "-t",
+            session,
+            "-F",
+            "#{window_id} #{window_name}",
+        ])
+        .output()
+        .map_err(|e| AppError::Tmux(format!("failed to list windows of '{session}': {e}")))?;
 
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::Tmux(format!(
+            "tmux list-windows failed for '{session}': {}",
+            stderr.trim()
+        )));
     }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(_, window_name)| *window_name == name)
+        .map(|(id, _)| id.to_string())
+        .collect())
+}
+
+/// A window's user option (`@name`), or `None` when unset.
+pub fn window_option(target: &str, option: &str) -> Option<String> {
+    let output = tmux()
+        .args(["show-options", "-w", "-q", "-v", "-t", target, option])
+        .output()
+        .ok()?;
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || value.is_empty() {
+        return None;
+    }
+    Some(value)
+}
+
+pub fn set_window_option(target: &str, option: &str, value: &str) -> Result<(), AppError> {
+    let status = tmux()
+        .args(["set-option", "-w", "-t", target, option, value])
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| AppError::Tmux(format!("failed to set {option} on '{target}': {e}")))?;
+
+    if !status.success() {
+        return Err(AppError::Tmux(format!(
+            "tmux set-option {option} failed for '{target}'"
+        )));
+    }
+    Ok(())
+}
+
+/// Kill whatever runs in `target`'s pane and start a fresh shell in `cwd`.
+pub fn respawn_pane(target: &str, cwd: &Path) -> Result<(), AppError> {
+    let status = tmux()
+        .args([
+            "respawn-pane",
+            "-k",
+            "-t",
+            target,
+            "-c",
+            cwd.to_str().unwrap_or("."),
+        ])
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| AppError::Tmux(format!("failed to respawn '{target}': {e}")))?;
+
+    if !status.success() {
+        return Err(AppError::Tmux(format!(
+            "tmux respawn-pane failed for '{target}'"
+        )));
+    }
+    Ok(())
 }
 
 /// The foreground command of `target`'s active pane, e.g. `zsh` or `tuicr`.
@@ -504,6 +570,37 @@ pub(super) fn active_window_name(session: &str) -> Option<String> {
     }
 
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+pub(super) fn set_session_option(session: &str, option: &str, value: &str) {
+    let _ = tmux()
+        .args(["set-option", "-t", session, option, value])
+        .status();
+}
+
+#[cfg(test)]
+pub(super) fn window_names(session: &str) -> Vec<String> {
+    let output = tmux()
+        .args(["list-windows", "-t", session, "-F", "#{window_name}"])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn capture_pane(target: &str) -> String {
+    tmux()
+        .args(["capture-pane", "-p", "-t", target])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -14,25 +14,42 @@ pub fn check_available() -> bool {
 }
 
 const TUICR_WINDOW: &str = "tuicr";
+const MODE_OPTION: &str = "@bork-tuicr-mode";
 
-/// Show tuicr in `session`, reusing its tuicr window when there is one: tmux
-/// cannot resolve `session:tuicr` once two windows share the name. tuicr is
-/// started again only when it is no longer running there.
+const SHELLS: &[&str] = &[
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu",
+];
+
+/// Show tuicr in `session`, reusing its tuicr window when there is one.
 pub fn open_in_session(session: &str, cwd: &Path, pr_mode: bool) -> Result<(), AppError> {
-    let target = format!("{session}:{TUICR_WINDOW}");
-
-    if !tmux::window_names(session)
-        .iter()
-        .any(|name| name == TUICR_WINDOW)
-    {
+    let Some(window) = tmux::window_ids(session, TUICR_WINDOW)?.into_iter().next() else {
         tmux::create_window(session, TUICR_WINDOW, cwd)?;
-    }
+        start_tuicr(&format!("{session}:{TUICR_WINDOW}"), pr_mode)?;
+        return tmux::select_window(session, TUICR_WINDOW);
+    };
 
-    if tmux::pane_current_command(&target).as_deref() != Some("tuicr") {
-        tmux::send_keys(&target, &tuicr_cmd(pr_mode))?;
-    }
+    resume_tuicr(&format!("{session}:{window}"), cwd, pr_mode)?;
+    tmux::select_window(session, &window)
+}
 
-    tmux::select_window(session, TUICR_WINDOW)
+/// tuicr is started only at a shell prompt, and restarted when it runs in
+/// the other mode. Any other program in the window is left alone rather than
+/// typed into.
+fn resume_tuicr(target: &str, cwd: &Path, pr_mode: bool) -> Result<(), AppError> {
+    let wanted = mode(pr_mode);
+    match tmux::pane_current_command(target).as_deref() {
+        Some("tuicr") if tmux::window_option(target, MODE_OPTION).as_deref() == Some(wanted) => {
+            Ok(())
+        }
+        Some("tuicr") => {
+            tmux::respawn_pane(target, cwd)?;
+            start_tuicr(target, pr_mode)
+        }
+        Some(command) if SHELLS.contains(&command.trim_start_matches('-')) => {
+            start_tuicr(target, pr_mode)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Create a fresh tmux session whose first window runs tuicr.
@@ -40,9 +57,22 @@ pub fn open_in_session(session: &str, cwd: &Path, pr_mode: bool) -> Result<(), A
 pub fn launch_review_session(session: &str, cwd: &Path, pr_mode: bool) -> Result<(), AppError> {
     tmux::create_session(session, cwd)?;
     tmux::rename_window(session, TUICR_WINDOW)?;
-    tmux::send_keys(session, &tuicr_cmd(pr_mode))?;
+    start_tuicr(session, pr_mode)?;
     tmux::create_window(session, "terminal", cwd)?;
     Ok(())
+}
+
+fn start_tuicr(target: &str, pr_mode: bool) -> Result<(), AppError> {
+    tmux::set_window_option(target, MODE_OPTION, mode(pr_mode))?;
+    tmux::send_keys(target, &tuicr_cmd(pr_mode))
+}
+
+fn mode(pr_mode: bool) -> &'static str {
+    if pr_mode {
+        "pr"
+    } else {
+        "local"
+    }
 }
 
 fn tuicr_cmd(pr_mode: bool) -> String {
@@ -144,6 +174,174 @@ mod tests {
         first.unwrap();
         second.unwrap();
         assert_eq!(windows, 1);
+    }
+
+    /// A session whose new windows run a plain `/bin/sh` with a fake `tuicr`
+    /// on `PATH`. The fake is compiled rather than scripted because macOS
+    /// reports a script by its interpreter's name; it logs each launch's
+    /// arguments and stays in the foreground as `tuicr`, like the real one.
+    struct FakeTuicrSession {
+        name: String,
+        log: std::path::PathBuf,
+        _dir: tempfile::TempDir,
+    }
+
+    const FAKE_TUICR: &str = r#"
+use std::io::Write;
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let log = std::env::var("FAKE_TUICR_LOG").unwrap();
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
+    writeln!(file, "{}", args.join(" ")).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(600));
+}
+"#;
+
+    impl FakeTuicrSession {
+        fn start(label: &str) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let source = dir.path().join("fake_tuicr.rs");
+            std::fs::write(&source, FAKE_TUICR).unwrap();
+            let compiled = Command::new("rustc")
+                .arg("-o")
+                .arg(bin.join("tuicr"))
+                .arg(&source)
+                .status()
+                .unwrap();
+            assert!(compiled.success());
+
+            let log = dir.path().join("launches");
+            let name = format!("bork-tuicr-{label}-{}", std::process::id());
+            tmux::create_session(&name, dir.path()).unwrap();
+            // A login shell would rebuild PATH from the system profile.
+            tmux::set_session_option(
+                &name,
+                "default-command",
+                &format!(
+                    "PATH='{}:/usr/bin:/bin' FAKE_TUICR_LOG='{}' exec /bin/sh",
+                    bin.display(),
+                    log.display()
+                ),
+            );
+            Self {
+                name,
+                log,
+                _dir: dir,
+            }
+        }
+
+        fn cwd(&self) -> &Path {
+            self._dir.path()
+        }
+
+        fn launches(&self) -> Vec<String> {
+            std::fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn wait_for_launches(&self, count: usize) {
+            wait_until(|| self.launches().len() >= count);
+        }
+    }
+
+    impl Drop for FakeTuicrSession {
+        fn drop(&mut self) {
+            let _ = tmux::kill_session(&self.name);
+        }
+    }
+
+    fn wait_until(condition: impl Fn() -> bool) {
+        for _ in 0..50 {
+            if condition() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    fn tuicr_is_running(session: &str) -> bool {
+        tmux::pane_current_command(&format!("{session}:tuicr")).as_deref() == Some("tuicr")
+    }
+
+    #[test]
+    fn reopening_a_running_review_does_not_restart_tuicr() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let session = FakeTuicrSession::start("running");
+
+        open_in_session(&session.name, session.cwd(), false).unwrap();
+        wait_until(|| tuicr_is_running(&session.name));
+        open_in_session(&session.name, session.cwd(), false).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        assert_eq!(session.launches(), [""]);
+    }
+
+    #[test]
+    fn reopening_a_review_in_the_other_mode_restarts_tuicr() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let session = FakeTuicrSession::start("mode");
+
+        open_in_session(&session.name, session.cwd(), false).unwrap();
+        wait_until(|| tuicr_is_running(&session.name));
+        open_in_session(&session.name, session.cwd(), true).unwrap();
+        session.wait_for_launches(2);
+
+        assert_eq!(session.launches(), ["", "--pr"]);
+        assert_eq!(tuicr_windows(&session.name), 1);
+    }
+
+    #[test]
+    fn a_program_running_in_the_tuicr_window_is_not_typed_into() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let session = FakeTuicrSession::start("foreign");
+        tmux::create_window(&session.name, "tuicr", session.cwd()).unwrap();
+        let target = format!("{}:tuicr", session.name);
+        tmux::send_keys(&target, "cat").unwrap();
+        wait_until(|| tmux::pane_current_command(&target).as_deref() == Some("cat"));
+
+        open_in_session(&session.name, session.cwd(), false).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        assert_eq!(tmux::pane_current_command(&target).as_deref(), Some("cat"));
+        assert!(!tmux::capture_pane(&target).contains("tuicr"));
+        assert_eq!(
+            tmux::active_window_name(&session.name).as_deref(),
+            Some("tuicr")
+        );
+    }
+
+    #[test]
+    fn a_session_left_with_two_tuicr_windows_still_opens() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let session = FakeTuicrSession::start("duplicates");
+        tmux::create_window(&session.name, "tuicr", session.cwd()).unwrap();
+        tmux::create_window(&session.name, "tuicr", session.cwd()).unwrap();
+
+        open_in_session(&session.name, session.cwd(), false).unwrap();
+        session.wait_for_launches(1);
+
+        assert_eq!(session.launches(), [""]);
+        assert_eq!(
+            tmux::active_window_name(&session.name).as_deref(),
+            Some("tuicr")
+        );
     }
 
     #[test]
