@@ -1700,6 +1700,8 @@ pub enum ConfirmAction {
     ArchiveIssue {
         issue_ids: Vec<String>,
         project_id: ProjectId,
+        /// Discard uncommitted changes and push past a failing teardown.
+        force: bool,
     },
 }
 

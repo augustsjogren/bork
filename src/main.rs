@@ -2367,6 +2367,7 @@ fn run_tui() -> anyhow::Result<()> {
             for (project_id, issue_id) in result.issues_to_archive {
                 handler::archive_issue_in_app(&mut app, &project_id, &issue_id);
             }
+            handler::offer_force_archive(&mut app, result.force_archive_offers);
 
             if let Some(launch_id) = result.launched_issue_id {
                 // A kill during the detection window (x kill, done-TTL)

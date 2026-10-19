@@ -206,6 +206,16 @@ pub fn create_worktree_in(
     })
 }
 
+/// A removal that `--force` would push through: the teardown script failed,
+/// or git refused because the worktree holds uncommitted changes.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ForceRequired {
+    #[error("teardown_script failed (exit {0}). Fix it or re-run with --force to remove anyway.")]
+    TeardownFailed(i32),
+    #[error("{0}")]
+    Uncommitted(String),
+}
+
 /// Remove an issue worktree: run the configured teardown script inside it,
 /// then `git worktree remove` it from main/.
 ///
@@ -242,10 +252,7 @@ pub fn remove_worktree_in(
             .status()
             .context("Failed to run teardown_script")?;
         if !status.success() && !force {
-            bail!(
-                "teardown_script failed (exit {}). Fix it or re-run with --force to remove anyway.",
-                status.code().unwrap_or(-1)
-            );
+            return Err(ForceRequired::TeardownFailed(status.code().unwrap_or(-1)).into());
         }
     }
 
@@ -272,6 +279,11 @@ pub fn remove_worktree_in(
             bail!(
                 "git worktree remove failed. The worktree may have uncommitted changes; re-run with --force to discard them."
             );
+        }
+        // git suggests a single --force only for modified or untracked files;
+        // a locked worktree asks for -f -f, which a force archive does not pass.
+        if !force && stderr.contains("use --force") {
+            return Err(ForceRequired::Uncommitted(stderr).into());
         }
         bail!("{stderr}");
     }
@@ -611,9 +623,12 @@ mod tests {
 
         create_worktree_in(&cfg, "bork-1", Some("fix-bug"), None, None).unwrap();
 
-        let result = remove_worktree_in(&cfg, "bork-1-fix-bug", false);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("teardown_script"));
+        let err = remove_worktree_in(&cfg, "bork-1-fix-bug", false).unwrap_err();
+        assert!(err.to_string().contains("teardown_script"));
+        assert!(matches!(
+            err.downcast_ref::<ForceRequired>(),
+            Some(ForceRequired::TeardownFailed(1))
+        ));
         assert!(
             project.join("bork-1-fix-bug").exists(),
             "worktree should survive a failed teardown"
@@ -643,9 +658,12 @@ mod tests {
         create_worktree_in(&cfg, "bork-1", Some("fix-bug"), None, None).unwrap();
         fs::write(project.join("bork-1-fix-bug/dirty.txt"), "uncommitted").unwrap();
 
-        let message = remove_worktree_in(&cfg, "bork-1-fix-bug", false)
-            .unwrap_err()
-            .to_string();
+        let err = remove_worktree_in(&cfg, "bork-1-fix-bug", false).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<ForceRequired>(),
+            Some(ForceRequired::Uncommitted(_))
+        ));
+        let message = err.to_string();
         assert!(
             message.starts_with("fatal: ") && message.contains("untracked files"),
             "expected git's diagnostic first: {message}"
@@ -655,6 +673,22 @@ mod tests {
         let with_force = remove_worktree_in(&cfg, "bork-1-fix-bug", true);
         assert!(with_force.is_ok(), "force failed: {:?}", with_force.err());
         assert!(!project.join("bork-1-fix-bug").exists());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_remove_worktree_other_git_failures_do_not_offer_force() {
+        let (tmp, project, cfg) = setup_test_project();
+
+        create_worktree_in(&cfg, "bork-1", Some("fix-bug"), None, None).unwrap();
+        git_in(
+            &project.join("main"),
+            &["worktree", "lock", "../bork-1-fix-bug"],
+        );
+
+        let err = remove_worktree_in(&cfg, "bork-1-fix-bug", false).unwrap_err();
+        assert!(err.downcast_ref::<ForceRequired>().is_none(), "{err}");
 
         let _ = fs::remove_dir_all(&tmp);
     }
