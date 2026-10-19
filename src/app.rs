@@ -2212,12 +2212,14 @@ pub enum ConfirmAction {
     },
     /// Unregister the project. Its files stay on disk.
     RemoveProject { project_id: ProjectId },
-    /// Snapshot of eligible (issue_id, session_name) pairs taken when the
-    /// prompt opens: cards that gain or drop a worktree while it's open are
-    /// still cleared or skipped based on that snapshot, not current state.
+    /// Archive the Done cards picked when the prompt opened (session,
+    /// teardown, worktree), then delete them. Stored by ID for the same
+    /// reason as `DeleteIssue`.
     ClearDoneColumn {
-        issues: Vec<(String, String)>,
+        issue_ids: Vec<String>,
         project_id: ProjectId,
+        /// Discard uncommitted changes and push past a failing teardown.
+        force: bool,
     },
     DetachWorktree {
         issue_id: String,
@@ -2454,9 +2456,8 @@ pub struct App {
     pub queued_force_prunes: Vec<(ProjectId, Vec<crate::prune::PruneTarget>)>,
     /// Mode to go back to when the confirm prompt closes.
     confirm_return_mode: InputMode,
-    /// Archives that stopped short and wait to be offered as a force archive
-    /// once the board is back in Normal mode.
-    pub queued_force_archives: Vec<(ProjectId, String, ForceRequired)>,
+    /// Done cards Ctrl+d could not clear, waiting the same way.
+    pub queued_force_clears: Vec<(ProjectId, String, ForceRequired)>,
     pub dialog: Option<DialogState>,
     pub prune_dialog: Option<PruneDialogState>,
     pub should_quit: bool,
@@ -2520,7 +2521,7 @@ impl App {
             queued_force_archives: Vec::new(),
             queued_force_prunes: Vec::new(),
             confirm_return_mode: InputMode::Normal,
-            queued_force_archives: Vec::new(),
+            queued_force_clears: Vec::new(),
             dialog: None,
             prune_dialog: None,
             should_quit: false,

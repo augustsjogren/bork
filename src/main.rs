@@ -3059,6 +3059,7 @@ fn run_tui() -> anyhow::Result<()> {
                 handler::archive_issue_in_app(&mut app, &project_id, &issue_id);
             }
             handler::queue_force_archive(&mut app, result.force_archive_offers);
+            handler::queue_force_clear(&mut app, result.force_clear_offers);
 
             if let Some(launch_id) = result.launched_issue_id {
                 // A kill during the detection window (x kill, done-TTL)

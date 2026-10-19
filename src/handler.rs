@@ -72,6 +72,8 @@ pub struct ActionResult {
     /// too — otherwise the next unrelated save flushes the stale in-memory
     /// copy (still showing no worktree) and clobbers that write.
     pub worktree_attached: Option<(ProjectId, String, String)>,
+    /// The same, for Done cards that Ctrl+d was clearing.
+    pub force_clear_offers: Vec<(ProjectId, String, ForceRequired)>,
 }
 
 pub enum PostAction {
@@ -414,6 +416,9 @@ fn combine_results(results: Vec<ActionResult>, summary: String) -> ActionResult 
         combined
             .force_archive_offers
             .extend(result.force_archive_offers);
+        combined
+            .force_clear_offers
+            .extend(result.force_clear_offers);
     }
     match (failures.first(), warnings.first()) {
         (None, None) => combined.message = summary,
@@ -788,27 +793,27 @@ fn handle_normal(
 
         Action::ClearDoneColumn => {
             let project = app.context_project(ctx);
-            let project_name = project.config.project_name.clone();
 
-            let mut eligible: Vec<(String, String)> = Vec::new();
-            let mut holding_worktree = 0usize;
+            let mut issue_ids: Vec<String> = Vec::new();
+            let mut worktrees = 0usize;
             let mut pr_still_open = 0usize;
             for issue in project.issues.iter().filter(|i| i.column == Column::Done) {
-                if issue.worktree.is_some() {
-                    holding_worktree += 1;
-                    continue;
-                }
                 // Deleting a card whose PR is still open only lasts until the
                 // next poll, which imports the PR again as a fresh card.
                 if project.has_open_pr(issue) {
                     pr_still_open += 1;
                     continue;
                 }
-                eligible.push((issue.id.clone(), issue.session_name(&project_name)));
+                if issue.worktree.is_some() {
+                    worktrees += 1;
+                }
+                issue_ids.push(issue.id.clone());
             }
-            let skip_note = clear_done_skip_note(holding_worktree, pr_still_open);
+            let skip_note = (pr_still_open > 0).then(|| {
+                format!("{pr_still_open} with an open PR \u{2014} they would be re-imported")
+            });
 
-            if eligible.is_empty() {
+            if issue_ids.is_empty() {
                 let message = match skip_note {
                     Some(note) => format!("No Done cards to clear ({note})"),
                     None => "No Done cards to clear".to_string(),
@@ -817,19 +822,21 @@ fn handle_normal(
                 return PostAction::None;
             }
 
-            let message = match skip_note {
-                Some(note) => format!(
-                    "Clear {} Done card(s)? (skipped: {note}) (y/n)",
-                    eligible.len()
-                ),
-                None => format!("Clear {} Done card(s)? (y/n)", eligible.len()),
-            };
+            let mut message = format!("Clear {}?", count_of(issue_ids.len(), "Done card"));
+            if worktrees > 0 {
+                message.push_str(&format!(" (removes {})", count_of(worktrees, "worktree")));
+            }
+            if let Some(note) = skip_note {
+                message.push_str(&format!(" (skipped: {note})"));
+            }
+            message.push_str(" (y/n)");
 
             app.start_confirm(
                 message,
                 ConfirmAction::ClearDoneColumn {
-                    issues: eligible,
+                    issue_ids,
                     project_id: ctx.project_id.clone(),
+                    force: false,
                 },
             );
             PostAction::None
@@ -1349,24 +1356,6 @@ fn handle_search(app: &mut App, action: Action, ctx: &ActionContext) {
         Action::SearchCancel => app.cancel_search(ctx),
         _ => {}
     }
-}
-
-fn clear_done_skip_note(holding_worktree: usize, pr_still_open: usize) -> Option<String> {
-    let mut reasons: Vec<String> = Vec::new();
-    if holding_worktree > 0 {
-        reasons.push(format!(
-            "{holding_worktree} still hold a worktree \u{2014} release with X first"
-        ));
-    }
-    if pr_still_open > 0 {
-        reasons.push(format!(
-            "{pr_still_open} with an open PR \u{2014} they would be re-imported"
-        ));
-    }
-    if reasons.is_empty() {
-        return None;
-    }
-    Some(reasons.join("; "))
 }
 
 fn handle_help(app: &mut App, action: Action) {
@@ -2892,57 +2881,21 @@ fn handle_confirm(
                             archive_issue_off_thread(config, project_id, issue, removal)
                         },
                     ),
-                    ConfirmAction::ClearDoneColumn { issues, project_id } => {
-                        let Some(p) = app.find_project(&project_id) else {
-                            app.set_warning("Project no longer available");
-                            return;
-                        };
-                        let project_root = p.config.project_root.clone();
-
-                        app.begin_busy();
-                        let tx = action_tx.clone();
-                        thread::spawn(move || {
-                            let mut deletable: Vec<(ProjectId, String)> = Vec::new();
-                            let mut killed = 0usize;
-                            let mut failed: Vec<String> = Vec::new();
-                            for (issue_id, session_name) in &issues {
-                                match agent::terminate_session(&project_root, session_name) {
-                                    Ok(true) => {
-                                        killed += 1;
-                                        deletable.push((project_id.clone(), issue_id.clone()));
-                                    }
-                                    Ok(false) => {
-                                        deletable.push((project_id.clone(), issue_id.clone()));
-                                    }
-                                    Err(e) => failed.push(format!("{issue_id}: {e}")),
-                                }
-                            }
-                            let message = if failed.is_empty() {
-                                format!(
-                                    "Cleared {} Done card(s) ({killed} session(s) killed)",
-                                    deletable.len()
-                                )
-                            } else {
-                                format!(
-                                    "Cleared {} Done card(s), {} kill failure(s): {}",
-                                    deletable.len(),
-                                    failed.len(),
-                                    failed.join(", ")
-                                )
-                            };
-                            let message_kind = if failed.is_empty() {
-                                MessageKind::Info
-                            } else {
-                                MessageKind::Error
-                            };
-                            let _ = tx.send(ActionResult {
-                                message,
-                                message_kind,
-                                issues_to_delete: deletable,
-                                ..Default::default()
-                            });
-                        });
-                    }
+                    ConfirmAction::ClearDoneColumn {
+                        issue_ids,
+                        project_id,
+                        force,
+                    } => run_confirmed(
+                        app,
+                        action_tx,
+                        project_id,
+                        &issue_ids,
+                        "Cleared",
+                        "Done card",
+                        move |config, project_id, issue| {
+                            clear_done_card(config, project_id, issue, force)
+                        },
+                    ),
                     ConfirmAction::DetachWorktree {
                         issue_id,
                         project_id,
@@ -3100,66 +3053,101 @@ fn archive_to_result(
 /// Hold archives that stopped short until `show_queued_force_archive` can
 /// offer them. A later offer for the same card replaces the earlier one.
 pub fn queue_force_archive(app: &mut App, offers: Vec<(ProjectId, String, ForceRequired)>) {
+    queue_force_offers(&mut app.queued_force_archives, offers);
+}
+
+/// Hold the Done cards Ctrl+d could not clear, the same way.
+pub fn queue_force_clear(app: &mut App, offers: Vec<(ProjectId, String, ForceRequired)>) {
+    queue_force_offers(&mut app.queued_force_clears, offers);
+}
+
+fn queue_force_offers(
+    queue: &mut Vec<(ProjectId, String, ForceRequired)>,
+    offers: Vec<(ProjectId, String, ForceRequired)>,
+) {
     for offer in offers {
-        app.queued_force_archives
-            .retain(|(project_id, issue_id, _)| (project_id, issue_id) != (&offer.0, &offer.1));
-        app.queued_force_archives.push(offer);
+        queue.retain(|(project_id, issue_id, _)| (project_id, issue_id) != (&offer.0, &offer.1));
+        queue.push(offer);
     }
 }
 
-/// Ask whether to force one project's queued archives. Waits while the user
-/// is in a dialog, search or another prompt, so a `y` meant for something
-/// else never forces an archive. Returns whether a prompt opened.
+/// Ask whether to force one project's queued archives, then its queued
+/// clears. Waits while the user is in a dialog, search or another prompt, so
+/// a `y` meant for something else never forces anything. Returns whether a
+/// prompt opened.
 pub fn show_queued_force_archive(app: &mut App) -> bool {
     if app.input_mode != InputMode::Normal || app.pending_confirm.is_some() {
         return false;
     }
-    let Some((project_id, _, _)) = app.queued_force_archives.first() else {
-        return false;
-    };
+
+    if let Some((project_id, offers)) = take_first_project(&mut app.queued_force_archives) {
+        let message = force_prompt(&offers, "Archive");
+        // An unsaved plan stops the archive before its teardown runs.
+        let teardown_due = offers
+            .iter()
+            .filter(|(_, reason)| matches!(reason, ForceRequired::PlanNotSaved { .. }))
+            .map(|(issue_id, _)| issue_id.clone())
+            .collect();
+        app.start_confirm(
+            message,
+            ConfirmAction::ArchiveIssue {
+                issue_ids: offers.into_iter().map(|(issue_id, _)| issue_id).collect(),
+                project_id,
+                force: true,
+                teardown_due,
+            },
+        );
+        return true;
+    }
+
+    if let Some((project_id, offers)) = take_first_project(&mut app.queued_force_clears) {
+        let message = force_prompt(&offers, "Clear");
+        app.start_confirm(
+            message,
+            ConfirmAction::ClearDoneColumn {
+                issue_ids: offers.into_iter().map(|(issue_id, _)| issue_id).collect(),
+                project_id,
+                force: true,
+            },
+        );
+        return true;
+    }
+
+    false
+}
+
+/// Take every queued offer for the first queued project.
+fn take_first_project(
+    queue: &mut Vec<(ProjectId, String, ForceRequired)>,
+) -> Option<(ProjectId, Vec<(String, ForceRequired)>)> {
+    let (project_id, _, _) = queue.first()?;
     let project_id = project_id.clone();
 
-    let (offers, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut app.queued_force_archives)
+    let (offers, rest): (Vec<_>, Vec<_>) = std::mem::take(queue)
         .into_iter()
         .partition(|(offer_project, _, _)| *offer_project == project_id);
-    app.queued_force_archives = rest;
+    *queue = rest;
 
-    let offers: Vec<(String, ForceRequired)> = offers
+    let offers = offers
         .into_iter()
         .map(|(_, issue_id, reason)| (issue_id, reason))
         .collect();
-    let message = force_archive_prompt(&offers);
-    // An unsaved plan stops the archive before its teardown runs.
-    let teardown_due = offers
-        .iter()
-        .filter(|(_, reason)| matches!(reason, ForceRequired::PlanNotSaved { .. }))
-        .map(|(issue_id, _)| issue_id.clone())
-        .collect();
-    app.start_confirm(
-        message,
-        ConfirmAction::ArchiveIssue {
-            issue_ids: offers.into_iter().map(|(issue_id, _)| issue_id).collect(),
-            project_id,
-            force: true,
-            teardown_due,
-        },
-    );
-    true
+    Some((project_id, offers))
 }
 
 /// How many cards a combined force prompt names before summarising the rest.
 const FORCE_PROMPT_NAMED: usize = 3;
 
-fn force_archive_prompt(offers: &[(String, ForceRequired)]) -> String {
+fn force_prompt(offers: &[(String, ForceRequired)], verb: &str) -> String {
     match offers {
         [(issue_id, ForceRequired::Uncommitted(_))] => format!(
-            "{issue_id}'s worktree has uncommitted changes. Archive anyway and discard them? (y/n)"
+            "{issue_id}'s worktree has uncommitted changes. {verb} anyway and discard them? (y/n)"
         ),
         [(issue_id, ForceRequired::TeardownFailed { code, dirty: false })] => format!(
-            "{issue_id}'s teardown script failed (exit {code}). Archive anyway? (y/n)"
+            "{issue_id}'s teardown script failed (exit {code}). {verb} anyway? (y/n)"
         ),
         [(issue_id, ForceRequired::TeardownFailed { code, dirty: true })] => format!(
-            "{issue_id}'s teardown script failed (exit {code}) and its worktree has uncommitted changes. Archive anyway and discard them? (y/n)"
+            "{issue_id}'s teardown script failed (exit {code}) and its worktree has uncommitted changes. {verb} anyway and discard them? (y/n)"
         ),
         [(issue_id, ForceRequired::PlanNotSaved { error, dirty: false })] => format!(
             "{issue_id}'s plan couldn't be saved ({error}). Archive anyway and lose the plan? (y/n)"
@@ -3188,10 +3176,12 @@ fn force_archive_prompt(offers: &[(String, ForceRequired)]) -> String {
                 .iter()
                 .any(|(_, reason)| matches!(reason, ForceRequired::PlanNotSaved { .. }));
             let question = match (any_dirty, any_plan) {
-                (true, true) => "Archive anyway, losing unsaved plans and uncommitted changes?",
-                (true, false) => "Archive anyway and discard their uncommitted changes?",
-                (false, true) => "Archive anyway and lose the unsaved plans?",
-                (false, false) => "Archive anyway?",
+                (true, true) => {
+                    format!("{verb} anyway, losing unsaved plans and uncommitted changes?")
+                }
+                (true, false) => format!("{verb} anyway and discard their uncommitted changes?"),
+                (false, true) => format!("{verb} anyway and lose the unsaved plans?"),
+                (false, false) => format!("{verb} anyway?"),
             };
             format!(
                 "{} stopped short ({}). {question} (y/n)",
@@ -3214,6 +3204,25 @@ fn force_reason(reason: &ForceRequired) -> String {
             "plan not saved, uncommitted changes".to_string()
         }
     }
+}
+
+/// Archive a Done card (session, teardown, worktree) and report it for
+/// deletion rather than for the move to Done.
+fn clear_done_card(
+    config: &AppConfig,
+    project_id: &ProjectId,
+    issue: &Issue,
+    force: bool,
+) -> ActionResult {
+    let removal = if force { Removal::Force } else { Removal::Safe };
+    let mut result = archive_issue_off_thread(config, project_id, issue, removal);
+    result.force_clear_offers = std::mem::take(&mut result.force_archive_offers);
+    if result.issues_to_archive.is_empty() {
+        return result;
+    }
+    result.issues_to_delete = std::mem::take(&mut result.issues_to_archive);
+    result.message = format!("Cleared {}", issue.id);
+    result
 }
 
 /// Apply a completed archive to the in-memory board: drop the worktree and
@@ -6220,7 +6229,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_done_column_opens_confirm_with_only_clean_done_cards() {
+    fn clear_done_column_includes_cards_that_still_hold_a_worktree() {
         let mut app = app_with_issues();
         app.project_mut().issues[0].column = Column::Done;
         app.project_mut().issues[1].column = Column::Done;
@@ -6230,14 +6239,108 @@ mod tests {
 
         assert_eq!(app.input_mode, InputMode::Confirm);
         match app.pending_confirm.as_ref().unwrap() {
-            ConfirmAction::ClearDoneColumn { issues, .. } => {
-                assert_eq!(issues.len(), 1);
-                assert_eq!(issues[0].0, "bork-1");
+            ConfirmAction::ClearDoneColumn {
+                issue_ids, force, ..
+            } => {
+                assert_eq!(issue_ids, &["bork-1", "bork-2"]);
+                assert!(!force);
             }
             _ => panic!("expected ClearDoneColumn"),
         }
-        let message = app.confirm_message.as_deref().expect("confirm open");
-        assert!(message.contains("skipped"), "got: {message}");
+        assert_eq!(
+            app.confirm_message.as_deref(),
+            Some("Clear 2 Done cards? (removes 1 worktree) (y/n)")
+        );
+    }
+
+    #[test]
+    fn clearing_a_done_card_with_a_dirty_worktree_offers_to_force_it() {
+        let (root, config) = project_with_dirty_worktree();
+        let project_id = root.path().to_path_buf();
+        let mut issue = Issue::new("bork-1", "Dirty", Column::Done, config.agent_kind);
+        issue.worktree = Some("bork-1-slug".into());
+
+        let result = clear_done_card(&config, &project_id, &issue, false);
+
+        assert!(result.issues_to_delete.is_empty());
+        assert!(result.force_archive_offers.is_empty());
+        assert_eq!(result.force_clear_offers.len(), 1);
+        assert!(root.path().join("bork-1-slug").exists());
+    }
+
+    #[test]
+    fn a_forced_clear_removes_the_worktree_and_deletes_the_card() {
+        let (root, config) = project_with_dirty_worktree();
+        let project_id = root.path().to_path_buf();
+        let mut issue = Issue::new("bork-1", "Dirty", Column::Done, config.agent_kind);
+        issue.worktree = Some("bork-1-slug".into());
+
+        let result = clear_done_card(&config, &project_id, &issue, true);
+
+        assert_eq!(
+            result.issues_to_delete,
+            vec![(project_id, "bork-1".to_string())]
+        );
+        assert!(result.issues_to_archive.is_empty());
+        assert_eq!(result.message, "Cleared bork-1");
+        assert!(!root.path().join("bork-1-slug").exists());
+    }
+
+    #[test]
+    fn a_force_clear_offer_asks_before_discarding_anything() {
+        let mut app = app_with_issues();
+        let project_id = app.project().id();
+
+        queue_force_clear(
+            &mut app,
+            vec![(
+                project_id,
+                "bork-1".into(),
+                ForceRequired::Uncommitted("fatal: dirty".into()),
+            )],
+        );
+        assert!(show_queued_force_archive(&mut app));
+
+        assert_eq!(
+            app.confirm_message.as_deref(),
+            Some("bork-1's worktree has uncommitted changes. Clear anyway and discard them? (y/n)")
+        );
+        match &app.pending_confirm {
+            Some(ConfirmAction::ClearDoneColumn {
+                issue_ids,
+                force: true,
+                ..
+            }) => assert_eq!(issue_ids, &["bork-1"]),
+            _ => panic!("expected a forced ClearDoneColumn"),
+        }
+    }
+
+    #[test]
+    fn queued_archives_are_offered_before_queued_clears() {
+        let mut app = app_with_issues();
+        let project_id = app.project().id();
+        let dirty = |id: &str| {
+            (
+                project_id.clone(),
+                id.to_string(),
+                ForceRequired::Uncommitted("fatal: dirty".into()),
+            )
+        };
+        queue_force_clear(&mut app, vec![dirty("bork-2")]);
+        queue_force_archive(&mut app, vec![dirty("bork-1")]);
+
+        assert!(show_queued_force_archive(&mut app));
+        assert!(matches!(
+            &app.pending_confirm,
+            Some(ConfirmAction::ArchiveIssue { issue_ids, .. }) if issue_ids == &["bork-1"]
+        ));
+
+        app.cancel_confirm();
+        assert!(show_queued_force_archive(&mut app));
+        assert!(matches!(
+            &app.pending_confirm,
+            Some(ConfirmAction::ClearDoneColumn { issue_ids, .. }) if issue_ids == &["bork-2"]
+        ));
     }
 
     #[test]
@@ -6261,9 +6364,8 @@ mod tests {
 
         assert_eq!(app.input_mode, InputMode::Confirm);
         match app.pending_confirm.as_ref().unwrap() {
-            ConfirmAction::ClearDoneColumn { issues, .. } => {
-                let ids: Vec<&str> = issues.iter().map(|(id, _)| id.as_str()).collect();
-                assert_eq!(ids, vec!["bork-2"]);
+            ConfirmAction::ClearDoneColumn { issue_ids, .. } => {
+                assert_eq!(issue_ids, &["bork-2"]);
             }
             _ => panic!("expected ClearDoneColumn"),
         }
