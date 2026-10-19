@@ -140,7 +140,7 @@ pub const DEFAULT_AUTO_PRUNE_CHECK_INTERVAL: u64 = 86_400;
 pub const DEFAULT_KEEP_DELETED_DAYS: u64 = 30;
 /// A 4K monitor at a small font reports 400+ columns; capping the popup keeps
 /// line length readable instead of stretching one pane edge to edge.
-pub const DEFAULT_POPUP_MAX_WIDTH_COLS: u64 = 180;
+pub const DEFAULT_POPUP_MAX_WIDTH_COLS: u64 = 220;
 
 pub const DEFAULT_PROMPT_FALLBACK: &str = "The source code is in main/. Use `bork issue start \"Title\" --project <name-or-path> --prompt \"Details...\"` to spin off new issues with their own worktrees and agents.";
 
