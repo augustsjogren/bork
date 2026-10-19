@@ -136,7 +136,7 @@ pub const DEFAULT_PRUNE_THRESHOLD: u64 = 10;
 pub const DEFAULT_AUTO_PRUNE_CHECK_INTERVAL: u64 = 86_400;
 /// A 4K monitor at a small font reports 400+ columns; capping the popup keeps
 /// line length readable instead of stretching one pane edge to edge.
-pub const DEFAULT_POPUP_MAX_WIDTH_COLS: u64 = 180;
+pub const DEFAULT_POPUP_MAX_WIDTH_COLS: u64 = 220;
 
 pub const DEFAULT_AGENT_MODE: AgentMode = AgentMode::Plan;
 
