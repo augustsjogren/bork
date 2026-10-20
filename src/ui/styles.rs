@@ -89,6 +89,8 @@ pub fn attention_badge(attention: Attention) -> (&'static str, Color) {
         Attention::Queue(MergeQueueState::Cancelled) => ("\u{29d6} dequeued", Color::Yellow),
         Attention::AgentBlocked => ("\u{2691} agent blocked", Color::Yellow),
         Attention::AgentError => ("\u{2691} agent error", Color::Red),
+        Attention::ReviewReady => ("\u{25c9} review ready", Color::Cyan),
+        Attention::ReReview => ("\u{21bb} re-review", Color::Yellow),
     }
 }
 

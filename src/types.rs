@@ -1064,6 +1064,11 @@ pub struct PrStatus {
     /// GitHub's `updatedAt`, which moves on every new comment.
     #[serde(default)]
     pub updated_at: String,
+    /// Logins currently asked for review. GitHub clears a login on review and
+    /// re-adds it on a re-request, so presence here is a live ask, unlike the
+    /// `involves:` search feeding `review_requested_prs`, which keeps a PR
+    /// once reviewed.
+    pub requested_reviewers: Vec<String>,
 }
 
 impl PrStatus {
@@ -1155,6 +1160,7 @@ mod tests {
             unresolved_threads: 0,
             unresolved_threads_by_you: 0,
             updated_at: String::new(),
+            requested_reviewers: Vec::new(),
         };
         let cloned = pr.clone();
         assert_eq!(cloned.number, 1);
