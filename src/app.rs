@@ -2454,6 +2454,9 @@ pub struct App {
     pub queued_force_prunes: Vec<(ProjectId, Vec<crate::prune::PruneTarget>)>,
     /// Mode to go back to when the confirm prompt closes.
     confirm_return_mode: InputMode,
+    /// Archives that stopped short and wait to be offered as a force archive
+    /// once the board is back in Normal mode.
+    pub queued_force_archives: Vec<(ProjectId, String, ForceRequired)>,
     pub dialog: Option<DialogState>,
     pub prune_dialog: Option<PruneDialogState>,
     pub should_quit: bool,
@@ -2517,6 +2520,7 @@ impl App {
             queued_force_archives: Vec::new(),
             queued_force_prunes: Vec::new(),
             confirm_return_mode: InputMode::Normal,
+            queued_force_archives: Vec::new(),
             dialog: None,
             prune_dialog: None,
             should_quit: false,
