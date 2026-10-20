@@ -26,6 +26,7 @@ use crate::types::{
     PrImportBaseline, PrImportSource, PrState, PrStatus, WorktreeStatus,
 };
 use crate::undo::UndoEntry;
+use crate::worktree::ForceRequired;
 
 pub type ProjectId = PathBuf;
 
@@ -1700,7 +1701,7 @@ pub enum ConfirmAction {
     ArchiveIssue {
         issue_ids: Vec<String>,
         project_id: ProjectId,
-        /// Discard uncommitted changes and push past a failing teardown.
+        /// Skip the teardown, which already ran, and discard uncommitted changes.
         force: bool,
     },
 }
@@ -1843,6 +1844,9 @@ pub struct App {
     pub search_query: String,
     pub confirm_message: Option<String>,
     pub pending_confirm: Option<ConfirmAction>,
+    /// Archives that stopped short and wait to be offered as a force archive
+    /// once the board is back in Normal mode.
+    pub queued_force_archives: Vec<(ProjectId, String, ForceRequired)>,
     pub dialog: Option<DialogState>,
     pub prune_dialog: Option<PruneDialogState>,
     pub should_quit: bool,
@@ -1887,6 +1891,7 @@ impl App {
             search_query: String::new(),
             confirm_message: None,
             pending_confirm: None,
+            queued_force_archives: Vec::new(),
             dialog: None,
             prune_dialog: None,
             should_quit: false,
