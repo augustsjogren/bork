@@ -1033,6 +1033,11 @@ pub struct PrStatus {
     /// Unresolved review threads (inline comments that can be resolved).
     #[serde(default)]
     pub unresolved_threads: u32,
+    /// Logins currently asked for review. GitHub clears a login on review and
+    /// re-adds it on a re-request, so presence here is a live ask, unlike the
+    /// `involves:` search feeding `review_requested_prs`, which keeps a PR
+    /// once reviewed.
+    pub requested_reviewers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1112,6 +1117,7 @@ mod tests {
             merge_blocker: None,
             merge_queue: None,
             unresolved_threads: 0,
+            requested_reviewers: Vec::new(),
         };
         let cloned = pr.clone();
         assert_eq!(cloned.number, 1);

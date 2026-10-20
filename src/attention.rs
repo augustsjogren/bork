@@ -25,6 +25,11 @@ pub enum Attention {
     /// the needs-you count and filter: the queue owns it. Failed or
     /// cancelled puts it back on the owner.
     Queue(MergeQueueState),
+    /// An agent left tuicr draft comments on this PR and has stopped: the
+    /// review is waiting for you to read it.
+    ReviewReady,
+    /// A finished review whose PR asks for review again.
+    ReReview,
     /// The card's agent is stopped on a permission prompt or a plan approval.
     AgentBlocked,
     /// The card's agent reported an error.

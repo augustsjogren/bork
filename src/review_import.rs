@@ -15,6 +15,22 @@ impl Project {
             .collect()
     }
 
+    /// Open PRs that request your review again after you already gave one.
+    pub fn rerequested_review_numbers(&self) -> HashSet<u32> {
+        let Some(me) = self.live.github_user.as_deref() else {
+            return HashSet::new();
+        };
+        self.live
+            .review_requested_prs
+            .iter()
+            .filter(|pr| {
+                self.live.reviewed_prs.contains(&pr.number)
+                    && pr.requested_reviewers.iter().any(|login| login == me)
+            })
+            .map(|pr| pr.number)
+            .collect()
+    }
+
     pub fn review_pending_for(&self, number: u32) -> bool {
         self.live
             .review_requested_prs
@@ -266,6 +282,7 @@ mod tests {
             merge_blocker: None,
             merge_queue: None,
             unresolved_threads: 0,
+            requested_reviewers: Vec::new(),
         }
     }
 

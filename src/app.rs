@@ -171,6 +171,8 @@ pub struct LiveState {
     pub review_stacks: Option<HashMap<u32, Option<u32>>>,
     /// Open PRs where your latest review requests changes.
     pub changes_requested_prs: Vec<u32>,
+    /// Open PRs you have reviewed in any way.
+    pub reviewed_prs: Vec<u32>,
     /// Stack members whose stack card is blocked by an existing card; imported individually.
     pub review_stack_fallback: HashSet<u32>,
     pub github_user: Option<String>,
@@ -1175,6 +1177,7 @@ impl Project {
     /// nothing to persist or invalidate.
     pub fn attention_for(&self, issue: &Issue) -> Option<Attention> {
         self.agent_attention(issue)
+            .or_else(|| self.review_attention(issue))
             .or_else(|| self.pr_attention(issue))
     }
 
@@ -1201,6 +1204,51 @@ impl Project {
             AgentStatus::Error => Some(Attention::AgentError),
             _ => None,
         }
+    }
+
+    /// Review cards the owner should come back to: an agent's finished tuicr
+    /// review, or a finished review whose PR asks for another.
+    fn review_attention(&self, issue: &Issue) -> Option<Attention> {
+        let pr = self.pr_for(issue)?;
+        if pr.state != PrState::Open {
+            return None;
+        }
+
+        // Drafts clear once you submit them in tuicr, so this lasts exactly
+        // until you have acted on the agent's review.
+        let has_drafts = self
+            .live
+            .tuicr_drafts
+            .by_pr_url
+            .get(&pr.url)
+            .is_some_and(|&drafts| drafts > 0);
+        if has_drafts && self.agent_reported_stop(issue) {
+            return Some(Attention::ReviewReady);
+        }
+
+        // A card still awaiting its first review is the board's ordinary
+        // workload; a live request on a PR you already reviewed is "come back".
+        if issue.primary_pr_import_source() != Some(PrImportSource::ReviewRequested) {
+            return None;
+        }
+        self.rerequested_review_numbers()
+            .contains(&pr.number)
+            .then_some(Attention::ReReview)
+    }
+
+    /// Whether an agent in this card's session has reported, through its
+    /// status hook, that it stopped. A session with no hook report (say, one
+    /// `R` opened for tuicr alone) is not an agent finishing.
+    fn agent_reported_stop(&self, issue: &Issue) -> bool {
+        let session_name = issue.session_name(&self.config.project_name);
+        self.live.active_sessions.contains(&session_name)
+            && self
+                .live
+                .agent_statuses
+                .get(&session_name)
+                .is_some_and(|info| {
+                    matches!(info.status, AgentStatus::Idle | AgentStatus::WaitingInput)
+                })
     }
 
     /// Only the owner's own open, non-draft PRs. A review-requested card
@@ -1413,9 +1461,12 @@ impl Project {
             }
         }
 
-        // Move review-requested issues to Done when no longer pending
+        // Move review-requested issues to Done when no longer pending, and back
+        // to Code Review when a PR you already reviewed asks for another.
         let now = unix_now();
+        let rerequested = self.rerequested_review_numbers();
         let mut completed = 0usize;
+        let mut reopened = 0usize;
         for issue in &mut self.issues {
             if self.live.review_prs_ready == Some(false) {
                 continue;
@@ -1427,6 +1478,15 @@ impl Project {
                 continue;
             }
             if issue.column == Column::Done {
+                let asked_again = issue
+                    .github_pr_links
+                    .iter()
+                    .any(|l| rerequested.contains(&l.number));
+                if asked_again {
+                    issue.column = Column::CodeReview;
+                    issue.done_at = None;
+                    reopened += 1;
+                }
                 continue;
             }
             let has_live_review = issue
@@ -1587,6 +1647,7 @@ impl Project {
             && added == 0
             && removed == 0
             && completed == 0
+            && reopened == 0
             && retagged == 0
             && !report_drafts
         {
@@ -1615,6 +1676,13 @@ impl Project {
                 if completed == 1 { "" } else { "s" }
             ));
         }
+        if reopened > 0 {
+            parts.push(format!(
+                "Reopened {} review{} for another look",
+                reopened,
+                if reopened == 1 { "" } else { "s" }
+            ));
+        }
         if report_drafts {
             parts.push(format!(
                 "Skipped {} draft PR{} (set auto_import_draft_prs to import them)",
@@ -1623,7 +1691,12 @@ impl Project {
             ));
         }
 
-        let changed = adopted > 0 || added > 0 || removed > 0 || completed > 0 || retagged > 0;
+        let changed = adopted > 0
+            || added > 0
+            || removed > 0
+            || completed > 0
+            || reopened > 0
+            || retagged > 0;
         if parts.is_empty() {
             return (changed, None);
         }
@@ -1762,6 +1835,12 @@ impl Project {
                     return false;
                 };
                 if now.saturating_sub(done_at) < self.config.done_session_ttl {
+                    return false;
+                }
+                // A Done card that still asks something of its owner (a
+                // re-review, typically) keeps its session: killing it right
+                // after the owner detaches destroys the context they need.
+                if self.needs_you(issue) {
                     return false;
                 }
                 let session_name = issue.session_name(&self.config.project_name);
@@ -3603,6 +3682,7 @@ mod tests {
             merge_blocker: None,
             merge_queue: None,
             unresolved_threads: 0,
+            requested_reviewers: Vec::new(),
         }
     }
 
@@ -3724,6 +3804,123 @@ mod tests {
 
     fn attention_of(app: &App) -> Option<Attention> {
         app.project().attention_for(&app.project().issues[0])
+    }
+
+    #[test]
+    fn a_live_request_on_an_unfinished_review_is_ordinary_workload() {
+        let mut app = test_app(vec![issue_linked_to_pr(
+            "bork-1",
+            7,
+            Some(PrImportSource::ReviewRequested),
+        )]);
+        let mut pr = test_pr(7, "feature");
+        pr.requested_reviewers = vec!["testuser".into()];
+        app.project_mut().live.github_user = Some("testuser".into());
+        app.project_mut().live.review_requested_prs = vec![pr];
+
+        assert_eq!(attention_of(&app), None);
+    }
+
+    #[test]
+    fn a_finished_review_requested_again_asks_for_re_review() {
+        let mut app = test_app(vec![issue_linked_to_pr(
+            "bork-1",
+            7,
+            Some(PrImportSource::ReviewRequested),
+        )]);
+        app.project_mut().issues[0].column = Column::Done;
+        let mut pr = test_pr(7, "feature");
+        pr.requested_reviewers = vec!["testuser".into()];
+        app.project_mut().live.github_user = Some("testuser".into());
+        app.project_mut().live.review_requested_prs = vec![pr];
+        app.project_mut().live.reviewed_prs = vec![7];
+
+        assert_eq!(attention_of(&app), Some(Attention::ReReview));
+    }
+
+    #[test]
+    fn a_finished_review_without_a_live_request_stays_quiet() {
+        // The `involves:` search keeps a PR in review_requested_prs once
+        // reviewed, so set membership alone must never read as a re-request.
+        let mut app = test_app(vec![issue_linked_to_pr(
+            "bork-1",
+            7,
+            Some(PrImportSource::ReviewRequested),
+        )]);
+        app.project_mut().issues[0].column = Column::Done;
+        app.project_mut().live.github_user = Some("testuser".into());
+        app.project_mut().live.review_requested_prs = vec![test_pr(7, "feature")];
+
+        assert_eq!(attention_of(&app), None);
+    }
+
+    /// A review card whose PR has `drafts` tuicr drafts and whose agent
+    /// session last reported `status` through its status hook.
+    fn review_card_with_drafts(drafts: u32, status: Option<AgentStatus>) -> App {
+        let mut app = test_app(vec![issue_linked_to_pr(
+            "bork-1",
+            7,
+            Some(PrImportSource::ReviewRequested),
+        )]);
+        let pr = test_pr(7, "feature");
+        let live = &mut app.project_mut().live;
+        live.tuicr_drafts.by_pr_url.insert(pr.url.clone(), drafts);
+        live.review_requested_prs = vec![pr];
+        live.active_sessions.insert("bork-bork-1".to_string());
+        if let Some(status) = status {
+            live.agent_statuses.insert(
+                "bork-bork-1".to_string(),
+                AgentStatusInfo {
+                    status,
+                    activity: None,
+                    updated_at: 0,
+                },
+            );
+        }
+        app
+    }
+
+    #[test]
+    fn an_idle_agent_with_drafts_hands_the_review_to_you() {
+        let app = review_card_with_drafts(3, Some(AgentStatus::Idle));
+        assert_eq!(attention_of(&app), Some(Attention::ReviewReady));
+    }
+
+    #[test]
+    fn an_agent_still_reviewing_is_not_ready() {
+        let app = review_card_with_drafts(3, Some(AgentStatus::Busy));
+        assert_eq!(attention_of(&app), None);
+    }
+
+    #[test]
+    fn drafts_in_a_tuicr_only_session_are_not_an_agent_handoff() {
+        // `R` opens tuicr without an agent: no status hook ever reports.
+        let app = review_card_with_drafts(3, None);
+        assert_eq!(attention_of(&app), None);
+    }
+
+    #[test]
+    fn a_re_review_card_keeps_its_session_past_the_ttl() {
+        let mut issue = issue_linked_to_pr("bork-1", 7, Some(PrImportSource::ReviewRequested));
+        issue.column = Column::Done;
+        issue.done_at = Some(1000);
+
+        let mut app = test_app(vec![issue]);
+        app.project_mut().config.done_session_ttl = 300;
+        app.project_mut()
+            .live
+            .active_sessions
+            .insert("bork-bork-1".to_string());
+        let mut pr = test_pr(7, "feature");
+        pr.requested_reviewers = vec!["testuser".into()];
+        app.project_mut().live.github_user = Some("testuser".into());
+        app.project_mut().live.review_requested_prs = vec![pr];
+        app.project_mut().live.reviewed_prs = vec![7];
+
+        assert_eq!(
+            app.project().issues_needing_session_cleanup(1600),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
@@ -5896,6 +6093,54 @@ mod tests {
         assert_eq!(app.project().issues[0].column, Column::CodeReview);
     }
 
+    /// A review card parked in Done whose PR asks for `testuser` again.
+    fn rerequested_review_in_done(reviewed_before: bool) -> App {
+        let mut existing = test_issue("bork-1", Column::Done);
+        existing.done_at = Some(1);
+        existing.github_pr_links = vec![LinkedGithubPr {
+            number: 7,
+            imported: true,
+            import_source: Some(PrImportSource::ReviewRequested),
+        }];
+        let mut app = test_app(vec![existing]);
+        let mut pr = test_pr(7, "feature");
+        pr.requested_reviewers = vec!["testuser".into()];
+        let live = &mut app.project_mut().live;
+        live.github_user = Some("testuser".into());
+        live.review_requested_prs = vec![pr];
+        if reviewed_before {
+            live.reviewed_prs = vec![7];
+        }
+        live.pr_poll_done = true;
+        app
+    }
+
+    #[test]
+    fn sync_prs_reopens_a_done_review_when_asked_again() {
+        let mut app = rerequested_review_in_done(true);
+
+        let (changed, message) = app.project_mut().sync_prs_as_issues();
+
+        assert!(changed);
+        assert_eq!(
+            message.as_deref(),
+            Some("Reopened 1 review for another look")
+        );
+        let issue = &app.project().issues[0];
+        assert_eq!(issue.column, Column::CodeReview);
+        assert_eq!(issue.done_at, None);
+        assert_eq!(attention_of(&app), Some(Attention::ReReview));
+    }
+
+    #[test]
+    fn sync_prs_leaves_a_done_review_you_never_gave_in_done() {
+        let mut app = rerequested_review_in_done(false);
+
+        app.project_mut().sync_prs_as_issues();
+
+        assert_eq!(app.project().issues[0].column, Column::Done);
+    }
+
     #[test]
     fn sync_prs_skips_when_no_user_prs() {
         let mut app = test_app(vec![]);
@@ -7917,6 +8162,7 @@ mod tests {
             merge_blocker: None,
             merge_queue: None,
             unresolved_threads: 0,
+            requested_reviewers: Vec::new(),
         };
         app.project_mut()
             .live

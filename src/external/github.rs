@@ -41,6 +41,13 @@ macro_rules! pr_fields {
     isMergeQueueEnabled
     additions deletions
     reviewThreads(first: 100) { nodes { isResolved } }
+    reviewRequests(first: 20) {
+        nodes {
+            requestedReviewer {
+                ... on User { login }
+            }
+        }
+    }
     "#,
             $queue,
             r#"
@@ -578,6 +585,20 @@ fn parse_pr_node(node: &serde_json::Value) -> Option<PrStatus> {
             _ => None,
         });
     let merge_queue = github_queue_state(node).or_else(|| trunk_queue_state(node));
+    // Users only: a team request carries no login, and team membership is not
+    // resolvable from here.
+    let requested_reviewers = node
+        .pointer("/reviewRequests/nodes")
+        .and_then(|v| v.as_array())
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|n| n.pointer("/requestedReviewer/login"))
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     let unresolved_threads = node
         .pointer("/reviewThreads/nodes")
         .and_then(|v| v.as_array())
@@ -604,6 +625,7 @@ fn parse_pr_node(node: &serde_json::Value) -> Option<PrStatus> {
         merge_blocker,
         merge_queue,
         unresolved_threads,
+        requested_reviewers,
     })
 }
 
@@ -732,6 +754,9 @@ pub struct ReviewDiscovery {
     /// Open PRs where your latest review requests changes. GitHub clears your
     /// review request when you submit, but the review isn't finished yet.
     pub changes_requested: Vec<u32>,
+    /// Open PRs you have reviewed in any way, so a new request on one asks
+    /// for a re-review.
+    pub reviewed: Vec<u32>,
 }
 
 pub fn fetch_review_requested_prs(main_worktree: &Path) -> Result<ReviewDiscovery, String> {
@@ -747,9 +772,11 @@ pub fn fetch_review_requested_prs(main_worktree: &Path) -> Result<ReviewDiscover
         "repo:{}/{} is:pr is:open reviewed-by:{} -author:{}",
         repo.owner, repo.name, user, user
     );
-    discovery.changes_requested = fetch_changes_requested_pages(&user, |query| {
+    let reviewed = fetch_reviewed_pages(&user, |query| {
         run_graphql_search(main_worktree, query, &reviewed)
     })?;
+    discovery.changes_requested = reviewed.changes_requested;
+    discovery.reviewed = reviewed.all;
     Ok(discovery)
 }
 
@@ -769,29 +796,41 @@ fn run_graphql_search(main_worktree: &Path, query: &str, search: &str) -> Result
     )
 }
 
-fn fetch_changes_requested_pages(
+#[derive(Debug, Default, PartialEq)]
+struct ReviewedPrs {
+    all: Vec<u32>,
+    changes_requested: Vec<u32>,
+}
+
+fn fetch_reviewed_pages(
     user: &str,
     fetch: impl FnMut(&str) -> Result<String, String>,
-) -> Result<Vec<u32>, String> {
-    let mut numbers = Vec::new();
+) -> Result<ReviewedPrs, String> {
+    let mut reviewed = ReviewedPrs::default();
     search_pages(
         "reviewed-by",
         "number latestOpinionatedReviews(first:100){ nodes{ author{ login } state } }",
         fetch,
         |node| {
+            let Some(number) = node
+                .get("number")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok())
+            else {
+                return Ok(());
+            };
+            reviewed.all.push(number);
             if has_changes_requested_from(node, user) {
-                numbers.extend(
-                    node.get("number")
-                        .and_then(|v| v.as_u64())
-                        .and_then(|n| u32::try_from(n).ok()),
-                );
+                reviewed.changes_requested.push(number);
             }
             Ok(())
         },
     )?;
-    numbers.sort_unstable();
-    numbers.dedup();
-    Ok(numbers)
+    for numbers in [&mut reviewed.all, &mut reviewed.changes_requested] {
+        numbers.sort_unstable();
+        numbers.dedup();
+    }
+    Ok(reviewed)
 }
 
 fn has_changes_requested_from(node: &serde_json::Value, user: &str) -> bool {
@@ -1056,7 +1095,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn changes_requested_pages_keep_only_your_open_request() {
+    fn reviewed_pages_list_every_review_and_your_open_changes_requests() {
         let pages = [
             r#"{"data":{"search":{"issueCount":3,"nodes":[
                 {"number":1,"latestOpinionatedReviews":{"nodes":[{"author":{"login":"Me"},"state":"CHANGES_REQUESTED"}]}},
@@ -1068,22 +1107,23 @@ mod tests {
             ],"pageInfo":{"hasNextPage":false}}}}"#,
         ];
         let mut queries = Vec::new();
-        let numbers = fetch_changes_requested_pages("me", |query| {
+        let reviewed = fetch_reviewed_pages("me", |query| {
             queries.push(query.to_string());
             Ok(pages[queries.len() - 1].to_string())
         })
         .unwrap();
-        assert_eq!(numbers, vec![1, 4]);
+        assert_eq!(reviewed.all, vec![1, 2, 3, 4]);
+        assert_eq!(reviewed.changes_requested, vec![1, 4]);
         assert!(queries[1].contains(r#"after:"next""#));
     }
 
     #[test]
-    fn changes_requested_pages_fail_on_errors_or_oversized_search() {
+    fn reviewed_pages_fail_on_errors_or_oversized_search() {
         for body in [
             r#"{"errors":[{"message":"x"}]}"#,
             r#"{"data":{"search":{"issueCount":1001,"nodes":[],"pageInfo":{"hasNextPage":false}}}}"#,
         ] {
-            assert!(fetch_changes_requested_pages("me", |_| Ok(body.to_string())).is_err());
+            assert!(fetch_reviewed_pages("me", |_| Ok(body.to_string())).is_err());
         }
     }
 
@@ -1896,6 +1936,7 @@ mod tests {
             merge_blocker: None,
             merge_queue: None,
             unresolved_threads: 0,
+            requested_reviewers: Vec::new(),
         }
     }
 

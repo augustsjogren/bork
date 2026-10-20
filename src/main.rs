@@ -85,6 +85,7 @@ struct PrPollResult {
     review_requested_prs: Vec<PrStatus>,
     review_stacks: Option<HashMap<u32, Option<u32>>>,
     changes_requested_prs: Vec<u32>,
+    reviewed_prs: Vec<u32>,
     github_user: Option<String>,
     loading_more: bool,
     error: Option<String>,
@@ -2396,7 +2397,8 @@ fn apply_pr_result(project: &mut app::Project, pr_result: PrPollResult) -> PrApp
         || live.user_prs != pr_result.user_prs
         || live.review_requested_prs != pr_result.review_requested_prs
         || live.review_stacks != pr_result.review_stacks
-        || live.changes_requested_prs != pr_result.changes_requested_prs;
+        || live.changes_requested_prs != pr_result.changes_requested_prs
+        || live.reviewed_prs != pr_result.reviewed_prs;
     let mut user_changed = false;
     if pr_result.github_user.is_some() && live.github_user != pr_result.github_user {
         live.github_user = pr_result.github_user;
@@ -2426,6 +2428,7 @@ fn apply_pr_result(project: &mut app::Project, pr_result: PrPollResult) -> PrApp
     live.review_requested_prs = pr_result.review_requested_prs;
     live.review_stacks = pr_result.review_stacks;
     live.changes_requested_prs = pr_result.changes_requested_prs;
+    live.reviewed_prs = pr_result.reviewed_prs;
     live.pr_poll_done = true;
     PrApplied::DataChanged
 }

@@ -336,6 +336,7 @@ pub struct Response {
     github_user: Option<String>,
     review_stacks: Option<HashMap<u32, Option<u32>>>,
     changes_requested: Vec<u32>,
+    reviewed: Vec<u32>,
     error: Option<String>,
 }
 
@@ -346,6 +347,7 @@ pub fn fetch(path: &Path, request: &Request) -> Response {
             response.prs = discovery.prs;
             response.review_stacks = Some(discovery.stacks);
             response.changes_requested = discovery.changes_requested;
+            response.reviewed = discovery.reviewed;
         }),
         Request::Authored => github::fetch_user_prs(path).map(|prs| response.prs = prs),
         Request::PickerPrs => github::fetch_prs(path).map(|prs| response.prs = prs),
@@ -413,6 +415,7 @@ pub fn poll(
                     cache.result.review_requested_prs = response.prs.clone();
                     cache.result.review_stacks = response.review_stacks;
                     cache.result.changes_requested_prs = response.changes_requested;
+                    cache.result.reviewed_prs = response.reviewed;
                 }
             }
             Request::Authored => {
@@ -646,6 +649,7 @@ mod tests {
             merge_blocker: None,
             merge_queue: None,
             unresolved_threads: 0,
+            requested_reviewers: Vec::new(),
         }
     }
 
