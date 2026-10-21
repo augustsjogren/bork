@@ -72,6 +72,10 @@ pub struct ActionResult {
     /// too — otherwise the next unrelated save flushes the stale in-memory
     /// copy (still showing no worktree) and clobbers that write.
     pub worktree_attached: Option<(ProjectId, String, String)>,
+    /// Set (on success *and* failure) when this result ends a worktree
+    /// creation, so the main loop can clear the card from
+    /// `worktrees_in_flight`.
+    pub worktree_provisioned: Option<(ProjectId, String)>,
     /// The same, for Done cards that Ctrl+d was clearing.
     pub force_clear_offers: Vec<(ProjectId, String, ForceRequired)>,
 }
@@ -1059,10 +1063,16 @@ fn handle_normal(
                 let session_name =
                     issue.session_name(&app.context_project(ctx).config.project_name);
 
+                let in_flight = &mut app.context_project_mut(ctx).worktrees_in_flight;
+                if !in_flight.insert(issue_id.clone()) {
+                    app.set_message(format!("Still provisioning a worktree for {issue_id}..."));
+                    return PostAction::None;
+                }
                 app.begin_busy();
                 app.set_message(format!("Provisioning a worktree to review {issue_id}..."));
 
                 thread::spawn(move || {
+                    let provisioned = Some((project_id.clone(), issue_id.clone()));
                     let created = crate::worktree::create_worktree_with_branch(
                         &config,
                         &issue_id,
@@ -1100,7 +1110,10 @@ fn handle_normal(
                             ..Default::default()
                         },
                     };
-                    let _ = tx.send(result);
+                    let _ = tx.send(ActionResult {
+                        worktree_provisioned: provisioned,
+                        ..result
+                    });
                 });
                 return PostAction::None;
             };
@@ -3328,11 +3341,17 @@ fn start_review_session(
         app.set_message("Session launch already in progress");
         return PostAction::None;
     }
+    if issue.worktree.is_none() {
+        app.context_project_mut(ctx)
+            .worktrees_in_flight
+            .insert(issue_id.clone());
+    }
     app.begin_busy();
     app.set_message(format!("Starting a review of {issue_id}..."));
 
     let tx = ch.action_tx.clone();
     let panic_issue_id = issue_id.clone();
+    let provisioned = Some((project_id.clone(), issue_id.clone()));
     thread::spawn(move || {
         // A panic must still deliver a result, or the in-flight guard leaks.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3344,7 +3363,10 @@ fn start_review_session(
             launched_issue_id: Some(panic_issue_id),
             ..Default::default()
         });
-        let _ = tx.send(result);
+        let _ = tx.send(ActionResult {
+            worktree_provisioned: provisioned,
+            ..result
+        });
     });
 
     PostAction::Launch {
@@ -6619,6 +6641,20 @@ mod tests {
         assert!(
             msg.contains("Provisioning"),
             "expected a provisioning message, got: {msg}"
+        );
+        assert_eq!(app.busy_count, 1);
+    }
+
+    #[test]
+    fn a_second_review_while_its_worktree_is_provisioning_waits() {
+        let mut app = app_with_issues();
+        app.project_mut().tuicr_available = true;
+        act(&mut app, Action::OpenReview);
+        act(&mut app, Action::OpenReview);
+        let (msg, _) = app.message.as_ref().unwrap();
+        assert!(
+            msg.starts_with("Still provisioning"),
+            "expected a wait message, got: {msg}"
         );
         assert_eq!(app.busy_count, 1);
     }

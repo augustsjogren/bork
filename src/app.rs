@@ -275,6 +275,10 @@ pub struct Project {
     pub link_filter: Option<String>,
     /// Show only cards that need their owner (see `attention_for`).
     pub attention_filter: bool,
+    /// Cards whose worktree is still being created. `git worktree list`
+    /// reports a new worktree before its checkout finishes, so auto-assign
+    /// leaves these alone until the creating thread reports back.
+    pub worktrees_in_flight: HashSet<String>,
     pub linear_available: bool,
     pub tuicr_available: bool,
     pub github_available: bool,
@@ -348,6 +352,7 @@ impl Project {
             marked_issues: HashSet::new(),
             link_filter: None,
             attention_filter: false,
+            worktrees_in_flight: HashSet::new(),
             linear_available: false,
             tuicr_available: false,
             github_available: false,
@@ -1040,6 +1045,7 @@ impl Project {
                         self.issues[i].kind,
                         IssueKind::Orchestrator | IssueKind::Cloud
                     )
+                    && !self.worktrees_in_flight.contains(&self.issues[i].id)
             })
             .filter_map(|i| self.detect_worktree(&self.issues[i]).map(|wt| (i, wt)))
             .collect();
@@ -5288,6 +5294,20 @@ mod tests {
         let changed = app.project_mut().auto_assign_worktrees();
         assert!(changed);
         assert_eq!(app.project().issues[0].worktree, Some("bork-8".into()));
+    }
+
+    #[test]
+    fn test_auto_assign_skips_a_worktree_still_being_created() {
+        let mut app = test_app(vec![test_issue("bork-8", Column::InProgress)]);
+        app.project_mut()
+            .live
+            .worktree_branches
+            .insert("bork-8".into(), "bork-8/init-cli".into());
+        app.project_mut()
+            .worktrees_in_flight
+            .insert("bork-8".into());
+        assert!(!app.project_mut().auto_assign_worktrees());
+        assert_eq!(app.project().issues[0].worktree, None);
     }
 
     #[test]

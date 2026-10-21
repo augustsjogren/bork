@@ -3037,6 +3037,12 @@ fn run_tui() -> anyhow::Result<()> {
                 handler::queue_force_prune(&mut app, project_id, outcome.plan_not_saved());
             }
 
+            if let Some((project_id, issue_id)) = &result.worktree_provisioned {
+                if let Some(project) = app.find_project_mut(project_id) {
+                    project.worktrees_in_flight.remove(issue_id);
+                }
+            }
+
             if let Some((project_id, issue_id, worktree_dir)) = result.worktree_attached {
                 if let Some(project) = app.find_project_mut(&project_id) {
                     if let Some(issue) = project
