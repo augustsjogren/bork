@@ -877,26 +877,26 @@ fn handle_normal(
             };
             let session_name = issue.session_name(&app.context_project(ctx).config.project_name);
             let session_alive = app.context_project(ctx).is_session_alive(&session_name);
-            let pr_mode = action == Action::OpenReviewPR;
+            let pr = if action == Action::OpenReviewPR {
+                app.context_project(ctx).pr_for(issue).map(|pr| pr.number)
+            } else {
+                None
+            };
             let popup_title = issue.popup_title();
             let worktree_path = app.context_project(ctx).config.project_root.join(&wt);
             let tx = ch.action_tx.clone();
             app.begin_busy();
-            app.set_message(if session_alive {
-                if pr_mode {
-                    "Opening tuicr --pr..."
-                } else {
-                    "Opening tuicr..."
-                }
-            } else {
-                "Starting tuicr session..."
+            app.set_message(match (session_alive, pr) {
+                (true, Some(number)) => format!("Opening tuicr on PR #{number}..."),
+                (true, None) => "Opening tuicr...".to_string(),
+                (false, _) => "Starting tuicr session...".to_string(),
             });
 
             thread::spawn(move || {
                 let outcome = if session_alive {
-                    tuicr::open_in_session(&session_name, &worktree_path, pr_mode)
+                    tuicr::open_in_session(&session_name, &worktree_path, pr)
                 } else {
-                    tuicr::launch_review_session(&session_name, &worktree_path, pr_mode)
+                    tuicr::launch_review_session(&session_name, &worktree_path, pr)
                 };
                 let result = match outcome {
                     Ok(()) => ActionResult {
