@@ -491,7 +491,11 @@ fn handle_normal(
     let q = app.search_query.clone();
     if action == Action::OpenReviewPR {
         if let Some(issue) = app.context_project(ctx).selected_issue(&q).cloned() {
-            if issue.github_stack.is_some() {
+            let several_prs = app
+                .context_project(ctx)
+                .detail_open_numbers(&issue)
+                .is_ok_and(|numbers| numbers.len() > 1);
+            if issue.github_stack.is_some() || several_prs {
                 return open_pr_group(app, action, ctx, &issue, ch);
             }
         }
@@ -878,7 +882,13 @@ fn handle_normal(
             let session_name = issue.session_name(&app.context_project(ctx).config.project_name);
             let session_alive = app.context_project(ctx).is_session_alive(&session_name);
             let pr = if action == Action::OpenReviewPR {
-                app.context_project(ctx).pr_for(issue).map(|pr| pr.number)
+                match app.context_project(ctx).detail_open_numbers(issue) {
+                    Ok(numbers) => numbers.first().copied(),
+                    Err(message) => {
+                        app.set_warning(message);
+                        return PostAction::None;
+                    }
+                }
             } else {
                 None
             };
@@ -889,7 +899,8 @@ fn handle_normal(
             app.set_message(match (session_alive, pr) {
                 (true, Some(number)) => format!("Opening tuicr on PR #{number}..."),
                 (true, None) => "Opening tuicr...".to_string(),
-                (false, _) => "Starting tuicr session...".to_string(),
+                (false, Some(number)) => format!("Starting tuicr session on PR #{number}..."),
+                (false, None) => "Starting tuicr session...".to_string(),
             });
 
             thread::spawn(move || {
@@ -3389,6 +3400,29 @@ mod tests {
 
         assert!(matches!(post, PostAction::None));
         assert_eq!(app.busy_count, 0);
+    }
+
+    #[test]
+    fn pr_review_without_an_open_pr_warns_instead_of_opening_the_local_review() {
+        let mut app = test_app();
+        app.project_mut().tuicr_available = true;
+        app.project_mut().issues.push(crate::types::Issue {
+            worktree: Some("main".to_string()),
+            ..test_issue_titled("bork-1", "Work", Column::Todo)
+        });
+
+        let ctx = app.action_context();
+        let post = handle_action(&mut app, Action::OpenReviewPR, &ctx, &test_channels());
+
+        assert!(matches!(post, PostAction::None));
+        assert_eq!(app.busy_count, 0);
+        assert_eq!(
+            app.message,
+            Some((
+                "No open PRs linked to this issue".to_string(),
+                MessageKind::Warning
+            ))
+        );
     }
 
     #[test]

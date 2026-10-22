@@ -469,6 +469,29 @@ fn main() {
     }
 
     #[test]
+    fn reopening_a_review_restarts_tuicr_only_for_a_different_pr() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let session = FakeTuicrSession::start("switch");
+
+        open_in_session(&session.name, session.cwd(), Some(12)).unwrap();
+        // The pane reports tuicr before it has logged its launch.
+        wait_until(|| tuicr_is_running(&session.name));
+        session.wait_for_launches(1);
+        open_in_session(&session.name, session.cwd(), Some(12)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(session.launches(), ["pr 12"]);
+
+        open_in_session(&session.name, session.cwd(), Some(13)).unwrap();
+        session.wait_for_launches(2);
+
+        assert_eq!(session.launches(), ["pr 12", "pr 13"]);
+        assert_eq!(tuicr_windows(&session.name), 1);
+    }
+
+    #[test]
     fn a_program_running_in_the_tuicr_window_is_not_typed_into() {
         if !tmux::tmux_available() {
             eprintln!("skipping: tmux is not installed");
