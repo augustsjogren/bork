@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{CardSize, Project};
@@ -58,8 +58,16 @@ pub fn render_card(frame: &mut Frame, ctx: &CardContext, area: Rect, card_size: 
     if !type_label.is_empty() {
         title.push(Span::styled(type_label, type_style));
     }
+    // A heavier frame marks the cursor without needing a background colour,
+    // which the ANSI 16 palette can't pick safely for both light and dark themes.
+    let border_type = if ctx.selected {
+        BorderType::Thick
+    } else {
+        BorderType::Plain
+    };
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(border_type)
         .border_style(border_style)
         .title(Line::from(title));
 

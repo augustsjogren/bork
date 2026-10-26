@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, CardSize, Project};
@@ -10,6 +10,10 @@ use crate::ui::card::{self, CARD_HEIGHT, CARD_HEIGHT_MEDIUM};
 use crate::ui::styles;
 
 const MIN_SWIMLANE_HEIGHT: u16 = 3;
+/// Blank columns between a card and its column frame.
+const CARD_GAP_X: u16 = 1;
+/// Blank columns between neighbouring board columns.
+const COLUMN_GAP: u16 = 1;
 
 fn effective_card_height(card_size: CardSize) -> u16 {
     match card_size {
@@ -94,6 +98,7 @@ fn render_columns(
         Constraint::Percentage(25),
         Constraint::Percentage(25),
     ])
+    .spacing(COLUMN_GAP)
     .split(area);
 
     for (col_idx, column) in Column::ALL.iter().enumerate() {
@@ -131,6 +136,7 @@ fn render_column(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
+        .padding(Padding::horizontal(CARD_GAP_X))
         .title(Span::styled(title, title_style));
 
     let inner = block.inner(area);

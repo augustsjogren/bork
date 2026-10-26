@@ -4167,6 +4167,19 @@ mod tests {
     }
 
     #[test]
+    fn selected_card_draws_a_thick_border() {
+        let app = stack_test_app(2);
+        let issue = test_issue("bork-1", Column::Todo);
+        let rows = card_rows(&app, &issue, 40, crate::app::CardSize::Full);
+        assert!(rows[0].starts_with('┏'), "{}", rows[0]);
+        assert!(
+            rows[rows.len() - 1].starts_with('┗'),
+            "{}",
+            rows[rows.len() - 1]
+        );
+    }
+
+    #[test]
     fn card_footer_keeps_links_left_without_shortcut_hints_in_both_layouts() {
         let app = stack_test_app(2);
         for size in [crate::app::CardSize::Full, crate::app::CardSize::Medium] {
@@ -4353,7 +4366,7 @@ mod tests {
             assert!(!text.contains("Stack #"));
             assert!(!text.contains("s expand"));
             for row in 1..6 {
-                assert_eq!(buffer[(width - 1, row)].symbol(), "│");
+                assert_eq!(buffer[(width - 1, row)].symbol(), "┃");
             }
         }
     }
@@ -4375,7 +4388,7 @@ mod tests {
                 assert!(!rows[3].contains('▸'));
                 assert!(!rows[rows.len() - 2].contains("s expand"));
                 if size == crate::app::CardSize::Full {
-                    assert!(rows[4].trim_matches('│').trim().is_empty());
+                    assert!(rows[4].trim_matches('┃').trim().is_empty());
                 }
             }
         }
@@ -4440,7 +4453,7 @@ mod tests {
                 }
                 assert!(!text.contains("+100"));
                 for row in 1..6 {
-                    assert_eq!(buffer[(width - 1, row)].symbol(), "│");
+                    assert_eq!(buffer[(width - 1, row)].symbol(), "┃");
                 }
             }
         }

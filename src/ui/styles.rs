@@ -19,7 +19,7 @@ pub fn truncate(s: &str, max: usize) -> String {
 pub const ACCENT: Color = Color::Cyan;
 pub const TEXT: Color = Color::Reset;
 pub const DIM: Color = Color::Gray;
-pub const BORDER: Color = Color::Gray;
+pub const BORDER: Color = Color::DarkGray;
 
 pub fn column_header_style(selected: bool) -> Style {
     if selected {
