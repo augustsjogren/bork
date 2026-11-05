@@ -275,22 +275,22 @@ fn compute_viewport(
     let mut start = selected_row.saturating_sub(max_cards.saturating_sub(1));
     let end = (start + max_cards).min(count);
 
-    // The window must not start scrolled past row 0 and still fill the
-    // available height exactly, or the "more above" indicator has no row to
-    // render into and the render loop drops the window's last card instead.
-    if start > 0 {
-        let rows_needed = (end - start) as u16 * card_h + 1;
-        if rows_needed > inner_height && start < selected_row {
-            start += 1;
-        }
-    }
+    // The window must leave a row for the "more above" indicator whenever it
+    // doesn't start at row 0, and another for the review divider whenever one
+    // falls inside it — both at once cost two rows, not one, so the budget
+    // below has to add them rather than check each in isolation. Loops
+    // because shifting `start` can both satisfy the current shortfall and
+    // change whether the divider still falls inside the window.
+    loop {
+        let has_above = start > 0;
+        let divider_crossed = review_boundary.is_some_and(|b| b > start && b < end);
+        let extra_rows = u16::from(has_above) + u16::from(divider_crossed);
+        let rows_needed = (end - start) as u16 * card_h + extra_rows;
 
-    if let Some(boundary) = review_boundary {
-        let divider_crossed = boundary > start && boundary < end;
-        let rows_needed = (end - start) as u16 * card_h + 1;
-        if divider_crossed && rows_needed > inner_height && start < selected_row {
-            start += 1;
+        if rows_needed <= inner_height || start >= selected_row {
+            break;
         }
+        start += 1;
     }
 
     (start, end)
@@ -310,11 +310,13 @@ mod tests {
     }
 
     #[test]
-    fn viewport_divider_absorbed_by_slack_needs_no_shrink() {
-        // inner_height has slack beyond max_cards * card_h (29 vs 28), which
-        // covers the divider's one row for free.
+    fn viewport_divider_and_above_indicator_both_cost_a_row() {
+        // inner_height has one row of slack beyond max_cards * card_h (29 vs
+        // 28), but the above-indicator and the divider both fall inside this
+        // window, so together they need two extra rows, not one. One row of
+        // slack isn't enough: the window must still shrink.
         let (start, end) = compute_viewport(9, 10, 4, 7, 29, Some(7));
-        assert_eq!((start, end), (6, 10));
+        assert_eq!((start, end), (7, 10));
     }
 
     #[test]
@@ -365,6 +367,36 @@ mod tests {
         let (start, end) = compute_viewport(9, 10, max_cards as usize, card_h, inner_height, None);
         let has_above = start > 0;
         let y_offset = if has_above { 1 } else { 0 };
+        let selected_visible_idx = (9 - start) as u16;
+        let card_y = y_offset + selected_visible_idx * card_h;
+        assert!(end > 9, "selection must stay inside the rendered window");
+        assert!(
+            card_y + card_h <= inner_height,
+            "selected card at row {card_y} (height {card_h}) overflows inner_height {inner_height}"
+        );
+    }
+
+    /// Same overflow check as above, but with a review divider also crossing
+    /// the window. Before the cumulative-budget fix, the above-indicator and
+    /// divider checks each independently approved a 1-row-slack window,
+    /// leaving only enough room for one of the two, so the selected card's
+    /// row math overflowed `inner_height` and the render loop's guard
+    /// silently dropped it.
+    #[test]
+    fn selected_card_row_never_overflows_inner_height_with_divider() {
+        let (max_cards, card_h, inner_height) = (4u16, 7u16, 29u16);
+        let boundary = 7;
+        let (start, end) = compute_viewport(
+            9,
+            10,
+            max_cards as usize,
+            card_h,
+            inner_height,
+            Some(boundary),
+        );
+        let has_above = start > 0;
+        let divider_crossed = boundary > start && boundary < end;
+        let y_offset = u16::from(has_above) + u16::from(divider_crossed);
         let selected_visible_idx = (9 - start) as u16;
         let card_y = y_offset + selected_visible_idx * card_h;
         assert!(end > 9, "selection must stay inside the rendered window");
