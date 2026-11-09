@@ -67,9 +67,34 @@ pub fn slugify_title(title: &str) -> String {
 /// Best-effort `git fetch origin` so new branches (and `--base origin/xyz`)
 /// resolve against fresh remote refs. Failure (offline, no remote) is
 /// non-fatal and must never block worktree creation.
-fn fetch_origin(main_dir: &Path) -> bool {
-    crate::external::git_command()
-        .args(["fetch", "origin", "--quiet"])
+///
+/// Fetches only main/'s upstream branch, plus `branch_override` when a review
+/// worktree needs a specific PR branch, as explicit refspecs. A bare `git
+/// fetch origin` would instead sync every branch the remote's default
+/// refspec (`.git/config`'s `remote.origin.fetch`, normally
+/// `refs/heads/*:refs/remotes/origin/*`) names — tens of thousands on a large
+/// monorepo — which is the dominant cost of starting a review session.
+/// Falls back to that full fetch when main/ has no upstream configured, since
+/// there is then nothing narrower to ask for.
+fn fetch_origin(main_dir: &Path, branch_override: Option<&str>) -> bool {
+    let upstream = git_stdout(
+        main_dir,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+    );
+
+    let mut refspecs = Vec::new();
+    if let Some(name) = upstream.as_deref().and_then(|u| u.strip_prefix("origin/")) {
+        refspecs.push(format!("{name}:refs/remotes/origin/{name}"));
+    }
+    if let Some(branch) = branch_override {
+        if !refspecs.iter().any(|r| r.starts_with(&format!("{branch}:"))) {
+            refspecs.push(format!("{branch}:refs/remotes/origin/{branch}"));
+        }
+    }
+
+    let mut command = crate::external::git_command();
+    command.args(["fetch", "origin", "--quiet"]).args(&refspecs);
+    command
         .current_dir(main_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -160,7 +185,7 @@ pub fn create_worktree_with_branch(
     // a stale view of the remote. Only warn about being behind when branching
     // off main/'s HEAD (the default); a custom --base picks its own start.
     let mut notes = Vec::new();
-    if fetch_origin(&main_dir) && base_branch.is_none() {
+    if fetch_origin(&main_dir, branch_override) && base_branch.is_none() {
         let behind_upstream = commits_behind_upstream(&main_dir).filter(|(_, count)| *count > 0);
         if let Some((upstream, behind)) = behind_upstream {
             notes.push(format!(
