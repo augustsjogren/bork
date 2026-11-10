@@ -2373,6 +2373,7 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
         linked_issues: _,
         // Merged field-wise in merge_cloud_fields().
         cloud: _,
+        mission_id: _,
         // Merged entry-wise, interleaved with the kind/orchestrator logic below.
         sessions: _,
         session_dirs: _,
@@ -2420,6 +2421,7 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
     merge_field!(pr_import_baseline);
     merge_field!(stack_review_import);
     merge_field!(linked_issues);
+    merge_field!(mission_id);
 
     merge_cloud_fields(memory, base, file);
 

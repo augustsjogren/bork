@@ -63,6 +63,8 @@ pub struct ListOptions {
     /// When set, restrict output to the connected component of links that
     /// contains this issue id (the anchor plus everything reachable via links).
     pub linked: Option<String>,
+    /// When set, restrict output to the members of this mission.
+    pub mission: Option<String>,
 }
 
 /// Connected component of the link graph containing `anchor` (BFS over
@@ -95,6 +97,11 @@ pub fn list_issues(project_root: &Path, opts: &ListOptions) -> anyhow::Result<St
         .linked
         .as_deref()
         .map(|anchor| linked_component(&state.issues, anchor));
+    if let Some(mission_id) = opts.mission.as_deref() {
+        if !is_mission(&state.issues, mission_id) {
+            anyhow::bail!("{} is not a mission", mission_id);
+        }
+    }
 
     let issues: Vec<&Issue> = state
         .issues
@@ -104,6 +111,11 @@ pub fn list_issues(project_root: &Path, opts: &ListOptions) -> anyhow::Result<St
             component
                 .as_ref()
                 .is_none_or(|c| c.contains(&i.id.to_lowercase()))
+        })
+        .filter(|i| {
+            opts.mission
+                .as_deref()
+                .is_none_or(|mission_id| in_mission(&state.issues, i, mission_id))
         })
         .collect();
 
@@ -404,13 +416,20 @@ pub fn delete_issue(project_root: &Path, issue_id: &str) -> anyhow::Result<Issue
     Ok(removed)
 }
 
-/// Drop `removed_id` from every issue's `linked_issues`, keeping links symmetric
-/// after an issue is deleted or archived.
+/// Drop `removed_id` from every issue's `linked_issues` and `mission_id`,
+/// keeping links symmetric after an issue is deleted or archived.
 pub fn remove_link_references(issues: &mut [Issue], removed_id: &str) {
     for issue in issues.iter_mut() {
         issue
             .linked_issues
             .retain(|l| !l.eq_ignore_ascii_case(removed_id));
+        if issue
+            .mission_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case(removed_id))
+        {
+            issue.mission_id = None;
+        }
     }
 }
 
@@ -463,6 +482,92 @@ pub fn unlink_issues(project_root: &Path, a: &str, b: &str) -> anyhow::Result<(S
 
     config::save_state(&state, project_root)?;
     Ok((id_a, id_b))
+}
+
+/// The mission `issue` belongs to, when its `mission_id` still names an
+/// orchestrator and `issue` isn't one itself. Ids are kept across kind
+/// changes, so turning either side back restores the membership.
+pub fn mission_of<'a>(issues: &'a [Issue], issue: &Issue) -> Option<&'a Issue> {
+    if issue.kind == IssueKind::Orchestrator {
+        return None;
+    }
+    find_mission(issues, issue.mission_id.as_deref()?)
+}
+
+pub fn is_mission(issues: &[Issue], issue_id: &str) -> bool {
+    find_mission(issues, issue_id).is_some()
+}
+
+fn find_mission<'a>(issues: &'a [Issue], mission_id: &str) -> Option<&'a Issue> {
+    let idx = find_issue_index(issues, mission_id)?;
+    Some(&issues[idx]).filter(|mission| mission.kind == IssueKind::Orchestrator)
+}
+
+fn in_mission(issues: &[Issue], issue: &Issue, mission_id: &str) -> bool {
+    mission_of(issues, issue).is_some_and(|mission| mission.id.eq_ignore_ascii_case(mission_id))
+}
+
+fn mission_members<'a>(
+    issues: &'a [Issue],
+    mission_id: &'a str,
+) -> impl Iterator<Item = &'a Issue> {
+    issues
+        .iter()
+        .filter(move |issue| in_mission(issues, issue, mission_id))
+}
+
+/// Put `issue_ids` under the mission `mission_id`. Validates every id before
+/// changing any, so a bad id leaves the board untouched. Returns the
+/// mission's canonical id.
+pub fn assign_mission(
+    project_root: &Path,
+    mission_id: &str,
+    issue_ids: &[String],
+) -> anyhow::Result<String> {
+    let mut state = config::load_state(project_root);
+    let mission_id = assign_mission_in(&mut state.issues, mission_id, issue_ids)?;
+    config::save_state(&state, project_root)?;
+    Ok(mission_id)
+}
+
+pub fn assign_mission_in(
+    issues: &mut [Issue],
+    mission_id: &str,
+    issue_ids: &[String],
+) -> anyhow::Result<String> {
+    let mission_id = find_mission(issues, mission_id)
+        .ok_or_else(|| anyhow::anyhow!("{} is not a mission", mission_id))?
+        .id
+        .clone();
+
+    let mut member_indexes = Vec::with_capacity(issue_ids.len());
+    for issue_id in issue_ids {
+        let idx = find_issue_index(issues, issue_id)
+            .ok_or_else(|| anyhow::anyhow!("Issue '{}' not found", issue_id))?;
+        if issues[idx].kind == IssueKind::Orchestrator {
+            anyhow::bail!("{} is itself a mission", issues[idx].id);
+        }
+        member_indexes.push(idx);
+    }
+
+    for idx in member_indexes {
+        issues[idx].mission_id = Some(mission_id.clone());
+    }
+    Ok(mission_id)
+}
+
+pub fn leave_mission(project_root: &Path, issue_id: &str) -> anyhow::Result<Issue> {
+    let mut state = config::load_state(project_root);
+    let idx = find_issue_index(&state.issues, issue_id)
+        .ok_or_else(|| anyhow::anyhow!("Issue '{}' not found", issue_id))?;
+
+    if mission_of(&state.issues, &state.issues[idx]).is_none() {
+        anyhow::bail!("{} is not in a mission", state.issues[idx].id);
+    }
+    state.issues[idx].mission_id = None;
+    let updated = state.issues[idx].clone();
+    config::save_state(&state, project_root)?;
+    Ok(updated)
 }
 
 pub fn show_issue(project_root: &Path, issue_id: &str, json: bool) -> anyhow::Result<String> {
@@ -518,6 +623,17 @@ pub fn show_issue(project_root: &Path, issue_id: &str, json: bool) -> anyhow::Re
     }
     if !issue.linked_issues.is_empty() {
         let _ = writeln!(out, "Linked:   {}", issue.linked_issues.join(", "));
+    }
+    if let Some(mission) = mission_of(&state.issues, issue) {
+        let _ = writeln!(out, "Mission:  {} \"{}\"", mission.id, mission.title);
+    }
+    if issue.kind == IssueKind::Orchestrator {
+        let member_ids: Vec<&str> = mission_members(&state.issues, &issue.id)
+            .map(|member| member.id.as_str())
+            .collect();
+        if !member_ids.is_empty() {
+            let _ = writeln!(out, "Members:  {}", member_ids.join(", "));
+        }
     }
 
     Ok(out.trim_end().to_string())
@@ -903,6 +1019,7 @@ mod tests {
                 column: None,
                 json: false,
                 linked: None,
+                mission: None,
             },
         )
         .unwrap();
@@ -939,6 +1056,7 @@ mod tests {
                 column: None,
                 json: false,
                 linked: None,
+                mission: None,
             },
         )
         .unwrap();
@@ -1573,6 +1691,7 @@ mod tests {
                 column: None,
                 json: false,
                 linked: None,
+                mission: None,
             },
         )
         .unwrap();
@@ -1705,6 +1824,7 @@ mod tests {
                 column: Some(Column::Todo),
                 json: false,
                 linked: None,
+                mission: None,
             },
         )
         .unwrap();
@@ -1737,6 +1857,7 @@ mod tests {
                 column: None,
                 json: true,
                 linked: None,
+                mission: None,
             },
         )
         .unwrap();
@@ -2123,12 +2244,201 @@ mod tests {
                 column: None,
                 json: false,
                 linked: Some("test-1".into()),
+                mission: None,
             },
         )
         .unwrap();
 
         assert!(output.contains("test-1"));
         assert!(output.contains("test-2"));
+        assert!(!output.contains("test-3"));
+    }
+
+    fn seed_mission(root: &Path, mission_id: &str, member_ids: &[&str]) {
+        let mut ids = vec![mission_id];
+        ids.extend_from_slice(member_ids);
+        seed_issues(root, &ids);
+        update_issue(
+            root,
+            mission_id,
+            UpdateOptions {
+                kind: Some(IssueKind::Orchestrator),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    fn mission_member_ids(root: &Path, mission_id: &str) -> Vec<String> {
+        let state = config::load_state(root);
+        mission_members(&state.issues, mission_id)
+            .map(|issue| issue.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn assign_mission_adds_members_case_insensitively() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &["test-2", "test-3"]);
+
+        let mission_id =
+            assign_mission(root, "TEST-1", &["test-2".into(), "Test-3".into()]).unwrap();
+
+        assert_eq!(mission_id, "test-1");
+        assert_eq!(mission_member_ids(root, "test-1"), vec!["test-2", "test-3"]);
+    }
+
+    #[test]
+    fn assign_mission_rejects_a_non_orchestrator_mission() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_issues(root, &["test-1", "test-2"]);
+
+        let error = assign_mission(root, "test-1", &["test-2".into()]).unwrap_err();
+
+        assert_eq!(error.to_string(), "test-1 is not a mission");
+    }
+
+    #[test]
+    fn assign_mission_rejects_nesting_missions() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &["test-2"]);
+        update_issue(
+            root,
+            "test-2",
+            UpdateOptions {
+                kind: Some(IssueKind::Orchestrator),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let error = assign_mission(root, "test-1", &["test-2".into()]).unwrap_err();
+
+        assert_eq!(error.to_string(), "test-2 is itself a mission");
+        assert!(mission_member_ids(root, "test-1").is_empty());
+    }
+
+    #[test]
+    fn leave_mission_drops_membership() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &["test-2"]);
+        assign_mission(root, "test-1", &["test-2".into()]).unwrap();
+
+        let issue = leave_mission(root, "test-2").unwrap();
+
+        assert_eq!(issue.mission_id, None);
+        assert!(mission_member_ids(root, "test-1").is_empty());
+    }
+
+    #[test]
+    fn mission_of_ignores_a_mission_that_stopped_being_an_orchestrator() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &["test-2"]);
+        assign_mission(root, "test-1", &["test-2".into()]).unwrap();
+        update_issue(
+            root,
+            "test-1",
+            UpdateOptions {
+                kind: Some(IssueKind::Agentic),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let state = config::load_state(root);
+        let member = state.issues.iter().find(|i| i.id == "test-2").unwrap();
+
+        assert!(mission_of(&state.issues, member).is_none());
+    }
+
+    #[test]
+    fn a_member_that_becomes_an_orchestrator_leaves_the_mission() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &["test-2"]);
+        assign_mission(root, "test-1", &["test-2".into()]).unwrap();
+        update_issue(
+            root,
+            "test-2",
+            UpdateOptions {
+                kind: Some(IssueKind::Orchestrator),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(mission_member_ids(root, "test-1").is_empty());
+    }
+
+    #[test]
+    fn leave_mission_rejects_an_issue_outside_any_mission() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_issues(root, &["test-1"]);
+
+        let error = leave_mission(root, "test-1").unwrap_err();
+
+        assert_eq!(error.to_string(), "test-1 is not in a mission");
+    }
+
+    #[test]
+    fn list_mission_rejects_a_non_mission() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_issues(root, &["test-1"]);
+
+        let error = list_issues(
+            root,
+            &ListOptions {
+                column: None,
+                json: false,
+                linked: None,
+                mission: Some("test-1".into()),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "test-1 is not a mission");
+    }
+
+    #[test]
+    fn deleting_a_mission_releases_its_members() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &["test-2"]);
+        assign_mission(root, "test-1", &["test-2".into()]).unwrap();
+
+        delete_issue(root, "test-1").unwrap();
+
+        let state = config::load_state(root);
+        assert_eq!(state.issues[0].mission_id, None);
+    }
+
+    #[test]
+    fn list_mission_filters_to_members() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &["test-2", "test-3"]);
+        assign_mission(root, "test-1", &["test-2".into()]).unwrap();
+
+        let output = list_issues(
+            root,
+            &ListOptions {
+                column: None,
+                json: false,
+                linked: None,
+                mission: Some("test-1".into()),
+            },
+        )
+        .unwrap();
+
+        assert!(output.contains("test-2"));
+        assert!(!output.contains("test-1 "));
         assert!(!output.contains("test-3"));
     }
 

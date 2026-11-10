@@ -246,6 +246,8 @@ Issues can be tied to other issues in the same project via a symmetric `linked_i
 - Cards show a cyan `∞N` badge (link count). Deleting an issue strips its id from every other issue's `linked_issues` (`ops::remove_link_references`).
 - Any new `Issue` field (including `linked_issues`) must be added to `merge_issue_fields` in `app.rs` or concurrent TUI edits drop CLI-written values.
 
+Missions group issues under an orchestrator through a one-way `Issue.mission_id`. `ops::mission_of` resolves it, and returns `None` when the id no longer names an orchestrator or the member became one. Ids survive kind changes, so switching back restores the membership. `bork issue start` adds the new issue to `--mission <id>`, or to the spawning issue when `BORK_ISSUE_ID` is an orchestrator; it still links the two as well. `bork mission add <mission-id> <id>...` / `remove <id>` edit membership, `bork issue list --mission <id>` lists members, and deleting a mission clears its members' `mission_id` (`ops::remove_link_references`). Orchestrators can't join a mission.
+
 ## Loading indicators
 
 - Use the existing animated spinner for routine loading; do not add textual loaders such as `Loading...`, `Fetching...`, or `Refreshing...` to cards, rows, or modal summaries.

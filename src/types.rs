@@ -531,6 +531,11 @@ pub struct Issue {
     /// Cursor cloud agent, only for `IssueKind::Cloud` issues.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<CloudAgent>,
+    /// The mission (an orchestrator issue in the same project) this issue
+    /// belongs to. Resolve it with `ops::mission_of`, which ignores an id
+    /// that no longer names an orchestrator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<String>,
 
     // --- Legacy singular fields (read-only, for migration from old state.json) ---
     #[serde(default, skip_serializing)]
@@ -599,6 +604,7 @@ impl Issue {
             stack_review_import: None,
             linked_issues: Vec::new(),
             cloud: None,
+            mission_id: None,
             session_id: None,
             linear_id: None,
             linear_identifier: None,

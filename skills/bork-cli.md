@@ -136,6 +136,16 @@ bork integration attach-linear bork-1 VIL-123
 
 This sets the Linear identifier on the issue so the TUI can display the link and sync status.
 
+### Group issues under a mission
+
+```bash
+bork mission add bork-1 bork-3 bork-4   # bork-1 must be an orchestrator
+bork mission remove bork-3
+bork issue list --mission bork-1 --json
+```
+
+An orchestrator leads its mission. `bork issue start` run from an orchestrator's session adds the new issue to that mission; `--mission <id>` picks one explicitly.
+
 ### Link a Linear project (orchestrators only)
 
 ```bash

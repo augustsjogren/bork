@@ -144,6 +144,8 @@ bork --help
 | `bork issue move <id> <column>` | Move an issue to a column |
 | `bork issue archive <id>` | Kill session, run teardown, remove worktree, move to Done |
 | `bork issue delete <id>` | Delete an issue |
+| `bork mission add <mission-id> <id>...` | Add issues to a mission (an orchestrator issue that leads them) |
+| `bork mission remove <id>` | Take an issue out of its mission |
 | `bork integration attach-linear <id> <identifier>` | Link a Linear ticket to an issue (can attach multiple) |
 | `bork integration attach-linear-project <id> <url-or-slug>` | Link a Linear project to an orchestrator issue (can attach multiple) |
 | `bork integration detach-linear-project <id> <url-or-slug>` | Unlink a Linear project from an issue |
