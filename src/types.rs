@@ -464,6 +464,42 @@ pub struct PrImportBaseline {
     pub agent_kind: AgentKind,
     pub number: u32,
     pub source: PrImportSource,
+    /// The Linear ticket bork attached from the PR title's `[ABC-123]`, part
+    /// of what an untouched import looks like.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_identifier: Option<String>,
+}
+
+/// The Linear ticket a title names in its leading `[ABC-123]`. Branch
+/// names are not read: `utf-8-fix` or `branch-2` look just like tickets.
+/// Ids with the board's own prefix are bork card ids (`[BORK-501]`), not
+/// tickets.
+pub fn linear_identifier_in_title(title: &str, board_prefix: &str) -> Option<String> {
+    let (inside, _) = title.trim_start().strip_prefix('[')?.split_once(']')?;
+    let (team, number) = inside.trim().split_once('-')?;
+    let team_ok = (2..=10).contains(&team.len())
+        && team.starts_with(|c: char| c.is_ascii_alphabetic())
+        && team.chars().all(|c| c.is_ascii_alphanumeric())
+        && !team.eq_ignore_ascii_case(board_prefix);
+    let number_ok = !number.is_empty() && number.chars().all(|c| c.is_ascii_digit());
+    if !team_ok || !number_ok {
+        return None;
+    }
+    Some(format!("{}-{number}", team.to_ascii_uppercase()))
+}
+
+impl LinkedLinear {
+    /// A link known only by its identifier, as attached from a PR title or
+    /// the CLI. Its Linear id and url stay empty, so code that acts on the
+    /// ticket in Linear or opens it must skip such a link.
+    pub fn from_identifier(identifier: String) -> Self {
+        Self {
+            id: String::new(),
+            identifier,
+            url: String::new(),
+            imported: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -622,6 +658,12 @@ impl Issue {
         };
         let expected = Self {
             prompt: baseline.prompt.clone(),
+            linear_links: baseline
+                .linear_identifier
+                .clone()
+                .map(LinkedLinear::from_identifier)
+                .into_iter()
+                .collect(),
             github_pr_links: vec![LinkedGithubPr {
                 number: baseline.number,
                 imported: true,

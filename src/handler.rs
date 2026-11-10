@@ -1322,22 +1322,32 @@ fn handle_normal(
             let project = app.context_project(ctx);
             let issues = project.target_issues(&q);
             let mut links: Vec<(String, String)> = Vec::new();
+            let mut unresolved: Vec<String> = Vec::new();
             let mut skipped = 0;
             for issue in &issues {
                 if issue.linear_links.is_empty() {
                     skipped += 1;
                 }
                 for link in &issue.linear_links {
+                    // A link attached by identifier alone has no url to open.
+                    if link.url.is_empty() {
+                        unresolved.push(link.identifier.clone());
+                        continue;
+                    }
                     if !links.iter().any(|(_, url)| *url == link.url) {
                         links.push((link.identifier.clone(), link.url.clone()));
                     }
                 }
             }
             if links.is_empty() {
-                match issues.len() {
-                    0 => {}
-                    1 => app.set_warning("No Linear issue linked"),
-                    _ => app.set_warning("No Linear issues linked to the marked issues"),
+                match (issues.len(), unresolved.as_slice()) {
+                    (0, _) => {}
+                    (_, [_, ..]) => app.set_warning(format!(
+                        "No Linear url known yet for {}",
+                        unresolved.join(", ")
+                    )),
+                    (1, []) => app.set_warning("No Linear issue linked"),
+                    (_, []) => app.set_warning("No Linear issues linked to the marked issues"),
                 }
                 return PostAction::None;
             }
@@ -7103,6 +7113,25 @@ mod tests {
         let (msg, kind) = app.message.as_ref().unwrap();
         assert!(msg.contains("No Linear issue linked"));
         assert_eq!(*kind, MessageKind::Warning);
+    }
+
+    #[test]
+    fn open_linear_on_a_ticket_known_only_by_id_says_so() {
+        let mut app = app_with_issues();
+        app.project_mut().issues[0]
+            .linear_links
+            .push(crate::types::LinkedLinear::from_identifier(
+                "ENG-4140".into(),
+            ));
+
+        act(&mut app, Action::OpenLinear);
+
+        assert_eq!(
+            app.message
+                .as_ref()
+                .map(|(text, kind)| (text.as_str(), *kind)),
+            Some(("No Linear url known yet for ENG-4140", MessageKind::Warning))
+        );
     }
 
     #[test]

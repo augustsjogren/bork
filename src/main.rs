@@ -1076,6 +1076,14 @@ enum IntegrationCommand {
         linear_identifier: String,
     },
 
+    /// Link each ticketless issue to the Linear ticket its title starts with
+    /// (e.g. "[VIL-123] fix: ...")
+    AttachLinearFromTitles {
+        /// Print what would be linked without changing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Link a GitHub PR to an issue. The issue ID can be left out inside an
     /// agent session, where it defaults to `BORK_ISSUE_ID`.
     #[command(override_usage = "bork integration attach-pr [ISSUE_ID] <PR_NUMBER>")]
@@ -2275,6 +2283,15 @@ fn run_integration_command(command: IntegrationCommand) -> anyhow::Result<()> {
                 issue.id,
                 linear_identifier.to_uppercase()
             );
+            Ok(())
+        }
+        IntegrationCommand::AttachLinearFromTitles { dry_run } => {
+            let attached = ops::attach_linear_from_titles(&project_root, dry_run)?;
+            let verb = if dry_run { "Would link" } else { "Linked" };
+            for (issue_id, identifier) in &attached {
+                println!("{verb} {issue_id} to Linear {identifier}");
+            }
+            println!("{verb} {} issue(s)", attached.len());
             Ok(())
         }
         IntegrationCommand::AttachLinearProject { issue_id, project } => {

@@ -151,6 +151,7 @@ bork --help
 | `bork mission handoff <mission-id>` | Ask the running mission control to write a handoff into its `planning.md` |
 | `bork mission restart <mission-id>` | Kill mission control and launch a fresh session that starts from its plan and links |
 | `bork integration attach-linear <id> <identifier>` | Link a Linear ticket to an issue (can attach multiple) |
+| `bork integration attach-linear-from-titles [--dry-run]` | Link every ticketless issue to the Linear ticket its title starts with (`[VIL-123] fix: …`). Imported PRs get theirs at import; this catches up older cards |
 | `bork integration attach-linear-project <id> <url-or-slug>` | Link a Linear project to a mission (can attach multiple) |
 | `bork integration detach-linear-project <id> <url-or-slug>` | Unlink a Linear project from an issue |
 | `bork integration attach-pr [id] <number>` | Link a GitHub PR to an issue (can attach multiple; `id` defaults to `BORK_ISSUE_ID` inside an agent session) |

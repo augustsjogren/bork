@@ -893,18 +893,59 @@ pub fn attach_linear(
         .iter()
         .any(|l| l.identifier == identifier)
     {
-        issue.linear_links.push(crate::types::LinkedLinear {
-            id: String::new(),
-            identifier,
-            url: String::new(),
-            imported: false,
-        });
+        issue
+            .linear_links
+            .push(crate::types::LinkedLinear::from_identifier(identifier));
     }
 
     let updated = issue.clone();
     config::save_state(&state, project_root)?;
 
     Ok(updated)
+}
+
+/// Attach the Linear ticket each ticketless card names in its title's
+/// `[ABC-123]` prefix. An untouched PR import gets the ticket in its import
+/// baseline too, so it stays untouched and can still fold into a stack card.
+/// Returns `(issue id, ticket)` for every card changed, or that would change
+/// with `dry_run`.
+pub fn attach_linear_from_titles(
+    project_root: &Path,
+    dry_run: bool,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let mut state = config::load_state(project_root);
+    let config = config::load_config_from(project_root);
+
+    let mut attached = Vec::new();
+    for issue in &mut state.issues {
+        if !issue.linear_links.is_empty() {
+            continue;
+        }
+        let Some(identifier) =
+            crate::types::linear_identifier_in_title(&issue.title, &config.project_name)
+        else {
+            continue;
+        };
+        attached.push((issue.id.clone(), identifier.clone()));
+        if dry_run {
+            continue;
+        }
+
+        let untouched = issue.is_untouched_pr_import();
+        issue
+            .linear_links
+            .push(crate::types::LinkedLinear::from_identifier(
+                identifier.clone(),
+            ));
+        if let Some(baseline) = issue.pr_import_baseline.as_mut().filter(|_| untouched) {
+            baseline.linear_identifier = Some(identifier);
+        }
+    }
+
+    if !dry_run && !attached.is_empty() {
+        config::save_state(&state, project_root)?;
+    }
+    Ok(attached)
 }
 
 pub fn attach_pr(project_root: &Path, issue_id: &str, pr_number: u32) -> anyhow::Result<Issue> {
@@ -2408,6 +2449,60 @@ mod tests {
         assert!(component.contains("test-2"));
         assert!(component.contains("test-3"));
         assert!(!component.contains("test-4"));
+    }
+
+    fn untouched_pr_import(id: &str, title: &str, number: u32) -> Issue {
+        use crate::types::{LinkedGithubPr, PrImportBaseline, PrImportSource};
+        Issue {
+            pr_import_baseline: Some(PrImportBaseline {
+                title: title.into(),
+                prompt: None,
+                agent_kind: AgentKind::OpenCode,
+                number,
+                source: PrImportSource::Authored,
+                linear_identifier: None,
+            }),
+            github_pr_links: vec![LinkedGithubPr {
+                number,
+                imported: true,
+                import_source: Some(PrImportSource::Authored),
+            }],
+            ..Issue::new(id, title, Column::CodeReview, AgentKind::OpenCode)
+        }
+    }
+
+    #[test]
+    fn attach_linear_from_titles_links_ticketless_cards_and_keeps_imports_untouched() {
+        let dir = setup_project();
+        let root = dir.path();
+        let imported = untouched_pr_import("test-1", "[ENG-4140] feat: tokenize", 7);
+        assert!(imported.is_untouched_pr_import());
+        let already_linked = Issue {
+            linear_links: vec![crate::types::LinkedLinear::from_identifier("ENG-1".into())],
+            ..Issue::new("test-2", "[ENG-2] fix", Column::Todo, AgentKind::OpenCode)
+        };
+        let board_id = Issue::new("test-3", "[TEST-9] card", Column::Todo, AgentKind::OpenCode);
+        config::save_state(
+            &config::AppState {
+                issues: vec![imported, already_linked, board_id],
+                ..Default::default()
+            },
+            root,
+        )
+        .unwrap();
+
+        let preview = attach_linear_from_titles(root, true).unwrap();
+        assert!(config::load_state(root).issues[0].linear_links.is_empty());
+        let attached = attach_linear_from_titles(root, false).unwrap();
+
+        let expected = vec![("test-1".to_string(), "ENG-4140".to_string())];
+        assert_eq!(preview, expected);
+        assert_eq!(attached, expected);
+        let issues = config::load_state(root).issues;
+        assert_eq!(issues[0].linear_identifiers(), vec!["ENG-4140"]);
+        assert!(issues[0].is_untouched_pr_import());
+        assert_eq!(issues[1].linear_identifiers(), vec!["ENG-1"]);
+        assert!(issues[2].linear_links.is_empty());
     }
 
     #[test]
