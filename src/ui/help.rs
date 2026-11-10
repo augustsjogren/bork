@@ -65,7 +65,7 @@ const SECTIONS: &[Section] = &[
             ("Shift+Enter", "Start session (or all marked)"),
             ("t", "Terminal"),
             ("x", "Kill session"),
-            ("M", "Mission handoff, then fresh restart"),
+            ("M", "Put card in a mission / hand off a mission"),
         ],
     },
     Section {

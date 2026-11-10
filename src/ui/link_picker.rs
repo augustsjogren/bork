@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, PickerPurpose};
 use crate::ui::styles;
 
 const PICKER_MIN_WIDTH: u16 = 50;
@@ -32,7 +32,7 @@ pub fn render_link_picker(frame: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(styles::ACCENT))
         .title(Span::styled(
-            format!(" Link {} to ", picker.anchor_id),
+            picker_title(&picker.anchor_id, &picker.purpose),
             Style::default()
                 .fg(styles::ACCENT)
                 .add_modifier(Modifier::BOLD),
@@ -82,10 +82,12 @@ pub fn render_link_picker(frame: &mut Frame, app: &App) {
 
     if count == 0 {
         let empty_area = Rect::new(inner.x + 1, list_start_y, inner.width - 2, 1);
-        let msg = if app.active_project().issues.len() <= 1 {
-            "No other issues to link"
-        } else {
-            "No matching issues"
+        let msg = match picker.purpose {
+            PickerPurpose::Mission { .. } => "No matching missions",
+            PickerPurpose::Link if app.active_project().issues.len() <= 1 => {
+                "No other issues to link"
+            }
+            PickerPurpose::Link => "No matching issues",
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(msg, styles::dim_style()))),
@@ -137,9 +139,13 @@ pub fn render_link_picker(frame: &mut Frame, app: &App) {
 
     let footer_y = inner.y + inner.height - 1;
     let footer_area = Rect::new(inner.x + 1, footer_y, inner.width - 2, 1);
+    let enter_label = match picker.purpose {
+        PickerPurpose::Link => ":toggle  ",
+        PickerPurpose::Mission { .. } => ":pick  ",
+    };
     let footer_spans = vec![
         Span::styled("Enter", styles::statusbar_key_style()),
-        Span::styled(":toggle  ", styles::statusbar_desc_style()),
+        Span::styled(enter_label, styles::statusbar_desc_style()),
         Span::styled("\u{2191}\u{2193}", styles::statusbar_key_style()),
         Span::styled(":navigate  ", styles::statusbar_desc_style()),
         Span::styled("Esc", styles::statusbar_key_style()),
@@ -150,4 +156,14 @@ pub fn render_link_picker(frame: &mut Frame, app: &App) {
         ),
     ];
     frame.render_widget(Paragraph::new(Line::from(footer_spans)), footer_area);
+}
+
+fn picker_title(anchor_id: &str, purpose: &PickerPurpose) -> String {
+    match purpose {
+        PickerPurpose::Link => format!(" Link {anchor_id} to "),
+        PickerPurpose::Mission { issue_ids } if issue_ids.len() > 1 => {
+            format!(" Put {} cards in mission ", issue_ids.len())
+        }
+        PickerPurpose::Mission { .. } => format!(" Put {anchor_id} in mission "),
+    }
 }
