@@ -79,7 +79,12 @@ pub fn slugify_title(title: &str) -> String {
 fn fetch_origin(main_dir: &Path, branch_override: Option<&str>) -> bool {
     let upstream = git_stdout(
         main_dir,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
     );
 
     let mut refspecs = Vec::new();
@@ -87,7 +92,10 @@ fn fetch_origin(main_dir: &Path, branch_override: Option<&str>) -> bool {
         refspecs.push(format!("{name}:refs/remotes/origin/{name}"));
     }
     if let Some(branch) = branch_override {
-        if !refspecs.iter().any(|r| r.starts_with(&format!("{branch}:"))) {
+        if !refspecs
+            .iter()
+            .any(|r| r.starts_with(&format!("{branch}:")))
+        {
             refspecs.push(format!("{branch}:refs/remotes/origin/{branch}"));
         }
     }
