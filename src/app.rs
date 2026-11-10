@@ -25,8 +25,8 @@ use crate::prune::{PruneAction, PruneCandidate};
 use crate::types::{
     cloud_card_status, AgentKind, AgentStatus, AgentStatusInfo, ChecksStatus, CloudAgent,
     CloudRunInfo, Column, DeletedIssue, GithubStack, Issue, IssueKind, LinkedGithubPr,
-    MergeBlocker, PrImportBaseline, PrImportSource, PrState, PrStatus, ReviewDecision,
-    WorktreeStatus,
+    LinkedLinear, MergeBlocker, PrImportBaseline, PrImportSource, PrState, PrStatus,
+    ReviewDecision, WorktreeStatus,
 };
 use crate::undo::UndoEntry;
 use crate::worktree::ForceRequired;
@@ -980,8 +980,19 @@ impl Project {
     /// A ticket still sitting in `Triage` is skipped for the status move: work
     /// starting on it is investigative, not a commitment to the ticket's
     /// workflow, so its state is left for the user to change by hand.
+    ///
+    /// Review cards are skipped: their ticket belongs to the PR's author. So is
+    /// a link known only by identifier, which has no Linear id to act on.
     pub fn queue_linear_start(&mut self, idx: usize) {
-        let Some(link) = self.issues[idx].linear_links.first() else {
+        let issue = &self.issues[idx];
+        if issue.is_review_import() || issue.stack_review_import.is_some() {
+            return;
+        }
+        let Some(link) = issue
+            .linear_links
+            .first()
+            .filter(|link| !link.id.is_empty())
+        else {
             return;
         };
         let Some(team_key) = link.identifier.split('-').next() else {
@@ -1881,6 +1892,13 @@ impl Project {
             PrImportSource::ReviewRequested => Some(review_prompt(&self.config, pr)),
         };
         let agent_kind = self.default_agent();
+        let linear_identifier =
+            crate::types::linear_identifier_in_title(&pr.title, &self.config.project_name);
+        let linear_links = linear_identifier
+            .clone()
+            .map(LinkedLinear::from_identifier)
+            .into_iter()
+            .collect();
         Issue {
             pr_import_baseline: Some(PrImportBaseline {
                 title: pr.title.clone(),
@@ -1888,8 +1906,10 @@ impl Project {
                 agent_kind,
                 number: pr.number,
                 source,
+                linear_identifier,
             }),
             prompt,
+            linear_links,
             github_pr_links: vec![LinkedGithubPr {
                 number: pr.number,
                 imported: true,
@@ -4022,6 +4042,28 @@ mod tests {
             import_source: source,
         });
         issue
+    }
+
+    #[test]
+    fn cards_without_a_linear_id_or_reviewing_someone_else_queue_no_linear_start() {
+        let mut identifier_only = test_issue("bork-1", Column::Todo);
+        identifier_only
+            .linear_links
+            .push(crate::types::LinkedLinear::from_identifier("ENG-1".into()));
+        let mut review = issue_linked_to_pr("bork-2", 7, Some(PrImportSource::ReviewRequested));
+        review.linear_links.push(crate::types::LinkedLinear {
+            id: "linear-uuid".to_string(),
+            identifier: "ENG-2".to_string(),
+            url: "https://linear.app/x".to_string(),
+            imported: false,
+        });
+        let mut app = test_app(vec![identifier_only, review]);
+
+        app.project_mut().queue_linear_start(0);
+        app.project_mut().queue_linear_start(1);
+
+        assert!(app.project_mut().take_pending_linear_starts().is_empty());
+        assert!(app.project().pending_linear_assigns.is_empty());
     }
 
     #[test]
@@ -6338,6 +6380,45 @@ mod tests {
         assert_eq!(app.project().issues[0].title, "PR #1");
         assert_eq!(app.project().issues[0].column, Column::CodeReview);
         assert!(app.project().issues[0].has_pr_number(1));
+    }
+
+    #[test]
+    fn linear_identifier_in_title_reads_the_title_prefix() {
+        let cases = [
+            ("[ENG-4140] feat: x", Some("ENG-4140")),
+            ("  [eng-6416] feat: z", Some("ENG-6416")),
+            ("[BORK-501] feat: card id", None),
+            ("perf: index tags", None),
+            ("[WIP] draft", None),
+            ("[UTF-8x] encoding", None),
+            ("fix: mention [ENG-1] later", None),
+        ];
+
+        for (title, expected) in cases {
+            assert_eq!(
+                crate::types::linear_identifier_in_title(title, "bork").as_deref(),
+                expected,
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_imported_pr_carries_the_ticket_its_title_names() {
+        let mut app = test_app(vec![]);
+        let mut pr = test_pr(1, "cursor/tokenize-6493");
+        pr.title = "[ENG-4140] feat(parser): tokenize".into();
+        app.project_mut().live.user_prs = vec![pr];
+        app.project_mut().live.pr_poll_done = true;
+
+        app.project_mut().sync_prs_as_issues();
+
+        assert_eq!(
+            app.project().issues[0].linear_identifiers(),
+            vec!["ENG-4140"]
+        );
+        assert!(!app.project().issues[0].is_any_linear_imported());
+        assert!(app.project().issues[0].is_untouched_pr_import());
     }
 
     #[test]
@@ -9784,6 +9865,7 @@ mod tests {
             agent_kind: AgentKind::OpenCode,
             number: 42,
             source: PrImportSource::Authored,
+            linear_identifier: None,
         });
         issue.stack_review_import = Some(crate::types::StackReviewImport {
             stack_number: 10,
