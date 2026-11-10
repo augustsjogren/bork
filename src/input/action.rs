@@ -17,6 +17,7 @@ pub enum Action {
     StartSession,
     OpenTerminal,
     KillSession,
+    MissionHandoff,
     MoveIssueLeft,
     MoveIssueRight,
     MoveIssueUp,

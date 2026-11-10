@@ -214,7 +214,10 @@ mod tests {
     #[test]
     fn claimed_request_round_trips_the_options() {
         let status = tempfile::TempDir::new().unwrap();
-        let options = LaunchOptions { skip_setup: true };
+        let options = LaunchOptions {
+            skip_setup: true,
+            ..Default::default()
+        };
         let _caller = Handoff::prepare(status.path(), &issue(), options).unwrap();
 
         let (_command, _claimed, claimed_options) = Claim::take(status.path(), "bork-7").unwrap();
