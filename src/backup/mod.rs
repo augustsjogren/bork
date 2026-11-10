@@ -124,7 +124,10 @@ pub const BACKUP_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 const GLOBAL_FILES: &[&str] = &["projects.json", "config.toml"];
 
 /// File name of an issue plan, in the archive and in the container's `plans/<id>/`.
-const PLAN_NAME: &str = "planning.md";
+pub const PLAN_NAME: &str = "planning.md";
+
+/// A mission's saved references, next to its plan in `plans/<mission-id>/`.
+pub const MISSION_LINKS_NAME: &str = "links.md";
 
 /// What a backup run covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
