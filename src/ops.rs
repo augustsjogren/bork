@@ -917,7 +917,7 @@ pub fn attach_pr(project_root: &Path, issue_id: &str, pr_number: u32) -> anyhow:
 
     if issue.kind == IssueKind::Orchestrator {
         anyhow::bail!(
-            "Cannot attach a PR to '{}': orchestrator issues have no PR links",
+            "Cannot attach a PR to '{}': missions have no PR links",
             issue.id
         );
     }
@@ -975,7 +975,7 @@ pub fn attach_linear_project(
 
     if !issue.kind.links_linear_projects() {
         anyhow::bail!(
-            "Cannot attach a Linear project to '{}': only orchestrator issues have project links",
+            "Cannot attach a Linear project to '{}': only missions have project links",
             issue.id
         );
     }
@@ -1884,7 +1884,10 @@ mod tests {
 
         let result = attach_pr(root, "test-1", 42);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("orchestrator"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missions have no PR links"));
 
         let state = config::load_state(root);
         assert!(state.issues[0].github_pr_links.is_empty());

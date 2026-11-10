@@ -626,10 +626,10 @@ Start here (for AI agents):
     --model   agent's default unless set             # e.g. sonnet, opus, haiku
                                                      # (Claude); passed through
                                                      # as --model <value>
-    --kind    agentic (default), todo, orchestrator  # todo: no agent;
-                                                     # orchestrator: plans,
-                                                     # spawns + monitors issues
-                                                     # from the project root
+    --kind    agentic (default), todo, mission       # todo: no agent;
+                                                     # mission: mission control
+                                                     # leads cards from the
+                                                     # project root
 
   Defaults + allowlist live in ~/.config/bork/config.toml
   (default_agent, default_mode, agents = [...], orchestrator_prompt);
@@ -725,7 +725,7 @@ enum Command {
         command: IssueCommand,
     },
 
-    /// Group issues under a mission (an orchestrator issue that leads them)
+    /// Group issues under a mission (a mission-kind issue that leads them)
     Mission {
         #[command(subcommand)]
         command: MissionCommand,
@@ -913,7 +913,7 @@ enum IssueCommand {
         #[arg(long)]
         prompt: Option<String>,
 
-        /// Issue kind (agentic, todo, orchestrator)
+        /// Issue kind (agentic, todo, mission)
         #[arg(long, value_parser = parse_issue_kind)]
         kind: Option<IssueKind>,
     },
@@ -967,7 +967,7 @@ enum IssueCommand {
         linear: Option<String>,
 
         /// Mission to add the new issue to. Defaults to the spawning issue
-        /// when an orchestrator runs this from its agent session.
+        /// when a mission runs this from its agent session.
         #[arg(long)]
         mission: Option<String>,
     },
@@ -1002,7 +1002,7 @@ enum IssueCommand {
         #[arg(long)]
         prompt: Option<String>,
 
-        /// Change issue kind (agentic, todo, orchestrator)
+        /// Change issue kind (agentic, todo, mission)
         #[arg(long, value_parser = parse_issue_kind)]
         kind: Option<IssueKind>,
     },
@@ -1103,7 +1103,7 @@ enum IntegrationCommand {
         pr_number: u32,
     },
 
-    /// Link a Linear project to an orchestrator issue
+    /// Link a Linear project to a mission
     AttachLinearProject {
         /// Issue ID (e.g. bork-1)
         issue_id: String,
@@ -1156,7 +1156,7 @@ enum IntegrationCommand {
 enum MissionCommand {
     /// Add issues to a mission
     Add {
-        /// Mission (orchestrator issue) ID (e.g. bork-1)
+        /// Mission ID (e.g. bork-1)
         mission_id: String,
 
         /// Issue IDs to add (e.g. bork-3 bork-4)
@@ -1236,9 +1236,9 @@ fn parse_issue_kind(s: &str) -> Result<IssueKind, String> {
     match s.to_lowercase().as_str() {
         "agentic" => Ok(IssueKind::Agentic),
         "todo" | "non-agentic" | "nonagentic" => Ok(IssueKind::NonAgentic),
-        "orchestrator" | "orch" | "planner" => Ok(IssueKind::Orchestrator),
+        "mission" | "orchestrator" | "orch" | "planner" => Ok(IssueKind::Orchestrator),
         _ => Err(format!(
-            "Unknown issue kind '{}'. Options: agentic, todo, orchestrator",
+            "Unknown issue kind '{}'. Options: agentic, todo, mission",
             s
         )),
     }
@@ -3984,6 +3984,7 @@ mod tests {
             parse_issue_kind("orchestrator"),
             Ok(IssueKind::Orchestrator)
         );
+        assert_eq!(parse_issue_kind("mission"), Ok(IssueKind::Orchestrator));
         assert_eq!(parse_issue_kind("orch"), Ok(IssueKind::Orchestrator));
         assert_eq!(parse_issue_kind("planner"), Ok(IssueKind::Orchestrator));
         assert_eq!(parse_issue_kind("todo"), Ok(IssueKind::NonAgentic));

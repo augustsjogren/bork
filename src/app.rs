@@ -3635,7 +3635,7 @@ impl App {
             return;
         };
         if project.open_missions().next().is_none() {
-            self.set_warning("No missions yet: create a card with kind Orchestrator first");
+            self.set_warning("No missions yet: create a card with kind Mission first");
             return;
         }
         let issue_ids: Vec<String> = project

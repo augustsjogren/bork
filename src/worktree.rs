@@ -165,7 +165,7 @@ pub fn create_worktree_with_branch(
         .any(|i| i.id.eq_ignore_ascii_case(issue_id) && i.kind == IssueKind::Orchestrator)
     {
         bail!(
-            "'{}' is an orchestrator issue; orchestrators run at the project root and have no worktree",
+            "'{}' is a mission; missions run at the project root and have no worktree",
             issue_id
         );
     }
@@ -699,7 +699,7 @@ mod tests {
         let result = create_worktree_in(&cfg, "bork-1", Some("fix-bug"), None, None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("orchestrator"), "unexpected error: {}", err);
+        assert!(err.contains("is a mission"), "unexpected error: {}", err);
         assert!(!project.join("bork-1-fix-bug").exists());
 
         let _ = fs::remove_dir_all(&tmp);

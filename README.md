@@ -74,7 +74,7 @@ Press `n` to create an issue, `Enter` to launch an agent session. You're up and 
 - **Linear integration** &mdash; Import and attach multiple Linear issues per card, refresh their state and title on each poll, open in Linear with a keypress
 - **Auto-import PRs** &mdash; Open PRs authored by you are automatically added to the Code Review column
 - **Search and filter** &mdash; Type `/` to fuzzy-filter the board by title or issue ID
-- **Issue kinds** &mdash; Agentic issues launch AI sessions; non-agentic "todo" items skip the agent entirely; orchestrator issues launch a coordinating agent that breaks a goal into bork issues, spawns them via `bork issue start`, and monitors their agents
+- **Issue kinds** &mdash; Agentic issues launch AI sessions; non-agentic "todo" items skip the agent entirely; mission issues launch mission control, an agent at the project root that leads a group of cards (see Missions)
 - **Multi-project view** &mdash; Register multiple projects and view them in stacked swimlanes with a collapsible project sidebar
 - **Zero-dependency state** &mdash; JSON file persistence with atomic writes, no database
 
@@ -144,14 +144,14 @@ bork --help
 | `bork issue move <id> <column>` | Move an issue to a column |
 | `bork issue archive <id>` | Kill session, run teardown, remove worktree, move to Done |
 | `bork issue delete <id>` | Delete an issue |
-| `bork mission add <mission-id> <id>...` | Add issues to a mission (an orchestrator issue that leads them) |
+| `bork mission add <mission-id> <id>...` | Add issues to a mission (a mission-kind issue that leads them) |
 | `bork mission remove <id>` | Take an issue out of its mission |
 | `bork mission link [mission-id] <url> [--note <text>]` | Save a reference (Slack thread, doc) to the mission's `plans/<id>/links.md`; the id defaults to `BORK_ISSUE_ID` |
 | `bork mission show [mission-id]` | Show a mission's scope, members and saved links |
 | `bork mission handoff <mission-id>` | Ask the running mission control to write a handoff into its `planning.md` |
 | `bork mission restart <mission-id>` | Kill mission control and launch a fresh session that starts from its plan and links |
 | `bork integration attach-linear <id> <identifier>` | Link a Linear ticket to an issue (can attach multiple) |
-| `bork integration attach-linear-project <id> <url-or-slug>` | Link a Linear project to an orchestrator issue (can attach multiple) |
+| `bork integration attach-linear-project <id> <url-or-slug>` | Link a Linear project to a mission (can attach multiple) |
 | `bork integration detach-linear-project <id> <url-or-slug>` | Unlink a Linear project from an issue |
 | `bork integration attach-pr [id] <number>` | Link a GitHub PR to an issue (can attach multiple; `id` defaults to `BORK_ISSUE_ID` inside an agent session) |
 | `bork config list` | Show all resolved config values |
@@ -224,7 +224,7 @@ bork issue archive bork-3                 # cleanup when work is merged
 bork issue delete bork-3
 ```
 
-**Create options:** `--column` (todo, in-progress, code-review, done), `--agent` (opencode, claude, codex, pi), `--mode` (plan, build, yolo), `--model` (agent's default unless set, e.g. `sonnet`/`opus`/`haiku` for Claude), `--prompt`, `--kind` (agentic, todo, orchestrator).
+**Create options:** `--column` (todo, in-progress, code-review, done), `--agent` (opencode, claude, codex, pi), `--mode` (plan, build, yolo), `--model` (agent's default unless set, e.g. `sonnet`/`opus`/`haiku` for Claude), `--prompt`, `--kind` (agentic, todo, mission).
 
 **Start options:** `--prompt`, `--agent` (opencode, claude, codex), `--mode` (plan, build, yolo), `--model`, `--slug`, `--no-worktree`, `--project` (registered project name or path). `bork issue start` defaults to build mode and creates a worktree with a slug generated from the title. If a `setup_script` is configured, it runs inside the worktree before the agent starts.
 
@@ -242,7 +242,7 @@ bork integration attach-linear bork-3 VIL-456   # link another Linear ticket to 
 bork integration attach-pr bork-3 42             # link a GitHub PR
 bork integration attach-pr bork-3 43             # link another PR to the same issue
 bork integration attach-linear-project bork-5 https://linear.app/acme/project/auth-1a2b3c4d5e6f
-                                                 # link a Linear project to an orchestrator
+                                                 # link a Linear project to a mission
 bork issue start "Fix login" --linear VIL-789    # start an issue with a ticket already linked
 ```
 
@@ -448,7 +448,7 @@ agents           = ["opencode", "claude", "codex", "pi", "cursor"]   # allowed a
 default_prompt   = "Check AGENTS.md for project context and start working on the issue."
 review_prompt    = "Read the diff and summarize findings."  # body for individual review requests
 stack_review_prompt = "Review each PR against its own base and check interactions across the stack." # stack review body
-orchestrator_prompt = "Coordinate the work across issues." # body for orchestrator issues (bork appends the planning file path)
+orchestrator_prompt = "Coordinate the work across issues." # body for mission issues (bork appends the mission context)
 setup_script     = "npm install"                     # run inside a fresh worktree before its agent starts
 teardown_script  = "docker compose down"             # run inside a worktree before `bork issue archive` removes it
 auto_import_reviews      = true                      # auto-create issues from PRs you're asked to review
@@ -632,7 +632,7 @@ Merged and closed PRs remain visible in the expanded list. Stack cards omit diff
 counts. Individual PRs show additions/deletions, or `draft` while still in draft.
 Linked issues and Linear IDs sit at bottom-left. Selecting a stack issue shows
 `s view stack` in the app shortcut bar.
-Orchestrator and todo cards show their type beside the issue ID in the border.
+Mission and todo cards show their type beside the issue ID in the border.
 
 Stack controls appear only when the repository supports GitHub's stack API;
 no CLI extension is required. Without `gh`, live GitHub details are hidden and
@@ -677,7 +677,7 @@ With a key set, bork polls your assigned issues and open projects every 45 secon
 
 - **Import issues** &mdash; Press `I` to open a fuzzy-search picker of your assigned Linear issues. Imported issues use the Linear identifier as the bork issue ID (e.g. `BORK-14` becomes `bork-14`).
 - **Attach issues to a card** &mdash; In the issue dialog, the Linear field opens a multi-select picker; Enter toggles selection, Backspace removes the last item. `bork integration attach-linear <issue-id> <identifier>` does the same from the CLI, and one card can hold several Linear issues.
-- **Linear projects on orchestrators** &mdash; The picker's Projects tab imports a Linear project as an orchestrator issue named after it. On an orchestrator, the dialog's Projects field attaches more. The orchestrator's prompt lists its projects and tells it to read their description, documents, milestones and tickets for context, and to link a ticket with `bork issue start --linear <ticket>` when an issue it starts covers one. Only orchestrators carry projects; switching an issue to another kind drops them.
+- **Linear projects on missions** &mdash; The picker's Projects tab imports a Linear project as a mission named after it. On a mission, the dialog's Projects field attaches more. The mission's prompt lists its projects and tells it to read their description, documents, milestones and tickets for context, and to link a ticket with `bork issue start --linear <ticket>` when an issue it starts covers one. Only missions carry projects; switching an issue to another kind drops them.
 - **Open in Linear** &mdash; Press `O` to open all linked Linear issues in your browser.
 - **State refresh** &mdash; Linear issue state is re-read on each poll cycle, and imported issues follow their Linear title. Nothing is written back to Linear.
 
@@ -736,7 +736,7 @@ Use `j`/`k` to navigate, then:
 - **`Space`** &mdash; Toggle the selected project as a swimlane. This adds or removes it from the stacked view. You can have up to 3 projects visible at once.
 - **`Esc`** or **`Ctrl+P`** &mdash; Close the sidebar.
 
-When the active board has missions (orchestrator issues not in Done), a **Missions** section lists them below the projects. Each row shows `done/members`, a yellow `●` when the mission or a member needs you, and `◆` while the board is filtered to it. `Enter` on a mission filters the board to the mission and its members; `Enter` again or `Esc` on the board clears the filter.
+When the active board has missions (mission cards not in Done), a **Missions** section lists them below the projects. Each row shows `done/members`, a yellow `●` when the mission or a member needs you, and `◆` while the board is filtered to it. `Enter` on a mission filters the board to the mission and its members; `Enter` again or `Esc` on the board clears the filter.
 
 ### Swimlane View
 

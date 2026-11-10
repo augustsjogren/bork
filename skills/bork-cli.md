@@ -139,7 +139,7 @@ This sets the Linear identifier on the issue so the TUI can display the link and
 ### Group issues under a mission
 
 ```bash
-bork mission add bork-1 bork-3 bork-4   # bork-1 must be an orchestrator
+bork mission add bork-1 bork-3 bork-4   # bork-1 must be a mission (kind mission)
 bork mission remove bork-3
 bork issue list --mission bork-1 --json
 bork mission link bork-1 https://chat.example/t/123 --note "kickoff thread"
@@ -150,16 +150,16 @@ bork mission restart bork-1             # fresh session from the plan and links 
 
 `plans/<mission-id>/` at the project root holds the mission's durable context: `planning.md` (the mission's plan and status log) and `links.md` (written by `bork mission link`). Inside a mission's own session the mission id is optional for `link` and `show`.
 
-An orchestrator leads its mission. `bork issue start` run from an orchestrator's session adds the new issue to that mission; `--mission <id>` picks one explicitly.
+A mission card leads its mission. `bork issue start` run from its session adds the new issue to that mission; `--mission <id>` picks one explicitly.
 
-### Link a Linear project (orchestrators only)
+### Link a Linear project (missions only)
 
 ```bash
 bork integration attach-linear-project bork-1 https://linear.app/acme/project/auth-1a2b3c4d5e6f
 bork integration detach-linear-project bork-1 1a2b3c4d5e6f
 ```
 
-Takes a project URL or slug. Fails on issues that aren't orchestrators.
+Takes a project URL or slug. Fails on issues that aren't missions.
 
 ### Link a GitHub PR
 

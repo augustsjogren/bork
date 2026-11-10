@@ -2278,7 +2278,7 @@ fn import_linear_project(app: &mut App, ctx: &ActionContext) {
         app,
         &proj_id,
         issue,
-        format!("Imported {} as an orchestrator", linear_project.name),
+        format!("Imported {} as a mission", linear_project.name),
     );
 }
 
@@ -4354,6 +4354,21 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_mission_card_keeps_its_id_with_the_short_badge() {
+        let app = stack_test_app(2);
+        let issue = Issue {
+            kind: IssueKind::Orchestrator,
+            ..test_issue("bork-12", Column::Todo)
+        };
+
+        let narrow = card_rows(&app, &issue, 20, crate::app::CardSize::Full);
+        let wide = card_rows(&app, &issue, 40, crate::app::CardSize::Full);
+
+        assert!(narrow[0].contains(" bork-12 · ◆ "), "{}", narrow[0]);
+        assert!(wide[0].contains(" bork-12 · mission "), "{}", wide[0]);
+    }
+
+    #[test]
     fn card_footer_keeps_links_left_without_shortcut_hints_in_both_layouts() {
         let app = stack_test_app(2);
         for size in [crate::app::CardSize::Full, crate::app::CardSize::Medium] {
@@ -4381,7 +4396,7 @@ mod tests {
                     assert!(!footer.contains("s expand"), "{footer}");
                     assert!(!rows[2].contains('∞'));
                     let kind_label = match kind {
-                        IssueKind::Orchestrator => "orch",
+                        IssueKind::Orchestrator => "mission",
                         IssueKind::NonAgentic => "todo",
                         IssueKind::Agentic => "",
                         IssueKind::Cloud => "cloud",
@@ -5634,7 +5649,7 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(
             app.message.as_ref().map(|(text, _)| text.as_str()),
-            Some("No missions yet: create a card with kind Orchestrator first")
+            Some("No missions yet: create a card with kind Mission first")
         );
     }
 
