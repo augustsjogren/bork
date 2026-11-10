@@ -1169,6 +1169,23 @@ enum MissionCommand {
         /// Issue ID (e.g. bork-3)
         issue_id: String,
     },
+
+    /// Save a reference (Slack thread, doc, dashboard) to a mission's links.md
+    Link {
+        /// Optional mission ID (defaults to BORK_ISSUE_ID), then the link
+        #[arg(num_args = 1..=2, value_names = ["MISSION_ID", "URL"], required = true)]
+        args: Vec<String>,
+
+        /// What the link is, on one line
+        #[arg(long)]
+        note: Option<String>,
+    },
+
+    /// Show a mission's scope, members and saved links
+    Show {
+        /// Mission ID (defaults to BORK_ISSUE_ID)
+        mission_id: Option<String>,
+    },
 }
 
 fn parse_column(s: &str) -> Result<Column, String> {
@@ -2195,7 +2212,31 @@ fn run_mission_command(command: MissionCommand) -> anyhow::Result<()> {
             println!("Removed {} from its mission", issue.id);
             Ok(())
         }
+        MissionCommand::Link { args, note } => {
+            let (mission_id, url) = match args.as_slice() {
+                [url] => (session_mission_id()?, url.as_str()),
+                [mission_id, url] => (mission_id.clone(), url.as_str()),
+                _ => anyhow::bail!("expected `[mission-id] <url>`"),
+            };
+            let path = ops::add_mission_link(&project_root, &mission_id, url, note.as_deref())?;
+            println!("Saved link to {}", path.display());
+            Ok(())
+        }
+        MissionCommand::Show { mission_id } => {
+            let mission_id = match mission_id {
+                Some(id) => id,
+                None => session_mission_id()?,
+            };
+            println!("{}", ops::show_mission(&project_root, &mission_id)?);
+            Ok(())
+        }
     }
+}
+
+fn session_mission_id() -> anyhow::Result<String> {
+    session_issue_id().ok_or_else(|| {
+        anyhow::anyhow!("no mission id given and BORK_ISSUE_ID is not set; pass the mission id")
+    })
 }
 
 fn run_integration_command(command: IntegrationCommand) -> anyhow::Result<()> {

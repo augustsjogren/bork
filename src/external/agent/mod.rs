@@ -711,10 +711,7 @@ fn build_agent_cmd(
             ));
         }
         if issue.kind == IssueKind::Orchestrator {
-            prompt.push_str(&format!(
-                "\n\nMaintain your plan in plans/{}/planning.md, relative to the project root (the directory containing main/).",
-                issue.id
-            ));
+            prompt.push_str(&mission_context(&issue.id));
         }
         if issue.kind == IssueKind::Orchestrator && issue.has_linear() {
             prompt.push_str(LINEAR_TICKET_UPDATES);
@@ -951,6 +948,22 @@ pub(crate) fn is_uuid_like(value: &str) -> bool {
             ch.is_ascii_hexdigit()
         }
     })
+}
+
+/// Mission control can be replaced mid-mission (a full context window, a
+/// crash), so the session must rebuild its state from files, never from an
+/// earlier conversation.
+fn mission_context(mission_id: &str) -> String {
+    let plans = crate::backup::PLANS_DIR;
+    let plan = crate::backup::PLAN_NAME;
+    let links = crate::backup::MISSION_LINKS_NAME;
+    format!(
+        "\n\nThis mission's durable context lives in {plans}/{mission_id}/, relative to the project root (the directory containing main/): \
+maintain your plan in {plans}/{mission_id}/{plan} (goal, breakdown, decisions, status log), and save references in {links} (Slack threads, docs, dashboards) with `bork mission link <url> --note \"...\"`. \
+You may be taking over from an earlier session: before acting, read both files and run `bork mission show {mission_id}`. \
+Keep them current as you work, so a fresh session could pick up where you left off. \
+Save links, never copies of thread or document content."
+    )
 }
 
 const LINEAR_TICKET_UPDATES: &str =
@@ -1704,6 +1717,7 @@ mod tests {
         assert!(prompt.contains("orchestrator agent"));
         assert!(prompt.contains("bork issue start"));
         assert!(prompt.contains("plans/bork-1/planning.md"));
+        assert!(prompt.contains("bork mission show bork-1"));
         assert!(!prompt.contains("Assigned worktree"));
         assert!(!prompt.contains("attach-pr"));
         // The regular default prompt is not used for orchestrators.
@@ -1730,6 +1744,7 @@ mod tests {
         let prompt = prompt.unwrap();
         assert!(prompt.contains("The source code is in main/."));
         assert!(!prompt.contains("planning.md"));
+        assert!(!prompt.contains("bork mission"));
     }
 
     #[test]

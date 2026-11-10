@@ -66,6 +66,8 @@ bork integration clear-linear {project_name}-1             # Remove all Linear l
 bork integration clear-pr {project_name}-1                 # Remove all PR links
 bork mission add {project_name}-1 {project_name}-3 {project_name}-4  # Add issues to mission (orchestrator) {project_name}-1
 bork mission remove {project_name}-3                       # Take an issue out of its mission
+bork mission link {project_name}-1 <url> --note "..."      # Save a Slack thread/doc to plans/{project_name}-1/links.md
+bork mission show {project_name}-1                         # Mission scope, members and saved links
 bork issue list --mission {project_name}-1 --json          # A mission's members
 bork integration link {project_name}-1 {project_name}-3    # Tie two issues together
 bork integration unlink {project_name}-1 {project_name}-3  # Remove a link

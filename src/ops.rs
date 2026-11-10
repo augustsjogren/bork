@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -98,9 +99,7 @@ pub fn list_issues(project_root: &Path, opts: &ListOptions) -> anyhow::Result<St
         .as_deref()
         .map(|anchor| linked_component(&state.issues, anchor));
     if let Some(mission_id) = opts.mission.as_deref() {
-        if !is_mission(&state.issues, mission_id) {
-            anyhow::bail!("{} is not a mission", mission_id);
-        }
+        require_mission(&state.issues, mission_id)?;
     }
 
     let issues: Vec<&Issue> = state
@@ -406,12 +405,14 @@ pub fn delete_issue(project_root: &Path, issue_id: &str) -> anyhow::Result<Issue
     let removed = state.issues.remove(idx);
     remove_link_references(&mut state.issues, &removed.id);
     config::save_state(&state, project_root)?;
-    crate::issue_plan::remove_saved_plans(project_root, &removed.id).map_err(|e| {
-        e.context(format!(
-            "Deleted {} but couldn't remove its saved plans",
-            removed.id
-        ))
-    })?;
+    crate::issue_plan::remove_saved_plans(project_root, &removed.id, removed.kind).map_err(
+        |e| {
+            e.context(format!(
+                "Deleted {} but couldn't remove its saved plans",
+                removed.id
+            ))
+        },
+    )?;
 
     Ok(removed)
 }
@@ -503,6 +504,11 @@ fn find_mission<'a>(issues: &'a [Issue], mission_id: &str) -> Option<&'a Issue> 
     Some(&issues[idx]).filter(|mission| mission.kind == IssueKind::Orchestrator)
 }
 
+fn require_mission<'a>(issues: &'a [Issue], mission_id: &str) -> anyhow::Result<&'a Issue> {
+    find_mission(issues, mission_id)
+        .ok_or_else(|| anyhow::anyhow!("{} is not a mission", mission_id))
+}
+
 fn in_mission(issues: &[Issue], issue: &Issue, mission_id: &str) -> bool {
     is_mission(issues, mission_id) && is_member_of(issue, mission_id)
 }
@@ -546,10 +552,7 @@ pub fn assign_mission_in(
     mission_id: &str,
     issue_ids: &[String],
 ) -> anyhow::Result<String> {
-    let mission_id = find_mission(issues, mission_id)
-        .ok_or_else(|| anyhow::anyhow!("{} is not a mission", mission_id))?
-        .id
-        .clone();
+    let mission_id = require_mission(issues, mission_id)?.id.clone();
 
     let mut member_indexes = Vec::with_capacity(issue_ids.len());
     for issue_id in issue_ids {
@@ -579,6 +582,108 @@ pub fn leave_mission(project_root: &Path, issue_id: &str) -> anyhow::Result<Issu
     let updated = state.issues[idx].clone();
     config::save_state(&state, project_root)?;
     Ok(updated)
+}
+
+/// Append a reference (Slack thread, doc, dashboard) to the mission's
+/// `links.md`, one Markdown list item per link. Returns the file's path.
+pub fn add_mission_link(
+    project_root: &Path,
+    mission_id: &str,
+    url: &str,
+    note: Option<&str>,
+) -> anyhow::Result<std::path::PathBuf> {
+    let state = config::load_state(project_root);
+    let mission = require_mission(&state.issues, mission_id)?;
+
+    let url = url.trim();
+    if !url.contains("://") {
+        anyhow::bail!(
+            "'{}' doesn't look like a link; expected `[mission-id] <url>`",
+            url
+        );
+    }
+    let note = note.map(str::trim).filter(|note| !note.is_empty());
+    if breaks_line(url) || note.is_some_and(breaks_line) {
+        anyhow::bail!("link and note must each fit on one line");
+    }
+
+    let dir = mission_context_dir(project_root, &mission.id)?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(crate::backup::MISSION_LINKS_NAME);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    match note {
+        Some(note) => writeln!(file, "- {url} — {note}")?,
+        None => writeln!(file, "- {url}")?,
+    }
+    Ok(path)
+}
+
+/// Control characters and Unicode line separators would start a new list
+/// item in `links.md`, or read as one to an agent.
+fn breaks_line(text: &str) -> bool {
+    text.chars()
+        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+}
+
+fn mission_context_dir(
+    project_root: &Path,
+    mission_id: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    if !crate::backup::select::is_plain_component(mission_id) {
+        anyhow::bail!("invalid mission id {mission_id:?}");
+    }
+    Ok(crate::backup::issue_plan_dir(project_root, mission_id))
+}
+
+/// Everything a fresh mission-control session needs to pick a mission up:
+/// its scope, Linear context, members and saved links.
+pub fn show_mission(project_root: &Path, mission_id: &str) -> anyhow::Result<String> {
+    let state = config::load_state(project_root);
+    let mission = require_mission(&state.issues, mission_id)?;
+    let context_dir = mission_context_dir(project_root, &mission.id)?;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Mission:  {} \"{}\"", mission.id, mission.title);
+    let _ = writeln!(out, "Column:   {}", mission.column);
+    if let Some(prompt) = &mission.prompt {
+        let _ = writeln!(out, "Scope:    {}", prompt.replace('\n', "\n          "));
+    }
+    for project in &mission.linear_projects {
+        let _ = writeln!(out, "Linear:   {} - {}", project.name, project.url);
+    }
+    let _ = writeln!(
+        out,
+        "Context:  {} ({}, {})",
+        context_dir.display(),
+        crate::backup::PLAN_NAME,
+        crate::backup::MISSION_LINKS_NAME
+    );
+
+    let members: Vec<&Issue> = state
+        .issues
+        .iter()
+        .filter(|issue| is_member_of(issue, &mission.id))
+        .collect();
+    let _ = writeln!(out, "\nMembers:");
+    if members.is_empty() {
+        let _ = writeln!(out, "  none");
+    } else {
+        out.push_str(&format_issue_table(&members, "")?);
+        out.push('\n');
+    }
+
+    let _ = writeln!(out, "\nLinks:");
+    match std::fs::read_to_string(context_dir.join(crate::backup::MISSION_LINKS_NAME)) {
+        Ok(links) if !links.trim().is_empty() => out.push_str(links.trim_end()),
+        Ok(_) => out.push_str("  none"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => out.push_str("  none"),
+        Err(e) => return Err(e.into()),
+    }
+
+    Ok(out)
 }
 
 pub fn show_issue(project_root: &Path, issue_id: &str, json: bool) -> anyhow::Result<String> {
@@ -2395,6 +2500,66 @@ mod tests {
         let error = leave_mission(root, "test-1").unwrap_err();
 
         assert_eq!(error.to_string(), "test-1 is not in a mission");
+    }
+
+    #[test]
+    fn add_mission_link_appends_one_line_per_link() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &[]);
+
+        add_mission_link(root, "TEST-1", "https://chat.example/t/1", Some("kickoff")).unwrap();
+        let path = add_mission_link(root, "test-1", " https://docs.example/d ", None).unwrap();
+
+        assert_eq!(path, root.join("plans/test-1/links.md"));
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "- https://chat.example/t/1 — kickoff\n- https://docs.example/d\n"
+        );
+    }
+
+    #[test]
+    fn add_mission_link_rejects_bad_input_and_non_missions() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &["test-2"]);
+
+        for (url, note) in [
+            ("https://a\n- injected", None),
+            ("https://a\r- injected", None),
+            ("https://a", Some("one\u{2028}- injected")),
+        ] {
+            let error = add_mission_link(root, "test-1", url, note).unwrap_err();
+            assert_eq!(error.to_string(), "link and note must each fit on one line");
+        }
+        let forgotten_url = add_mission_link(root, "test-1", "test-1", None);
+        let non_mission = add_mission_link(root, "test-2", "https://a", None);
+
+        assert_eq!(
+            forgotten_url.unwrap_err().to_string(),
+            "'test-1' doesn't look like a link; expected `[mission-id] <url>`"
+        );
+        assert_eq!(
+            non_mission.unwrap_err().to_string(),
+            "test-2 is not a mission"
+        );
+        assert!(!root.join("plans/test-1/links.md").exists());
+    }
+
+    #[test]
+    fn show_mission_lists_members_and_links() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &["test-2", "test-3"]);
+        assign_mission(root, "test-1", &["test-2".into()]).unwrap();
+        add_mission_link(root, "test-1", "https://chat.example/t/1", Some("kickoff")).unwrap();
+
+        let output = show_mission(root, "test-1").unwrap();
+
+        assert!(output.starts_with("Mission:  test-1"));
+        assert!(output.contains("\ntest-2 "));
+        assert!(!output.contains("test-3"));
+        assert!(output.ends_with("Links:\n- https://chat.example/t/1 — kickoff"));
     }
 
     #[test]

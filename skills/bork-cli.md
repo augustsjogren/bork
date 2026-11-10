@@ -142,7 +142,11 @@ This sets the Linear identifier on the issue so the TUI can display the link and
 bork mission add bork-1 bork-3 bork-4   # bork-1 must be an orchestrator
 bork mission remove bork-3
 bork issue list --mission bork-1 --json
+bork mission link bork-1 https://chat.example/t/123 --note "kickoff thread"
+bork mission show bork-1                # scope, members, saved links
 ```
+
+`plans/<mission-id>/` at the project root holds the mission's durable context: `planning.md` (the mission's plan and status log) and `links.md` (written by `bork mission link`). Inside a mission's own session the mission id is optional for `link` and `show`.
 
 An orchestrator leads its mission. `bork issue start` run from an orchestrator's session adds the new issue to that mission; `--mission <id>` picks one explicitly.
 

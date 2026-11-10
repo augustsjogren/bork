@@ -2871,6 +2871,7 @@ fn handle_confirm(
                                 if let Err(e) = crate::issue_plan::remove_saved_plans(
                                     &config.project_root,
                                     &issue.id,
+                                    issue.kind,
                                 ) {
                                     result.message = format!(
                                         "Deleted {} but couldn't remove its saved plans: {e}",

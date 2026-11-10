@@ -146,6 +146,8 @@ bork --help
 | `bork issue delete <id>` | Delete an issue |
 | `bork mission add <mission-id> <id>...` | Add issues to a mission (an orchestrator issue that leads them) |
 | `bork mission remove <id>` | Take an issue out of its mission |
+| `bork mission link [mission-id] <url> [--note <text>]` | Save a reference (Slack thread, doc) to the mission's `plans/<id>/links.md`; the id defaults to `BORK_ISSUE_ID` |
+| `bork mission show [mission-id]` | Show a mission's scope, members and saved links |
 | `bork integration attach-linear <id> <identifier>` | Link a Linear ticket to an issue (can attach multiple) |
 | `bork integration attach-linear-project <id> <url-or-slug>` | Link a Linear project to an orchestrator issue (can attach multiple) |
 | `bork integration detach-linear-project <id> <url-or-slug>` | Unlink a Linear project from an issue |

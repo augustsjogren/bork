@@ -8,6 +8,8 @@
 
 use std::path::Path;
 
+use crate::types::IssueKind;
+
 /// Save `worktree_dir`'s plan before the worktree goes away: under its
 /// issue, or under `plans/_orphans/<worktree_dir>/` when no issue claims it
 /// (a deleted issue, a card that became an orchestrator, a hand-made
@@ -36,10 +38,16 @@ pub fn log_dropped_plan(project_root: &Path, worktree_dir: &str, error: &str) {
 }
 
 /// Drop a deleted issue's saved plans (`plans/<issue-id>/`). Archived and
-/// pruned issues keep theirs. Only touches projects with backups on, and
-/// only that one directory.
-pub fn remove_saved_plans(project_root: &Path, issue_id: &str) -> anyhow::Result<()> {
-    if !crate::backup::config::project_enabled(project_root)? {
+/// pruned issues keep theirs. Only touches that one directory, and only in
+/// projects with backups on, except for a mission: its directory is
+/// mission-control context bork writes itself, and a later issue that
+/// reuses the id must not inherit it.
+pub fn remove_saved_plans(
+    project_root: &Path,
+    issue_id: &str,
+    kind: IssueKind,
+) -> anyhow::Result<()> {
+    if kind != IssueKind::Orchestrator && !crate::backup::config::project_enabled(project_root)? {
         return Ok(());
     }
     if !crate::backup::select::is_plain_component(issue_id) {
@@ -169,13 +177,13 @@ mod tests {
         fs::create_dir_all(plans.join("demo-10")).unwrap();
         fs::write(plans.join("demo-10/planning.md"), "10").unwrap();
 
-        remove_saved_plans(root.path(), "demo-1").unwrap();
+        remove_saved_plans(root.path(), "demo-1", IssueKind::Agentic).unwrap();
 
         assert!(!plans.join("demo-1").exists());
         assert!(plans.join("demo-10/planning.md").exists());
         // Already gone: nothing to do.
-        remove_saved_plans(root.path(), "demo-1").unwrap();
-        assert!(remove_saved_plans(root.path(), "..").is_err());
+        remove_saved_plans(root.path(), "demo-1", IssueKind::Agentic).unwrap();
+        assert!(remove_saved_plans(root.path(), "..", IssueKind::Agentic).is_err());
     }
 
     #[test]
@@ -184,8 +192,20 @@ mod tests {
         let dir = root.path().join(crate::backup::PLANS_DIR).join("demo-1");
         fs::create_dir_all(&dir).unwrap();
 
-        remove_saved_plans(root.path(), "demo-1").unwrap();
+        remove_saved_plans(root.path(), "demo-1", IssueKind::Agentic).unwrap();
 
         assert!(dir.exists());
+    }
+
+    #[test]
+    fn deleting_a_mission_drops_its_context_even_with_backups_off() {
+        let root = project();
+        let dir = root.path().join(crate::backup::PLANS_DIR).join("demo-1");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("links.md"), "- https://a\n").unwrap();
+
+        remove_saved_plans(root.path(), "demo-1", IssueKind::Orchestrator).unwrap();
+
+        assert!(!dir.exists());
     }
 }
