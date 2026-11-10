@@ -935,6 +935,42 @@ impl Project {
         }
     }
 
+    /// Identifiers of Linear links known only by identifier (attached from a
+    /// title or by hand), for the Linear worker to look up.
+    pub fn unresolved_linear_identifiers(&self) -> Vec<String> {
+        self.issues
+            .iter()
+            .flat_map(|issue| &issue.linear_links)
+            .filter(|link| link.id.is_empty())
+            .map(|link| link.identifier.clone())
+            .collect()
+    }
+
+    /// Fill the Linear id and url of identifier-only links from tickets the
+    /// worker looked up. Returns whether any link changed.
+    pub fn fill_linear_links(&mut self, found: &[crate::external::linear::LinearIssue]) -> bool {
+        let mut changed = false;
+        for link in self
+            .issues
+            .iter_mut()
+            .flat_map(|issue| &mut issue.linear_links)
+        {
+            if !link.id.is_empty() {
+                continue;
+            }
+            let Some(ticket) = found
+                .iter()
+                .find(|ticket| ticket.identifier.eq_ignore_ascii_case(&link.identifier))
+            else {
+                continue;
+            };
+            link.id = ticket.id.clone();
+            link.url = ticket.url.clone();
+            changed = true;
+        }
+        changed
+    }
+
     /// Queue a Linear "move to started" request for `self.issues[idx]`'s
     /// linked ticket, if it has one — however it got linked (auto-imported,
     /// or attached by hand through the edit dialog; both matter equally
@@ -946,11 +982,13 @@ impl Project {
     /// starting on it is investigative, not a commitment to the ticket's
     /// workflow, so its state is left for the user to change by hand.
     ///
-    /// Review cards are skipped: their ticket belongs to the PR's author. So is
-    /// a link known only by identifier, which has no Linear id to act on.
+    /// Cards imported from a PR are skipped: the PR means the work already
+    /// started, so its ticket may be In Review or Done, and its PR title can
+    /// name a teammate's ticket. So is a link known only by identifier, which
+    /// has no Linear id to act on.
     pub fn queue_linear_start(&mut self, idx: usize) {
         let issue = &self.issues[idx];
-        if issue.is_review_import() || issue.stack_review_import.is_some() {
+        if issue.is_any_pr_imported() {
             return;
         }
         let Some(link) = issue
@@ -3917,22 +3955,26 @@ mod tests {
     }
 
     #[test]
-    fn cards_without_a_linear_id_or_reviewing_someone_else_queue_no_linear_start() {
+    fn identifier_only_links_and_pr_imports_queue_no_linear_start() {
+        let resolved_link = |identifier: &str| crate::types::LinkedLinear {
+            id: "linear-uuid".to_string(),
+            identifier: identifier.to_string(),
+            url: "https://linear.app/x".to_string(),
+            imported: false,
+        };
         let mut identifier_only = test_issue("bork-1", Column::Todo);
         identifier_only
             .linear_links
             .push(crate::types::LinkedLinear::from_identifier("ENG-1".into()));
         let mut review = issue_linked_to_pr("bork-2", 7, Some(PrImportSource::ReviewRequested));
-        review.linear_links.push(crate::types::LinkedLinear {
-            id: "linear-uuid".to_string(),
-            identifier: "ENG-2".to_string(),
-            url: "https://linear.app/x".to_string(),
-            imported: false,
-        });
-        let mut app = test_app(vec![identifier_only, review]);
+        review.linear_links.push(resolved_link("ENG-2"));
+        let mut authored = issue_linked_to_pr("bork-3", 8, Some(PrImportSource::Authored));
+        authored.linear_links.push(resolved_link("ENG-3"));
+        let mut app = test_app(vec![identifier_only, review, authored]);
 
-        app.project_mut().queue_linear_start(0);
-        app.project_mut().queue_linear_start(1);
+        for idx in 0..3 {
+            app.project_mut().queue_linear_start(idx);
+        }
 
         assert!(app.project_mut().take_pending_linear_starts().is_empty());
         assert!(app.project().pending_linear_assigns.is_empty());
@@ -6189,6 +6231,44 @@ mod tests {
         );
         assert!(!app.project().issues[0].is_any_linear_imported());
         assert!(app.project().issues[0].is_untouched_pr_import());
+    }
+
+    #[test]
+    fn looked_up_tickets_fill_identifier_only_links_and_keep_imports_untouched() {
+        let mut app = test_app(vec![]);
+        let mut pr = test_pr(1, "cursor/tokenize-6493");
+        pr.title = "[ENG-4140] feat(parser): tokenize".into();
+        app.project_mut().live.user_prs = vec![pr];
+        app.project_mut().live.pr_poll_done = true;
+        app.project_mut().sync_prs_as_issues();
+        assert_eq!(
+            app.project().unresolved_linear_identifiers(),
+            vec!["ENG-4140"]
+        );
+        let ticket = crate::external::linear::LinearIssue {
+            id: "linear-uuid".into(),
+            identifier: "ENG-4140".into(),
+            title: "Pagination".into(),
+            url: "https://linear.app/acme/issue/ENG-4140".into(),
+            branch_name: String::new(),
+            priority: 0,
+            state_name: "In Review".into(),
+            team_key: "DOCS".into(),
+        };
+
+        assert!(app
+            .project_mut()
+            .fill_linear_links(std::slice::from_ref(&ticket)));
+        assert!(!app.project_mut().fill_linear_links(&[ticket]));
+
+        let issue = &app.project().issues[0];
+        assert_eq!(issue.linear_links[0].id, "linear-uuid");
+        assert_eq!(
+            issue.linear_links[0].url,
+            "https://linear.app/acme/issue/ENG-4140"
+        );
+        assert!(issue.is_untouched_pr_import());
+        assert!(app.project().unresolved_linear_identifiers().is_empty());
     }
 
     #[test]

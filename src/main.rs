@@ -378,40 +378,101 @@ fn sleep_until_wake(wake_rx: &mpsc::Receiver<()>, interval: Duration) -> WakeRea
     }
 }
 
+/// Polls between clearing the identifiers Linear didn't return, so a ticket
+/// created or shared after its card was linked still resolves (~15 minutes).
+const LINEAR_LOOKUP_MISS_RESET_POLLS: u32 = 20;
+
+/// `lookup` holds the identifiers the board has without a Linear id (kept
+/// current by the main loop); they are looked up with each poll.
 fn spawn_linear_worker(
     suspended: Arc<AtomicBool>,
     wake_rx: mpsc::Receiver<()>,
+    lookup: Arc<Mutex<Vec<String>>>,
 ) -> mpsc::Receiver<LinearPollResult> {
     let (tx, rx) = mpsc::channel();
 
-    thread::spawn(move || loop {
-        wait_while_suspended(&suspended);
-        let result = match external::linear::fetch_poll() {
-            Ok((issues, projects)) => LinearPollResult {
-                issues,
-                projects,
-                // Best-effort: a hiccup fetching unassigned issues just means
-                // the pickup list is stale this round, not worth a second
-                // error toast alongside the assigned-issues one above.
-                unassigned_issues: external::linear::fetch_unassigned_issues().unwrap_or_default(),
-                error: None,
-            },
-            Err(e) => LinearPollResult {
-                issues: Vec::new(),
-                projects: Vec::new(),
-                unassigned_issues: Vec::new(),
-                error: Some(e.to_string()),
-            },
-        };
-        if tx.send(result).is_err() {
-            break;
-        }
-        if !sleep_with_wake(&wake_rx, LINEAR_POLL_INTERVAL) {
-            break;
+    thread::spawn(move || {
+        let mut misses: HashSet<String> = HashSet::new();
+        let mut polls = 0u32;
+        loop {
+            wait_while_suspended(&suspended);
+            polls += 1;
+            if polls.is_multiple_of(LINEAR_LOOKUP_MISS_RESET_POLLS) {
+                misses.clear();
+            }
+            let wanted = lookup.lock().map(|list| list.clone()).unwrap_or_default();
+            let result = match external::linear::fetch_poll() {
+                Ok((issues, projects)) => LinearPollResult {
+                    issues,
+                    projects,
+                    // Best-effort: a hiccup fetching unassigned issues just means
+                    // the pickup list is stale this round, not worth a second
+                    // error toast alongside the assigned-issues one above.
+                    unassigned_issues: external::linear::fetch_unassigned_issues()
+                        .unwrap_or_default(),
+                    looked_up: look_up_identifiers(&wanted, &mut misses),
+                    error: None,
+                },
+                Err(e) => LinearPollResult {
+                    issues: Vec::new(),
+                    projects: Vec::new(),
+                    unassigned_issues: Vec::new(),
+                    looked_up: Vec::new(),
+                    error: Some(e.to_string()),
+                },
+            };
+            if tx.send(result).is_err() {
+                break;
+            }
+            if !sleep_with_wake(&wake_rx, LINEAR_POLL_INTERVAL) {
+                break;
+            }
         }
     });
 
     rx
+}
+
+/// Publish the identifiers every board holds without a Linear id for the
+/// Linear worker's next poll.
+fn sync_linear_lookup(app: &app::App, lookup: &Mutex<Vec<String>>) {
+    let mut unresolved: Vec<String> = app
+        .projects
+        .iter()
+        .flat_map(|project| project.unresolved_linear_identifiers())
+        .collect();
+    unresolved.sort();
+    unresolved.dedup();
+    if let Ok(mut shared) = lookup.lock() {
+        *shared = unresolved;
+    }
+}
+
+/// Best-effort like the unassigned fetch: a failed lookup retries next poll.
+fn look_up_identifiers(
+    wanted: &[String],
+    misses: &mut HashSet<String>,
+) -> Vec<external::linear::LinearIssue> {
+    let asking: Vec<String> = wanted
+        .iter()
+        .filter(|identifier| !misses.contains(*identifier))
+        .cloned()
+        .collect();
+    if asking.is_empty() {
+        return Vec::new();
+    }
+    let Ok(found) = external::linear::fetch_issues_by_identifier(&asking) else {
+        return Vec::new();
+    };
+    for identifier in &asking {
+        if !found
+            .iter()
+            .any(|issue| issue.identifier.eq_ignore_ascii_case(identifier))
+        {
+            misses.insert(identifier.clone());
+        }
+    }
+    found
 }
 
 /// Daily backup of every opted-in project. Sends the recorded status right
@@ -2365,6 +2426,9 @@ struct SharedWorkers {
     linear_rx: Option<mpsc::Receiver<LinearPollResult>>,
     linear_wake_tx: mpsc::Sender<()>,
     linear_wake_rx: Option<mpsc::Receiver<()>>,
+    /// Identifiers of Linear links the board holds without a Linear id, for
+    /// the Linear worker to look up on its next poll (`sync_linear_lookup`).
+    linear_lookup: Arc<Mutex<Vec<String>>>,
     tuicr_rx: Option<mpsc::Receiver<external::tuicr::DraftComments>>,
     backup_rx: mpsc::Receiver<backup::schedule::Report>,
     backup_wake_tx: mpsc::Sender<()>,
@@ -2412,6 +2476,7 @@ fn spawn_shared_workers() -> SharedWorkers {
         linear_rx: None,
         linear_wake_tx,
         linear_wake_rx: Some(linear_wake_rx),
+        linear_lookup: Arc::new(Mutex::new(Vec::new())),
         tuicr_rx: None,
         backup_rx,
         backup_wake_tx,
@@ -3521,8 +3586,13 @@ fn run_tui() -> anyhow::Result<()> {
                 p.linear_available = true;
             }
             if let Some(wake_rx) = shared.linear_wake_rx.take() {
-                shared.linear_rx =
-                    Some(spawn_linear_worker(shared.poll_suspended.clone(), wake_rx));
+                // Filled before the first poll so it already looks them up.
+                sync_linear_lookup(&app, &shared.linear_lookup);
+                shared.linear_rx = Some(spawn_linear_worker(
+                    shared.poll_suspended.clone(),
+                    wake_rx,
+                    shared.linear_lookup.clone(),
+                ));
             }
         }
         if let Some(ref rx) = shared.linear_rx {
@@ -3571,6 +3641,9 @@ fn run_tui() -> anyhow::Result<()> {
                         }
                     }
                     project.live.linear_projects = result.projects.clone();
+                    if project.fill_linear_links(&result.looked_up) {
+                        project.mark_dirty();
+                    }
                 }
             }
         }
@@ -3660,6 +3733,8 @@ fn run_tui() -> anyhow::Result<()> {
         state_poll_counter += 1;
         if state_poll_counter >= STATE_POLL_TICKS {
             state_poll_counter = 0;
+
+            sync_linear_lookup(&app, &shared.linear_lookup);
 
             // The 48h backup warning depends on the clock, not on a worker
             // report (the worker may be blocked on the backup lock).

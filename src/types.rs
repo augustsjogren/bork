@@ -476,22 +476,49 @@ pub struct PrImportBaseline {
 /// tickets.
 pub fn linear_identifier_in_title(title: &str, board_prefix: &str) -> Option<String> {
     let (inside, _) = title.trim_start().strip_prefix('[')?.split_once(']')?;
-    let (team, number) = inside.trim().split_once('-')?;
-    let team_ok = (2..=10).contains(&team.len())
-        && team.starts_with(|c: char| c.is_ascii_alphabetic())
-        && team.chars().all(|c| c.is_ascii_alphanumeric())
-        && !team.eq_ignore_ascii_case(board_prefix);
-    let number_ok = !number.is_empty() && number.chars().all(|c| c.is_ascii_digit());
-    if !team_ok || !number_ok {
+    let ticket = LinearIdentifier::parse(inside.trim())?;
+    if ticket.team.eq_ignore_ascii_case(board_prefix) {
         return None;
     }
-    Some(format!("{}-{number}", team.to_ascii_uppercase()))
+    Some(ticket.to_string())
+}
+
+/// A Linear ticket identifier, `TEAM-123`, with the team key uppercased.
+/// Its parts are safe to splice into a GraphQL query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearIdentifier {
+    pub team: String,
+    pub number: u32,
+}
+
+impl LinearIdentifier {
+    pub fn parse(text: &str) -> Option<Self> {
+        let (team, number) = text.split_once('-')?;
+        let team_ok = (2..=10).contains(&team.len())
+            && team.starts_with(|c: char| c.is_ascii_alphabetic())
+            && team.chars().all(|c| c.is_ascii_alphanumeric());
+        let digits_only = !number.is_empty() && number.chars().all(|c| c.is_ascii_digit());
+        if !team_ok || !digits_only {
+            return None;
+        }
+        Some(Self {
+            team: team.to_ascii_uppercase(),
+            number: number.parse().ok()?,
+        })
+    }
+}
+
+impl fmt::Display for LinearIdentifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.team, self.number)
+    }
 }
 
 impl LinkedLinear {
     /// A link known only by its identifier, as attached from a PR title or
-    /// the CLI. Its Linear id and url stay empty, so code that acts on the
-    /// ticket in Linear or opens it must skip such a link.
+    /// the CLI. Its Linear id and url stay empty until the TUI's Linear
+    /// worker looks the ticket up (`Project::fill_linear_links`), so code
+    /// that acts on the ticket in Linear or opens it must skip it until then.
     pub fn from_identifier(identifier: String) -> Self {
         Self {
             id: String::new(),
@@ -656,14 +683,19 @@ impl Issue {
         let Some(baseline) = &self.pr_import_baseline else {
             return false;
         };
+        // The ticket counts by identifier: bork fills in its Linear id and url
+        // after import, which is not an edit.
+        let ticket_unchanged = match (&baseline.linear_identifier, self.linear_links.as_slice()) {
+            (None, []) => true,
+            (Some(identifier), [link]) => link.identifier == *identifier,
+            _ => false,
+        };
+        if !ticket_unchanged {
+            return false;
+        }
         let expected = Self {
             prompt: baseline.prompt.clone(),
-            linear_links: baseline
-                .linear_identifier
-                .clone()
-                .map(LinkedLinear::from_identifier)
-                .into_iter()
-                .collect(),
+            linear_links: self.linear_links.clone(),
             github_pr_links: vec![LinkedGithubPr {
                 number: baseline.number,
                 imported: true,

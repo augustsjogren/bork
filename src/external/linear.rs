@@ -50,6 +50,9 @@ pub struct LinearPollResult {
     pub issues: Vec<LinearIssue>,
     pub projects: Vec<LinearProject>,
     pub unassigned_issues: Vec<LinearIssue>,
+    /// Tickets the board asked for by identifier (links attached without a
+    /// Linear id), so their id and url can be filled in.
+    pub looked_up: Vec<LinearIssue>,
     /// Why the poll returned nothing, when it failed. An empty list is
     /// otherwise indistinguishable from having no assigned issues, which sends
     /// the user looking at Linear instead of at their key.
@@ -191,6 +194,48 @@ const QUERY_UNASSIGNED: &str = concat!(
 /// Open issues in your teams with no assignee — pickable, not yet claimed.
 pub fn fetch_unassigned_issues() -> Result<Vec<LinearIssue>, AppError> {
     parse_issues_at(&run_query(QUERY_UNASSIGNED)?, "/data/issues/nodes")
+}
+
+/// Most tickets one lookup request names, kept within the query's `first:`.
+const IDENTIFIER_LOOKUP_BATCH: usize = 50;
+
+/// Tickets by identifier (`ENG-4140`), in any state and archived ones too,
+/// since Linear archives closed tickets. Ones Linear doesn't return (deleted,
+/// no access, not a ticket) are simply missing from the result.
+pub fn fetch_issues_by_identifier(identifiers: &[String]) -> Result<Vec<LinearIssue>, AppError> {
+    let mut issues = Vec::new();
+    for batch in identifiers.chunks(IDENTIFIER_LOOKUP_BATCH) {
+        let Some(query) = issues_by_identifier_query(batch) else {
+            continue;
+        };
+        issues.extend(parse_issues_at(&run_query(&query)?, "/data/issues/nodes")?);
+    }
+    Ok(issues)
+}
+
+/// One `team.key` and `number` clause per identifier. Each clause needs its
+/// own `and`: Linear drops the `number` condition from an `or` item that
+/// lists both fields side by side and returns the whole team. Identifiers
+/// that aren't `TEAM-123` are dropped, since the parts are spliced into the
+/// query.
+fn issues_by_identifier_query(identifiers: &[String]) -> Option<String> {
+    let clauses: Vec<String> = identifiers
+        .iter()
+        .filter_map(|identifier| crate::types::LinearIdentifier::parse(identifier))
+        .map(|ticket| {
+            format!(
+                "{{ and: [{{ team: {{ key: {{ eq: \"{}\" }} }} }}, {{ number: {{ eq: {} }} }}] }}",
+                ticket.team, ticket.number
+            )
+        })
+        .collect();
+    if clauses.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{{ issues(filter: {{ or: [{}] }}, first: {IDENTIFIER_LOOKUP_BATCH}, includeArchived: true) {{ nodes {{ id identifier title url branchName priority state {{ name }} team {{ key }} }} }} }}",
+        clauses.join(", ")
+    ))
 }
 
 /// Run a GraphQL query, returning the raw response body.
@@ -625,6 +670,24 @@ mod tests {
         let err = parse_issues("<html>gateway timeout</html>").expect_err("not json");
 
         assert!(err.to_string().contains("gateway timeout"), "got: {err}");
+    }
+
+    #[test]
+    fn identifier_lookup_query_has_one_and_clause_per_valid_identifier() {
+        let query = issues_by_identifier_query(&[
+            "ENG-4140".to_string(),
+            "eng-6416".to_string(),
+            "bad\"-1".to_string(),
+            "ENG-x".to_string(),
+            "ENG-+5".to_string(),
+        ])
+        .expect("two valid identifiers");
+
+        assert_eq!(
+            query,
+            "{ issues(filter: { or: [{ and: [{ team: { key: { eq: \"ENG\" } } }, { number: { eq: 4140 } }] }, { and: [{ team: { key: { eq: \"ENG\" } } }, { number: { eq: 6416 } }] }] }, first: 50, includeArchived: true) { nodes { id identifier title url branchName priority state { name } team { key } } } }"
+        );
+        assert_eq!(issues_by_identifier_query(&["nope".to_string()]), None);
     }
 
     #[test]
