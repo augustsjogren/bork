@@ -2095,6 +2095,7 @@ mod tests {
             &issue,
             None,
             &config,
+            &config.project_root,
             "bork-bork-1",
             "/tmp/status",
             TEST_PROMPT_PATH,
@@ -2458,7 +2459,7 @@ mod tests {
         let config = setup_config(root.path(), "touch setup-done");
         let issue = issue_in_worktree(root.path());
 
-        let prepared = prepare_launch(&issue, &config, &status).unwrap();
+        let prepared = prepare_launch(&issue, &config, &status, LaunchOptions::default()).unwrap();
         assert!(prepared.setup_ran);
         assert!(root.path().join("bork-1/setup-done").exists());
         assert!(prepared.agent_cmd.contains("claude --name"));
@@ -2541,7 +2542,7 @@ mod tests {
 
         let status = root.path().join("status");
 
-        let err = prepare_launch(&issue, &config, &status).unwrap_err();
+        let err = prepare_launch(&issue, &config, &status, LaunchOptions::default()).unwrap_err();
         assert!(err.to_string().contains("status 7"), "{err}");
         assert!(!prompt_file_path(&status, "bork-bork-1").exists());
     }
@@ -2564,7 +2565,13 @@ mod tests {
             ..issue_in_worktree(root.path())
         };
 
-        let prepared = prepare_launch(&issue, &config, &root.path().join("status")).unwrap();
+        let prepared = prepare_launch(
+            &issue,
+            &config,
+            &root.path().join("status"),
+            LaunchOptions::default(),
+        )
+        .unwrap();
         assert!(!prepared.setup_ran);
     }
 
@@ -2579,7 +2586,13 @@ mod tests {
         // always resumed; other agents would check this machine's storage.
         let issue = resumable_issue(AgentKind::OpenCode, AgentMode::Build, "ses_1");
 
-        let prepared = prepare_launch(&issue, &config, &root.path().join("status")).unwrap();
+        let prepared = prepare_launch(
+            &issue,
+            &config,
+            &root.path().join("status"),
+            LaunchOptions::default(),
+        )
+        .unwrap();
         assert_eq!(prepared.session_id.as_deref(), Some("ses_1"));
         assert!(prepared.agent_cmd.contains("opencode --session 'ses_1'"));
         assert!(!prepared.replaced_lost_session);

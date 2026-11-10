@@ -4617,7 +4617,7 @@ mod tests {
             last_success_at: Some(unix_now()),
         };
         app.refresh_backup_warning(unix_now());
-        let title = format!(" BORK - {} ", app.active_project().display_name());
+        let title = format!(" BONK - {} ", app.active_project().display_name());
         let full = " \u{26a0} backup failed (B to retry) ";
         let compact = " \u{26a0} backup failed ";
 
@@ -4787,6 +4787,7 @@ mod tests {
         // Left over from the last full poll before the project was hidden.
         live.worktree_branches
             .insert("bork-1-clone".into(), "bork-1/clone".into());
+        live.worktree_existing.insert("bork-1-clone".into());
         live.background_branches = Some(HashMap::from([(
             "bork-2-task".to_string(),
             "bork-2/task".to_string(),
