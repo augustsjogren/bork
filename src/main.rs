@@ -721,6 +721,12 @@ enum Command {
         command: IssueCommand,
     },
 
+    /// Group issues under a mission (an orchestrator issue that leads them)
+    Mission {
+        #[command(subcommand)]
+        command: MissionCommand,
+    },
+
     /// Manage integrations (Linear, GitHub PRs)
     Integration {
         #[command(subcommand)]
@@ -887,8 +893,12 @@ enum IssueCommand {
         linked: Option<String>,
 
         /// List deleted issues that can still be restored
-        #[arg(long, conflicts_with_all = ["column", "linked"])]
+        #[arg(long, conflicts_with_all = ["column", "linked", "mission"])]
         deleted: bool,
+
+        /// Show only members of this mission
+        #[arg(long)]
+        mission: Option<String>,
     },
 
     /// Create a new issue
@@ -972,6 +982,11 @@ enum IssueCommand {
         /// Linear ticket to link before the agent starts (e.g. VIL-123)
         #[arg(long)]
         linear: Option<String>,
+
+        /// Mission to add the new issue to. Defaults to the spawning issue
+        /// when an orchestrator runs this from its agent session.
+        #[arg(long)]
+        mission: Option<String>,
     },
 
     /// Update an existing issue
@@ -1177,6 +1192,25 @@ enum IntegrationCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum MissionCommand {
+    /// Add issues to a mission
+    Add {
+        /// Mission (orchestrator issue) ID (e.g. bork-1)
+        mission_id: String,
+
+        /// Issue IDs to add (e.g. bork-3 bork-4)
+        #[arg(required = true)]
+        issue_ids: Vec<String>,
+    },
+
+    /// Take an issue out of its mission
+    Remove {
+        /// Issue ID (e.g. bork-3)
+        issue_id: String,
+    },
+}
+
 fn parse_column(s: &str) -> Result<Column, String> {
     match s.to_lowercase().as_str() {
         "todo" | "to-do" | "to_do" => Ok(Column::Todo),
@@ -1247,6 +1281,7 @@ fn main() -> anyhow::Result<()> {
         ),
         Some(Command::Project { command }) => run_project_command(command),
         Some(Command::Issue { command }) => run_issue_command(command),
+        Some(Command::Mission { command }) => run_mission_command(command),
         Some(Command::Integration { command }) => run_integration_command(command),
         Some(Command::Config { command }) => run_config_command(command),
         Some(Command::Cloud { command }) => match command {
@@ -1804,6 +1839,7 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
             column,
             linked,
             deleted,
+            mission,
         } => {
             if deleted {
                 purge_expired_deleted(&project_root);
@@ -1816,6 +1852,7 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
                     column,
                     json,
                     linked,
+                    mission,
                 },
             )?;
             println!("{}", output);
@@ -1857,6 +1894,7 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
             project,
             link,
             linear,
+            mission,
         } => {
             let project_root = resolve_start_project_root(project.as_deref())?;
             let report = start_issue(
@@ -1872,6 +1910,7 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
                     base_branch: base,
                     link,
                     linear,
+                    mission,
                 },
             )?;
             println!("Started {}: \"{}\"", report.issue_id, report.title);
@@ -1880,6 +1919,9 @@ fn run_issue_command(command: IssueCommand) -> anyhow::Result<()> {
             }
             if let Some(linked) = report.linked_to {
                 println!("Linked:   {}", linked);
+            }
+            if let Some(mission) = report.mission {
+                println!("Mission:  {}", mission);
             }
             println!("Session:  {}", report.session_name);
             println!("Attach:   tmux attach -t {}", report.session_name);
@@ -2061,6 +2103,9 @@ struct StartIssueOptions {
     link: Option<String>,
     /// Linear ticket identifier to link before launch.
     linear: Option<String>,
+    /// Mission to add the new issue to. Falls back to `BORK_ISSUE_ID` when
+    /// that issue is a mission.
+    mission: Option<String>,
 }
 
 struct StartIssueReport {
@@ -2069,6 +2114,7 @@ struct StartIssueReport {
     worktree_dir: Option<String>,
     session_name: String,
     linked_to: Option<String>,
+    mission: Option<String>,
 }
 
 fn resolve_start_project_root(project: Option<&str>) -> anyhow::Result<PathBuf> {
@@ -2110,6 +2156,11 @@ fn find_project_root_from(path: &Path) -> Option<PathBuf> {
 
 fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<StartIssueReport> {
     let config = config::load_config_from(project_root);
+    if let Some(mission_id) = opts.mission.as_deref() {
+        if !ops::is_mission(&config::load_state(project_root).issues, mission_id) {
+            anyhow::bail!("{} is not a mission", mission_id);
+        }
+    }
     let mut issue = ops::create_issue(
         project_root,
         ops::CreateOptions {
@@ -2151,17 +2202,25 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
     let outcome = external::agent::launch_session(&issue, &config)
         .map_err(|e| anyhow::anyhow!("Failed to launch agent: {e}"))?;
 
-    // Resolve the link target: explicit --link wins, else the spawning agent's
-    // issue from BORK_ISSUE_ID. Only link when the target exists in this same
-    // project (cross-project spawns won't resolve and are skipped).
+    // Reload state so we don't clobber concurrent updates that happened during launch
+    let mut state = config::load_state(project_root);
+
+    // The spawning agent's issue from BORK_ISSUE_ID backs both --mission (when
+    // it leads a mission) and --link. Only link when the target exists in
+    // this same project (cross-project spawns won't resolve and are skipped).
+    let spawner_id =
+        session_issue_id().filter(|id| !id.is_empty() && !id.eq_ignore_ascii_case(&issue.id));
+    let mission_target = opts.mission.or_else(|| {
+        spawner_id
+            .clone()
+            .filter(|id| ops::is_mission(&state.issues, id))
+    });
     let explicit_link = opts.link.is_some();
     let link_target = opts
         .link
-        .or_else(session_issue_id)
+        .or(spawner_id)
         .filter(|id| !id.is_empty() && !id.eq_ignore_ascii_case(&issue.id));
 
-    // Reload state so we don't clobber concurrent updates that happened during launch
-    let mut state = config::load_state(project_root);
     if let Some(saved) = state.issues.iter_mut().find(|i| i.id == issue.id) {
         if saved.column == Column::Todo {
             saved.column = Column::InProgress;
@@ -2174,6 +2233,22 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
             outcome.setup_ran,
         );
     }
+    let mission = mission_target.and_then(|mission_id| {
+        match ops::assign_mission_in(
+            &mut state.issues,
+            &mission_id,
+            std::slice::from_ref(&issue.id),
+        ) {
+            Ok(mission_id) => Some(mission_id),
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to add {} to mission {}: {}",
+                    issue.id, mission_id, e
+                );
+                None
+            }
+        }
+    });
     config::save_state(&state, project_root)?;
 
     let linked_to = link_target.and_then(|target| {
@@ -2207,7 +2282,28 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
         worktree_dir,
         session_name: outcome.session_name,
         linked_to,
+        mission,
     })
+}
+
+fn run_mission_command(command: MissionCommand) -> anyhow::Result<()> {
+    let project_root = config::find_project_root();
+
+    match command {
+        MissionCommand::Add {
+            mission_id,
+            issue_ids,
+        } => {
+            let mission_id = ops::assign_mission(&project_root, &mission_id, &issue_ids)?;
+            println!("Added {} to mission {}", issue_ids.join(", "), mission_id);
+            Ok(())
+        }
+        MissionCommand::Remove { issue_id } => {
+            let issue = ops::leave_mission(&project_root, &issue_id)?;
+            println!("Removed {} from its mission", issue.id);
+            Ok(())
+        }
+    }
 }
 
 fn run_integration_command(command: IntegrationCommand) -> anyhow::Result<()> {

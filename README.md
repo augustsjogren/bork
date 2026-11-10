@@ -147,6 +147,8 @@ bork --help
 | `bork issue restore <id>` | Put a deleted issue back with its id, sessions and links |
 | `bork issue list --deleted` | List deleted issues that can still be restored |
 | `bork issue purge <id>` / `--all` | Permanently remove deleted issues and their saved plans |
+| `bork mission add <mission-id> <id>...` | Add issues to a mission (an orchestrator issue that leads them) |
+| `bork mission remove <id>` | Take an issue out of its mission |
 | `bork integration attach-linear <id> <identifier>` | Link a Linear ticket to an issue (can attach multiple) |
 | `bork integration attach-linear-project <id> <url-or-slug>` | Link a Linear project to an orchestrator issue (can attach multiple) |
 | `bork integration detach-linear-project <id> <url-or-slug>` | Unlink a Linear project from an issue |
