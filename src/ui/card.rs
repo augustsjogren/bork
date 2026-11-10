@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use crate::app::{CardSize, Project};
 use crate::types::{
-    AgentStatus, Issue, IssueKind, PrImportSource, PrState, PrStatus, WorktreeStatus,
+    AgentStatus, Column, Issue, IssueKind, PrImportSource, PrState, PrStatus, WorktreeStatus,
 };
 use crate::ui::styles;
 
@@ -243,6 +243,20 @@ fn attention_spans(ctx: &CardContext) -> Vec<Span<'static>> {
     ]
 }
 
+/// Room for the glyph and a few readable characters; narrower than this the
+/// chip is dropped rather than shown as a stub.
+const MIN_MISSION_CHIP_WIDTH: usize = 8;
+
+/// The card's open mission, unless the board is already filtered to it. A
+/// mission in Done is left out, as in the sidebar.
+fn mission_title<'a>(ctx: &CardContext<'a>) -> Option<&'a str> {
+    let mission = crate::ops::mission_of(&ctx.project.issues, ctx.issue)?;
+    if mission.column == Column::Done || ctx.project.is_mission_filtered(&mission.id) {
+        return None;
+    }
+    Some(mission.title.as_str())
+}
+
 fn comments_badge(count: u32) -> Option<Span<'static>> {
     if count == 0 {
         return None;
@@ -298,6 +312,16 @@ fn format_bottom_line(ctx: &CardContext, max_width: usize) -> Line<'static> {
             Style::default().fg(Color::Blue),
         ));
         left.push(Span::raw(" "));
+    }
+    let used = left.iter().map(Span::width).sum::<usize>() + comments_width;
+    if let Some(title) = mission_title(ctx) {
+        if left_budget >= used + MIN_MISSION_CHIP_WIDTH {
+            left.push(Span::styled(
+                styles::truncate_to_width(&format!("◆ {title}"), left_budget - used),
+                styles::orchestrator_badge_style(),
+            ));
+            left.push(Span::raw(" "));
+        }
     }
     if let Some(badge) = comments {
         left.push(badge);

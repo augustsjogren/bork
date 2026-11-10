@@ -14,6 +14,27 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Like [`truncate`], but `max` counts terminal columns, so free text with
+/// wide characters (emoji, CJK) still fits the space it was given.
+pub fn truncate_to_width(s: &str, max: usize) -> String {
+    let column_width = |text: &str| ratatui::text::Span::raw(text).width();
+    if column_width(s) <= max {
+        return s.to_string();
+    }
+
+    let ellipsis = if max > 3 { "..." } else { "" };
+    let budget = max - ellipsis.len();
+    let mut end = 0;
+    for (index, ch) in s.char_indices() {
+        let next = index + ch.len_utf8();
+        if column_width(&s[..next]) > budget {
+            break;
+        }
+        end = next;
+    }
+    format!("{}{ellipsis}", &s[..end])
+}
+
 // All colors use ANSI 16 palette so they adapt to the user's terminal theme.
 // Never use Color::Rgb or Color::Indexed(16+) here.
 pub const ACCENT: Color = Color::Cyan;
@@ -155,6 +176,15 @@ pub fn review_icon(decision: Option<ReviewDecision>) -> (&'static str, Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_to_width_counts_wide_characters_as_two_columns() {
+        let cut = truncate_to_width("◆ 🚀🚀🚀🚀 launch", 10);
+
+        assert_eq!(cut, "◆ 🚀🚀...");
+        assert!(ratatui::text::Span::raw(cut.as_str()).width() <= 10);
+        assert_eq!(truncate_to_width("short", 10), "short");
+    }
 
     #[test]
     fn each_queue_state_has_its_own_badge() {

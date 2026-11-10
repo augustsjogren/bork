@@ -632,7 +632,7 @@ Merged and closed PRs remain visible in the expanded list. Stack cards omit diff
 counts. Individual PRs show additions/deletions, or `draft` while still in draft.
 Linked issues and Linear IDs sit at bottom-left. Selecting a stack issue shows
 `s view stack` in the app shortcut bar.
-Mission and todo cards show their type beside the issue ID in the border.
+Mission and todo cards show their type beside the issue ID in the border. A card in an open mission shows `◆ <mission title>` in its footer, after its Linear ticket. The chip is left out when the card is too narrow, and while the board is filtered to that mission.
 
 Stack controls appear only when the repository supports GitHub's stack API;
 no CLI extension is required. Without `gh`, live GitHub details are hidden and

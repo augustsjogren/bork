@@ -4353,6 +4353,81 @@ mod tests {
         );
     }
 
+    /// A board with mission `bork-1` "Roadmap" and its member `bork-2`, which
+    /// also carries a Linear ticket.
+    fn member_card_app() -> (App, Issue) {
+        let mut app = test_app();
+        let mission = Issue {
+            kind: IssueKind::Orchestrator,
+            title: "Roadmap".into(),
+            ..test_issue("bork-1", Column::InProgress)
+        };
+        let member = Issue {
+            mission_id: Some("bork-1".into()),
+            linear_links: vec![LinkedLinear {
+                id: "id".into(),
+                identifier: "ENG-4140".into(),
+                url: String::new(),
+                imported: false,
+            }],
+            ..test_issue("bork-2", Column::Todo)
+        };
+        app.project_mut().issues = vec![mission, member.clone()];
+        (app, member)
+    }
+
+    #[test]
+    fn a_member_card_names_its_mission_in_the_footer() {
+        let (app, member) = member_card_app();
+
+        let rows = card_rows(&app, &member, 44, crate::app::CardSize::Full);
+
+        let footer = &rows[rows.len() - 2];
+        assert!(footer.contains("◈ ENG-4140 ◆ Roadmap"), "{footer}");
+    }
+
+    #[test]
+    fn the_mission_chip_hides_while_the_board_shows_only_that_mission() {
+        let (mut app, member) = member_card_app();
+        app.set_mission_filter(Some("bork-1".into()));
+
+        let rows = card_rows(&app, &member, 44, crate::app::CardSize::Full);
+
+        assert!(
+            !rows[rows.len() - 2].contains('◆'),
+            "{}",
+            rows[rows.len() - 2]
+        );
+    }
+
+    #[test]
+    fn a_narrow_member_card_drops_the_mission_chip_before_the_linear_id() {
+        let (app, member) = member_card_app();
+
+        let too_narrow = card_rows(&app, &member, 24, crate::app::CardSize::Full);
+        let just_enough = card_rows(&app, &member, 25, crate::app::CardSize::Full);
+
+        let footer = &too_narrow[too_narrow.len() - 2];
+        assert!(footer.contains("◈ ENG-4140"), "{footer}");
+        assert!(!footer.contains('◆'), "{footer}");
+        let footer = &just_enough[just_enough.len() - 2];
+        assert!(footer.contains("◈ ENG-4140 ◆ Roa..."), "{footer}");
+    }
+
+    #[test]
+    fn a_member_of_a_done_mission_shows_no_mission_chip() {
+        let (mut app, member) = member_card_app();
+        app.project_mut().issues[0].column = Column::Done;
+
+        let rows = card_rows(&app, &member, 44, crate::app::CardSize::Full);
+
+        assert!(
+            !rows[rows.len() - 2].contains('◆'),
+            "{}",
+            rows[rows.len() - 2]
+        );
+    }
+
     #[test]
     fn a_narrow_mission_card_keeps_its_id_with_the_short_badge() {
         let app = stack_test_app(2);
