@@ -148,6 +148,8 @@ bork --help
 | `bork mission remove <id>` | Take an issue out of its mission |
 | `bork mission link [mission-id] <url> [--note <text>]` | Save a reference (Slack thread, doc) to the mission's `plans/<id>/links.md`; the id defaults to `BORK_ISSUE_ID` |
 | `bork mission show [mission-id]` | Show a mission's scope, members and saved links |
+| `bork mission handoff <mission-id>` | Ask the running mission control to write a handoff into its `planning.md` |
+| `bork mission restart <mission-id>` | Kill mission control and launch a fresh session that starts from its plan and links |
 | `bork integration attach-linear <id> <identifier>` | Link a Linear ticket to an issue (can attach multiple) |
 | `bork integration attach-linear-project <id> <url-or-slug>` | Link a Linear project to an orchestrator issue (can attach multiple) |
 | `bork integration detach-linear-project <id> <url-or-slug>` | Unlink a Linear project from an issue |
@@ -294,6 +296,7 @@ bork update --check   # force a fresh check without pulling
 | `d` | Delete issue (with confirmation) |
 | `A` | Archive issue: kill session, run teardown, remove worktree, move to Done (with confirmation; offers to force it when the worktree is dirty or the teardown fails) |
 | `x` | Kill session (with confirmation) |
+| `M` | On a mission card: ask mission control for a handoff; press again to restart it with a fresh session (with confirmation) |
 | `a` | Add issue in current column |
 | `H` | Move issue to previous column |
 | `L` | Move issue to next column |

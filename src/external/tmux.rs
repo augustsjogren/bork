@@ -292,6 +292,64 @@ pub fn send_keys(session: &str, keys: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Delay between typing a line into a TUI and pressing Enter. Agent TUIs
+/// read a burst of typed text as a paste and fold an Enter inside that burst
+/// into it, so the line would sit unsent.
+const TYPE_LINE_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Type `text` into `target` literally (no tmux key names), then press Enter.
+pub fn type_line(target: &str, text: &str) -> Result<(), AppError> {
+    run_send_keys(target, &["-l", text])?;
+    std::thread::sleep(TYPE_LINE_SUBMIT_DELAY);
+    run_send_keys(target, &["Enter"])
+}
+
+fn run_send_keys(target: &str, keys: &[&str]) -> Result<(), AppError> {
+    let status = tmux()
+        .args(["send-keys", "-t", target])
+        .args(keys)
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| AppError::Tmux(format!("failed to send keys to '{target}': {e}")))?;
+
+    if !status.success() {
+        return Err(AppError::Tmux(format!(
+            "tmux send-keys failed for '{target}'"
+        )));
+    }
+    Ok(())
+}
+
+/// The agent's pane: the first pane of the session's lowest-numbered window,
+/// whatever window is active and whatever the user's base-index.
+pub fn agent_pane(session: &str) -> String {
+    format!("{session}:^.{{top-left}}")
+}
+
+const SHELLS: &[&str] = &[
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu",
+];
+
+/// Whether a `pane_current_command` is an interactive shell (login shells
+/// show with a leading `-`).
+pub fn is_shell(command: &str) -> bool {
+    SHELLS.contains(&command.trim_start_matches('-'))
+}
+
+/// The session the calling process runs in, when it runs inside tmux.
+pub fn current_session() -> Option<String> {
+    std::env::var_os("TMUX")?;
+    let output = tmux()
+        .args(["display-message", "-p", "#{session_name}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 pub fn create_command_window(
     session: &str,
     name: &str,

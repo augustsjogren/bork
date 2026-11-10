@@ -638,6 +638,109 @@ fn mission_context_dir(
     Ok(crate::backup::issue_plan_dir(project_root, mission_id))
 }
 
+/// Ask a running mission control to write a handoff into its plan, so a
+/// fresh session (`restart_mission`) can take over. Returns its session name.
+pub fn request_mission_handoff(project_root: &Path, mission_id: &str) -> anyhow::Result<String> {
+    use crate::external::tmux;
+
+    let state = config::load_state(project_root);
+    let config = config::load_config_from(project_root);
+    let mission = require_mission(&state.issues, mission_id)?;
+    let session_name = mission.session_name(&config.project_name);
+    if !tmux::session_exists(&session_name) {
+        anyhow::bail!("{} has no running session to hand off", mission.id);
+    }
+
+    // The text is typed into the pane, so it must reach the agent itself: at
+    // a shell prompt it would run as a command, and in an approval menu its
+    // keys would pick options.
+    let pane = tmux::agent_pane(&session_name);
+    match tmux::pane_current_command(&pane) {
+        Some(command) if !tmux::is_shell(&command) => {}
+        _ => anyhow::bail!("{}'s agent isn't running in {}", mission.id, session_name),
+    }
+    if agent_waits_for_approval(project_root, &session_name) {
+        anyhow::bail!(
+            "{}'s agent is waiting for an approval; answer it first",
+            mission.id
+        );
+    }
+
+    tmux::type_line(&pane, &handoff_request(&mission.id))?;
+    Ok(session_name)
+}
+
+fn agent_waits_for_approval(project_root: &Path, session_name: &str) -> bool {
+    let path = config::agent_status_dir(project_root).join(format!("{session_name}.json"));
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<crate::types::AgentStatusInfo>(&contents).ok())
+        .is_some_and(|info| {
+            matches!(
+                info.status,
+                crate::types::AgentStatus::WaitingPermission
+                    | crate::types::AgentStatus::WaitingApproval
+            )
+        })
+}
+
+/// Typed into the agent's input, so it must stay on one line.
+fn handoff_request(mission_id: &str) -> String {
+    let plan = format!(
+        "{}/{mission_id}/{}",
+        crate::backup::PLANS_DIR,
+        crate::backup::PLAN_NAME
+    );
+    format!(
+        "Mission control will be restarted with a fresh session that starts from your files, not this conversation. \
+Write a section headed Handoff at the end of {plan} now: where the mission stands, decisions and why, what each member issue is waiting on, open questions, and your next steps. \
+Save any reference you rely on with `bork mission link`. \
+Then reply HANDOFF READY and stop."
+    )
+}
+
+/// Replace mission control with a fresh session: forget its conversation,
+/// then relaunch with `replace_running`, which kills the running session
+/// first. The new session rebuilds its state from `plans/<mission-id>/`.
+/// Returns the new session's name.
+pub fn restart_mission(project_root: &Path, mission_id: &str) -> anyhow::Result<String> {
+    let mut state = config::load_state(project_root);
+    let config = config::load_config_from(project_root);
+    let idx = find_issue_index(&state.issues, mission_id)
+        .filter(|&idx| state.issues[idx].kind == IssueKind::Orchestrator)
+        .ok_or_else(|| anyhow::anyhow!("{} is not a mission", mission_id))?;
+
+    let mission = &mut state.issues[idx];
+    // The restart kills the mission's session, which would take a command
+    // run from any of its windows down before the fresh launch.
+    let session_name = mission.session_name(&config.project_name);
+    if crate::external::tmux::current_session().as_deref() == Some(session_name.as_str()) {
+        anyhow::bail!(
+            "run `bork mission restart` from outside {}'s own session, e.g. from the board",
+            mission.id
+        );
+    }
+    mission.forget_session(mission.agent_kind);
+    config::save_state(&state, project_root)?;
+
+    let fresh = &state.issues[idx];
+    let options = agent::LaunchOptions {
+        replace_running: true,
+        ..Default::default()
+    };
+    let outcome = agent::launch_session_with(fresh, &config, options)
+        .map_err(|e| anyhow::anyhow!("Failed to launch agent: {e}"))?;
+    record_launch(
+        project_root,
+        fresh,
+        outcome.agent_session_id,
+        outcome.session_dir,
+        outcome.setup_ran,
+        false,
+    )?;
+    Ok(outcome.session_name)
+}
+
 /// Everything a fresh mission-control session needs to pick a mission up:
 /// its scope, Linear context, members and saved links.
 pub fn show_mission(project_root: &Path, mission_id: &str) -> anyhow::Result<String> {
@@ -2544,6 +2647,31 @@ mod tests {
             "test-2 is not a mission"
         );
         assert!(!root.join("plans/test-1/links.md").exists());
+    }
+
+    #[test]
+    fn handoff_request_is_one_line_naming_the_plan() {
+        let request = handoff_request("bork-7");
+
+        assert!(!request.contains('\n'));
+        assert!(request.contains("plans/bork-7/planning.md"));
+        assert!(request.contains("HANDOFF READY"));
+    }
+
+    #[test]
+    fn mission_handoff_needs_a_running_session() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &["test-2"]);
+
+        let no_session = request_mission_handoff(root, "test-1").unwrap_err();
+        let not_mission = request_mission_handoff(root, "test-2").unwrap_err();
+
+        assert_eq!(
+            no_session.to_string(),
+            "test-1 has no running session to hand off"
+        );
+        assert_eq!(not_mission.to_string(), "test-2 is not a mission");
     }
 
     #[test]

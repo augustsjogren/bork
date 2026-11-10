@@ -233,6 +233,10 @@ pub struct LaunchOptions {
     /// recording it as run, so the next ordinary launch still runs it. For
     /// sessions that only read code, like reviews.
     pub skip_setup: bool,
+    /// Kill a running session first instead of attaching to it, so the
+    /// launch starts the issue's agent afresh (mission-control restarts).
+    #[serde(default)]
+    pub replace_running: bool,
 }
 
 /// The pane only gets a short `bork issue launch <id>` line; that command
@@ -257,6 +261,9 @@ pub fn launch_session_with(
         None => config.project_root.clone(),
     };
 
+    if options.replace_running {
+        terminate_session(&config.project_root, &session_name)?;
+    }
     if tmux::session_exists(&session_name) {
         return Ok(LaunchOutcome {
             session_name,
@@ -960,7 +967,7 @@ fn mission_context(mission_id: &str) -> String {
     format!(
         "\n\nThis mission's durable context lives in {plans}/{mission_id}/, relative to the project root (the directory containing main/): \
 maintain your plan in {plans}/{mission_id}/{plan} (goal, breakdown, decisions, status log), and save references in {links} (Slack threads, docs, dashboards) with `bork mission link <url> --note \"...\"`. \
-You may be taking over from an earlier session: before acting, read both files and run `bork mission show {mission_id}`. \
+You may be taking over from an earlier session: before acting, read both files (start with any Handoff section at the end of {plan}) and run `bork mission show {mission_id}`. \
 Keep them current as you work, so a fresh session could pick up where you left off. \
 Save links, never copies of thread or document content."
     )

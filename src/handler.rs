@@ -497,6 +497,22 @@ fn spawn_launches(
     issues: Vec<Issue>,
     config: AppConfig,
 ) -> Vec<(String, String)> {
+    spawn_launches_with(
+        app,
+        ch.action_tx,
+        issues,
+        config,
+        agent::LaunchOptions::default(),
+    )
+}
+
+fn spawn_launches_with(
+    app: &mut App,
+    action_tx: &mpsc::Sender<ActionResult>,
+    issues: Vec<Issue>,
+    config: AppConfig,
+    options: agent::LaunchOptions,
+) -> Vec<(String, String)> {
     // Guard against double-launch: tmux::session_exists inside the
     // launch thread is check-then-act, so a second keypress before
     // the first launch completes would race it.
@@ -516,7 +532,7 @@ fn spawn_launches(
         })
         .collect();
 
-    let tx = ch.action_tx.clone();
+    let tx = action_tx.clone();
     thread::spawn(move || {
         for issue in issues {
             let panic_issue_id = issue.id.clone();
@@ -524,7 +540,7 @@ fn spawn_launches(
             // otherwise the in-flight guard for this issue leaks and
             // blocks every future launch attempt until restart.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                launch_and_report(issue, config.clone())
+                launch_and_report_with(issue, config.clone(), options)
             }))
             .unwrap_or_else(|_| ActionResult {
                 message: "Launch failed unexpectedly (internal panic)".to_string(),
@@ -712,6 +728,61 @@ fn handle_normal(
                     project_id: ctx.project_id.clone(),
                 },
             );
+            PostAction::None
+        }
+
+        Action::MissionHandoff => {
+            let Some(mission) = app.context_project(ctx).selected_issue(&q).cloned() else {
+                return PostAction::None;
+            };
+            if mission.kind != IssueKind::Orchestrator {
+                app.set_warning("Only a mission's card hands off mission control");
+                return PostAction::None;
+            }
+
+            let project = app.context_project_mut(ctx);
+            let current_session = mission.current_session_id().map(str::to_string);
+            if project.handoffs_requested.get(&mission.id) == Some(&current_session) {
+                app.start_confirm(
+                    format!(
+                        "Restart {} with a fresh session that starts from its plan and links? (y/n)",
+                        mission.id
+                    ),
+                    ConfirmAction::RestartMission {
+                        mission_id: mission.id,
+                        project_id: ctx.project_id.clone(),
+                    },
+                );
+                return PostAction::None;
+            }
+
+            project
+                .handoffs_requested
+                .insert(mission.id.clone(), current_session);
+            let project_root = project.config.project_root.clone();
+            let tx = ch.action_tx.clone();
+            app.begin_busy();
+            thread::spawn(move || {
+                let (message, message_kind) =
+                    match crate::ops::request_mission_handoff(&project_root, &mission.id) {
+                        Ok(_) => (
+                            format!(
+                                "Asked {} for a handoff; press M again to restart it once it replies HANDOFF READY",
+                                mission.id
+                            ),
+                            MessageKind::Info,
+                        ),
+                        Err(e) => (
+                            format!("Handoff request failed: {e:#}; press M again to restart anyway"),
+                            MessageKind::Warning,
+                        ),
+                    };
+                let _ = tx.send(ActionResult {
+                    message,
+                    message_kind,
+                    ..Default::default()
+                });
+            });
             PostAction::None
         }
 
@@ -2886,6 +2957,10 @@ fn handle_confirm(
                     ConfirmAction::RemoveProject { project_id } => {
                         unregister_sidebar_project(app, project_id)
                     }
+                    ConfirmAction::RestartMission {
+                        mission_id,
+                        project_id,
+                    } => restart_mission_in_app(app, action_tx, &project_id, &mission_id),
                     ConfirmAction::ForcePrune {
                         project_id,
                         targets,
@@ -3417,15 +3492,54 @@ fn provision_and_launch_review(
         worktree_attached = Some((project_id, issue.id.clone(), created.worktree_dir));
     }
 
-    let options = agent::LaunchOptions { skip_setup: true };
+    let options = agent::LaunchOptions {
+        skip_setup: true,
+        ..Default::default()
+    };
     ActionResult {
         worktree_attached,
         ..launch_and_report_with(issue, config, options)
     }
 }
 
-fn launch_and_report(issue: Issue, config: AppConfig) -> ActionResult {
-    launch_and_report_with(issue, config, agent::LaunchOptions::default())
+/// Forget mission control's conversation in memory, then relaunch it through
+/// the normal launch path with `replace_running`, which kills the old
+/// session on the launch thread. Forgetting first means any launch that
+/// races this one starts fresh too instead of resuming the old conversation.
+fn restart_mission_in_app(
+    app: &mut App,
+    action_tx: &mpsc::Sender<ActionResult>,
+    project_id: &ProjectId,
+    mission_id: &str,
+) {
+    if app.launches_in_flight.contains(mission_id) {
+        app.set_warning("A launch for this mission is already in progress; try again once it's up");
+        return;
+    }
+    let Some(project) = app.find_project_mut(project_id) else {
+        app.set_warning("Project no longer available");
+        return;
+    };
+    project.handoffs_requested.remove(mission_id);
+    let Some(mission) = project
+        .issues
+        .iter_mut()
+        .find(|issue| issue.id.eq_ignore_ascii_case(mission_id))
+    else {
+        app.set_warning(format!("{mission_id} is no longer on the board"));
+        return;
+    };
+    mission.forget_session(mission.agent_kind);
+    let fresh = mission.clone();
+    project.mark_dirty();
+    let config = project.config.clone();
+
+    let options = agent::LaunchOptions {
+        replace_running: true,
+        ..Default::default()
+    };
+    spawn_launches_with(app, action_tx, vec![fresh], config, options);
+    app.set_message("Restarting mission control with a fresh session...");
 }
 
 fn launch_and_report_with(
@@ -5456,6 +5570,89 @@ mod tests {
         let ctx = app.action_context();
         let ch = test_channels();
         handle_action(app, action, &ctx, &ch)
+    }
+
+    #[test]
+    fn mission_handoff_refuses_a_non_mission_card() {
+        let mut app = app_with_issues();
+
+        act(&mut app, Action::MissionHandoff);
+
+        assert!(app.project().handoffs_requested.is_empty());
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.message.as_ref().map(|(text, _)| text.as_str()),
+            Some("Only a mission's card hands off mission control")
+        );
+    }
+
+    fn app_with_mission_session(session_id: &str) -> App {
+        let mut app = app_with_issues();
+        let mission = &mut app.project_mut().issues[0];
+        mission.kind = IssueKind::Orchestrator;
+        mission.record_session(mission.agent_kind, session_id.to_string(), None);
+        app
+    }
+
+    #[test]
+    fn second_mission_handoff_press_offers_the_fresh_restart() {
+        let mut app = app_with_mission_session("s-1");
+        app.project_mut()
+            .handoffs_requested
+            .insert("bork-1".to_string(), Some("s-1".to_string()));
+
+        act(&mut app, Action::MissionHandoff);
+
+        assert_eq!(app.input_mode, InputMode::Confirm);
+        assert!(matches!(
+            app.take_confirm_action(),
+            Some(ConfirmAction::RestartMission { mission_id, .. }) if mission_id == "bork-1"
+        ));
+    }
+
+    #[test]
+    fn a_handoff_asked_of_an_earlier_session_asks_again() {
+        let mut app = app_with_mission_session("s-2");
+        app.project_mut()
+            .handoffs_requested
+            .insert("bork-1".to_string(), Some("s-1".to_string()));
+
+        act(&mut app, Action::MissionHandoff);
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.project().handoffs_requested.get("bork-1"),
+            Some(&Some("s-2".to_string()))
+        );
+    }
+
+    #[test]
+    fn restarting_a_mission_forgets_its_conversation_and_relaunches() {
+        let mut app = app_with_mission_session("s-1");
+        app.project_mut()
+            .handoffs_requested
+            .insert("bork-1".to_string(), Some("s-1".to_string()));
+        let project_id = app.active_project_id();
+        let (tx, _rx) = mpsc::channel();
+
+        restart_mission_in_app(&mut app, &tx, &project_id, "bork-1");
+
+        let mission = &app.project().issues[0];
+        assert_eq!(mission.current_session_id(), None);
+        assert!(app.project().handoffs_requested.is_empty());
+        assert!(app.launches_in_flight.contains("bork-1"));
+    }
+
+    #[test]
+    fn restarting_a_mission_waits_for_an_in_flight_launch() {
+        let mut app = app_with_mission_session("s-1");
+        app.launches_in_flight.insert("bork-1".to_string());
+        let project_id = app.active_project_id();
+        let (tx, _rx) = mpsc::channel();
+
+        restart_mission_in_app(&mut app, &tx, &project_id, "bork-1");
+
+        assert_eq!(app.project().issues[0].current_session_id(), Some("s-1"));
     }
 
     #[test]

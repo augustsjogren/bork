@@ -18,10 +18,6 @@ pub fn check_available() -> bool {
 
 const MODE_OPTION: &str = "@bork-tuicr-mode";
 
-const SHELLS: &[&str] = &[
-    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu",
-];
-
 /// Show tuicr in `session`, reusing its tuicr window when there is one.
 pub fn open_in_session(session: &str, cwd: &Path, pr: Option<u32>) -> Result<(), AppError> {
     let Some(window) = tmux::window_ids(session, tmux::TUICR_WINDOW)?
@@ -48,9 +44,7 @@ fn resume_tuicr(target: &str, cwd: &Path, pr: Option<u32>) -> Result<(), AppErro
             tmux::respawn_pane(target, cwd)?;
             start_tuicr(target, pr)
         }
-        Some(command) if SHELLS.contains(&command.trim_start_matches('-')) => {
-            start_tuicr(target, pr)
-        }
+        Some(command) if tmux::is_shell(command) => start_tuicr(target, pr),
         _ => Ok(()),
     }
 }

@@ -91,6 +91,7 @@ fn map_normal_key(key: KeyEvent, swimlane_count: usize) -> Action {
         KeyCode::Enter => Action::OpenSession,
         KeyCode::Char('t') => Action::OpenTerminal,
         KeyCode::Char('x') => Action::KillSession,
+        KeyCode::Char('M') => Action::MissionHandoff,
 
         KeyCode::Char('n') => Action::CreateIssue,
         KeyCode::Char('a') => Action::AddIssue,

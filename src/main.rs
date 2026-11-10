@@ -1186,6 +1186,18 @@ enum MissionCommand {
         /// Mission ID (defaults to BORK_ISSUE_ID)
         mission_id: Option<String>,
     },
+
+    /// Ask a running mission control to write a handoff into its plan
+    Handoff {
+        /// Mission ID (e.g. bork-1)
+        mission_id: String,
+    },
+
+    /// Replace mission control with a fresh session that starts from its files
+    Restart {
+        /// Mission ID (e.g. bork-1)
+        mission_id: String,
+    },
 }
 
 fn parse_column(s: &str) -> Result<Column, String> {
@@ -2228,6 +2240,16 @@ fn run_mission_command(command: MissionCommand) -> anyhow::Result<()> {
                 None => session_mission_id()?,
             };
             println!("{}", ops::show_mission(&project_root, &mission_id)?);
+            Ok(())
+        }
+        MissionCommand::Handoff { mission_id } => {
+            let session_name = ops::request_mission_handoff(&project_root, &mission_id)?;
+            println!("Asked {session_name} to write a handoff. Restart it with `bork mission restart {mission_id}` once it replies HANDOFF READY.");
+            Ok(())
+        }
+        MissionCommand::Restart { mission_id } => {
+            let session_name = ops::restart_mission(&project_root, &mission_id)?;
+            println!("Restarted mission control in {session_name}");
             Ok(())
         }
     }

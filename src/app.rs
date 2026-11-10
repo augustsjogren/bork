@@ -297,6 +297,11 @@ pub struct Project {
     /// reports a new worktree before its checkout finishes, so auto-assign
     /// leaves these alone until the creating thread reports back.
     pub worktrees_in_flight: HashSet<String>,
+    /// Missions whose mission control was asked for a handoff (`M`), keyed by
+    /// mission id, holding the session id asked. The next `M` offers the
+    /// fresh restart only while that same session is still the current one,
+    /// so a deleted, re-kinded or elsewhere-restarted mission asks again.
+    pub handoffs_requested: HashMap<String, Option<String>>,
     pub linear_available: bool,
     pub tuicr_available: bool,
     pub github_available: bool,
@@ -372,6 +377,7 @@ impl Project {
             mission_filter: None,
             attention_filter: false,
             worktrees_in_flight: HashSet::new(),
+            handoffs_requested: HashMap::new(),
             linear_available: false,
             tuicr_available: false,
             github_available: false,
@@ -2356,6 +2362,11 @@ pub enum ConfirmAction {
     ForcePrune {
         project_id: ProjectId,
         targets: Vec<crate::prune::PruneTarget>,
+    },
+    /// Replace a mission's mission control with a fresh session.
+    RestartMission {
+        mission_id: String,
+        project_id: ProjectId,
     },
     /// Unregister the project. Its files stay on disk.
     RemoveProject { project_id: ProjectId },
