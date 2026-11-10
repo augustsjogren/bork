@@ -21,6 +21,7 @@ use crate::attention::Attention;
 use crate::config::{AppConfig, AppState, DEFAULT_REVIEW_PROMPT};
 use crate::external::git::PollClass;
 use crate::external::linear::{LinearIssue, LinearProject};
+use crate::mission_notes::MissionNotes;
 use crate::prune::{PruneAction, PruneCandidate};
 use crate::types::{
     cloud_card_status, AgentKind, AgentStatus, AgentStatusInfo, ChecksStatus, CloudAgent,
@@ -303,6 +304,8 @@ pub struct Project {
     /// fresh restart only while that same session is still the current one,
     /// so a deleted, re-kinded or elsewhere-restarted mission asks again.
     pub handoffs_requested: HashMap<String, Option<String>>,
+    /// Notes for mission control about its members, see `collect_mission_notes`.
+    pub mission_notes: MissionNotes,
     pub linear_available: bool,
     pub tuicr_available: bool,
     pub github_available: bool,
@@ -379,6 +382,7 @@ impl Project {
             attention_filter: false,
             worktrees_in_flight: HashSet::new(),
             handoffs_requested: HashMap::new(),
+            mission_notes: MissionNotes::default(),
             linear_available: false,
             tuicr_available: false,
             github_available: false,
@@ -911,6 +915,9 @@ impl Project {
         if issue.column == target {
             return;
         }
+        // Only TUI keys move cards through here; mission control isn't told
+        // about moves the user made.
+        self.mission_notes.user_moved.insert(issue.id.clone());
         let was_done = issue.column == Column::Done;
         let wt = issue.worktree.clone();
 
@@ -2517,6 +2524,7 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
         // Merged field-wise in merge_cloud_fields().
         cloud: _,
         mission_id: _,
+        mission_notes_off: _,
         // Merged entry-wise, interleaved with the kind/orchestrator logic below.
         sessions: _,
         session_dirs: _,
@@ -2565,6 +2573,7 @@ fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
     merge_field!(stack_review_import);
     merge_field!(linked_issues);
     merge_field!(mission_id);
+    merge_field!(mission_notes_off);
 
     merge_cloud_fields(memory, base, file);
 
@@ -3921,6 +3930,189 @@ mod tests {
             last_prune_at: None,
         };
         App::new(test_config(), state)
+    }
+
+    /// Mission `bork-1` with member `bork-2` in To Do, mission control's
+    /// status hook reporting Idle, and PRs polled.
+    fn mission_notes_app() -> App {
+        let mission = Issue {
+            kind: IssueKind::Orchestrator,
+            ..test_issue("bork-1", Column::InProgress)
+        };
+        let member = Issue {
+            mission_id: Some("bork-1".into()),
+            ..test_issue("bork-2", Column::Todo)
+        };
+        let mut app = test_app(vec![member, mission]);
+        set_status(&mut app, 1, AgentStatus::Idle);
+        app.project_mut().live.pr_poll_done = true;
+        app
+    }
+
+    fn set_status(app: &mut App, idx: usize, status: AgentStatus) {
+        let session = app.project().issues[idx].session_name("bork");
+        app.project_mut()
+            .live
+            .active_sessions
+            .insert(session.clone());
+        app.project_mut().live.agent_statuses.insert(
+            session,
+            AgentStatusInfo {
+                status,
+                activity: None,
+                updated_at: 0,
+            },
+        );
+    }
+
+    fn written(due: &crate::mission_notes::DueNotes) -> Vec<String> {
+        due.writes
+            .iter()
+            .flat_map(|(_, notes)| notes.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_member_moved_elsewhere_is_written_and_nudged_once() {
+        let mut app = mission_notes_app();
+        let now = std::time::Instant::now();
+        app.project_mut().collect_mission_notes();
+        assert_eq!(
+            app.project_mut().take_due_mission_notes(now),
+            crate::mission_notes::DueNotes::default()
+        );
+
+        app.project_mut().issues[0].column = Column::CodeReview;
+        app.project_mut().collect_mission_notes();
+        assert_eq!(app.project().unread_mission_notes("bork-1"), 1);
+        let due = app.project_mut().take_due_mission_notes(now);
+
+        assert_eq!(written(&due), vec!["bork-2 moved to Code Review"]);
+        assert_eq!(due.nudges.len(), 1);
+        assert_eq!(due.nudges[0].mission_id, "bork-1");
+        assert_eq!(app.project().unread_mission_notes("bork-1"), 0);
+        assert_eq!(
+            app.project_mut().take_due_mission_notes(now),
+            crate::mission_notes::DueNotes::default()
+        );
+    }
+
+    #[test]
+    fn moves_by_the_user_or_by_a_busy_mission_control_are_not_noted() {
+        let mut app = mission_notes_app();
+        app.project_mut().collect_mission_notes();
+
+        app.project_mut().move_issue_right("");
+        app.project_mut().collect_mission_notes();
+        set_status(&mut app, 1, AgentStatus::Busy);
+        app.project_mut().issues[0].column = Column::CodeReview;
+        app.project_mut().collect_mission_notes();
+
+        assert_eq!(
+            app.project_mut()
+                .take_due_mission_notes(std::time::Instant::now()),
+            crate::mission_notes::DueNotes::default()
+        );
+    }
+
+    #[test]
+    fn a_member_agent_waiting_on_an_approval_is_noted_once_while_it_flaps() {
+        let mut app = mission_notes_app();
+        app.project_mut().collect_mission_notes();
+
+        for status in [
+            AgentStatus::WaitingPermission,
+            AgentStatus::Busy,
+            AgentStatus::WaitingPermission,
+        ] {
+            set_status(&mut app, 0, status);
+            app.project_mut().collect_mission_notes();
+        }
+        let due = app
+            .project_mut()
+            .take_due_mission_notes(std::time::Instant::now());
+
+        assert_eq!(written(&due), vec!["bork-2: agent waiting on an approval"]);
+    }
+
+    #[test]
+    fn a_member_with_a_pr_is_named_with_its_pr_number() {
+        let mut app = mission_notes_app();
+        app.project_mut().issues[0]
+            .github_pr_links
+            .push(LinkedGithubPr {
+                number: 7,
+                imported: false,
+                import_source: None,
+            });
+        app.project_mut().live.user_prs = vec![test_pr(7, "feature")];
+        app.project_mut().collect_mission_notes();
+
+        app.project_mut().live.user_prs[0].merge_blocker = Some(MergeBlocker::Blocked);
+        app.project_mut().collect_mission_notes();
+        app.project_mut().live.user_prs[0].state = PrState::Merged;
+        app.project_mut().collect_mission_notes();
+        let due = app
+            .project_mut()
+            .take_due_mission_notes(std::time::Instant::now());
+
+        assert_eq!(
+            written(&due),
+            vec![
+                "bork-2 (#7): PR approved and green, but GitHub blocks the merge",
+                "bork-2 (#7): PR merged",
+            ]
+        );
+    }
+
+    #[test]
+    fn muting_a_mission_drops_notes_already_queued() {
+        let mut app = mission_notes_app();
+        app.project_mut().collect_mission_notes();
+        app.project_mut().issues[0].column = Column::CodeReview;
+        app.project_mut().collect_mission_notes();
+
+        app.project_mut().issues[1].mission_notes_off = true;
+
+        assert_eq!(
+            app.project_mut()
+                .take_due_mission_notes(std::time::Instant::now()),
+            crate::mission_notes::DueNotes::default()
+        );
+        assert_eq!(app.project().unread_mission_notes("bork-1"), 0);
+    }
+
+    #[test]
+    fn nudges_wait_for_a_reported_idle_and_the_nudge_interval() {
+        let mut app = mission_notes_app();
+        let start = std::time::Instant::now();
+        app.project_mut().collect_mission_notes();
+        set_status(&mut app, 1, AgentStatus::WaitingInput);
+        app.project_mut().issues[0].column = Column::CodeReview;
+        app.project_mut().collect_mission_notes();
+
+        let due = app.project_mut().take_due_mission_notes(start);
+        assert_eq!(written(&due).len(), 1);
+        assert!(due.nudges.is_empty());
+
+        set_status(&mut app, 1, AgentStatus::Idle);
+        assert_eq!(
+            app.project_mut().take_due_mission_notes(start).nudges.len(),
+            1
+        );
+
+        app.project_mut().issues[0].column = Column::Done;
+        app.project_mut().collect_mission_notes();
+        assert!(app
+            .project_mut()
+            .take_due_mission_notes(start)
+            .nudges
+            .is_empty());
+        let later = start + crate::mission_notes::NUDGE_INTERVAL;
+        assert_eq!(
+            app.project_mut().take_due_mission_notes(later).nudges.len(),
+            1
+        );
     }
 
     fn test_pr(number: u32, branch: &str) -> PrStatus {

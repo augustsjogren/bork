@@ -143,7 +143,10 @@ fn render_missions(
                 (" ", Style::default().fg(Color::DarkGray))
             };
 
-            let count = format!(" {}/{}", progress.done, progress.members);
+            let count = match project.unread_mission_notes(&mission.id) {
+                0 => format!(" {}/{}", progress.done, progress.members),
+                unread => format!(" ✉{unread} {}/{}", progress.done, progress.members),
+            };
             let max_title = area
                 .width
                 .saturating_sub(SIDEBAR_NAME_PADDING + count.len() as u16)

@@ -350,6 +350,23 @@ pub fn current_session() -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// Whether any client (a terminal or the TUI's popup) is attached to
+/// `session`, i.e. someone may be typing into it.
+pub fn session_attached(session: &str) -> bool {
+    tmux()
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{session_attached}",
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| String::from_utf8_lossy(&output.stdout).trim() != "0")
+}
+
 pub fn create_command_window(
     session: &str,
     name: &str,

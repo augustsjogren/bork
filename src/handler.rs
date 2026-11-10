@@ -3406,6 +3406,8 @@ pub fn archive_issue_in_app(app: &mut App, project_id: &ProjectId, issue_id: &st
     };
     issue.worktree = None;
     issue.move_to_column(Column::Done, crate::app::unix_now());
+    let archived_id = issue.id.clone();
+    project.mission_notes.user_moved.insert(archived_id);
     project.clamp_all_rows(&query);
     project.mark_dirty();
     true

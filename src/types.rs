@@ -600,6 +600,11 @@ pub struct Issue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mission_id: Option<String>,
 
+    /// On a mission: don't type notes about its members into mission
+    /// control's pane (`bork mission notes <id> off`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mission_notes_off: bool,
+
     // --- Legacy singular fields (read-only, for migration from old state.json) ---
     #[serde(default, skip_serializing)]
     pub session_id: Option<String>,
@@ -668,6 +673,7 @@ impl Issue {
             linked_issues: Vec::new(),
             cloud: None,
             mission_id: None,
+            mission_notes_off: false,
             session_id: None,
             linear_id: None,
             linear_identifier: None,

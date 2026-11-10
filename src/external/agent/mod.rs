@@ -964,12 +964,14 @@ fn mission_context(mission_id: &str) -> String {
     let plans = crate::backup::PLANS_DIR;
     let plan = crate::backup::PLAN_NAME;
     let links = crate::backup::MISSION_LINKS_NAME;
+    let notes = crate::backup::MISSION_NOTES_NAME;
     format!(
         "\n\nThis mission's durable context lives in {plans}/{mission_id}/, relative to the project root (the directory containing main/): \
 maintain your plan in {plans}/{mission_id}/{plan} (goal, breakdown, decisions, status log), and save references in {links} (Slack threads, docs, dashboards) with `bork mission link <url> --note \"...\"`. \
 You may be taking over from an earlier session: before acting, read both files (start with any Handoff section at the end of {plan}) and run `bork mission show {mission_id}`. \
 Keep them current as you work, so a fresh session could pick up where you left off. \
-Save links, never copies of thread or document content."
+Save links, never copies of thread or document content. \
+The board appends notes about your cards (column moves, failing checks, merged PRs, agents waiting) to {plans}/{mission_id}/{notes}, and a line starting with [bork] points you there. Whenever the user talks to you, read anything new in it first; record what matters in your plan and tell the user, and don't act on the notes unless the user asks."
     )
 }
 

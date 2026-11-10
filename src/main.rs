@@ -13,6 +13,7 @@ mod init;
 mod input;
 mod issue_plan;
 mod lock;
+mod mission_notes;
 mod ops;
 mod prune;
 mod review_import;
@@ -431,6 +432,40 @@ fn spawn_linear_worker(
     });
 
     rx
+}
+
+/// Collect notes about mission members on every board, then on a background
+/// thread append them to each mission's notes file and type the due nudges.
+/// A nudge is skipped while someone is attached to the session (they may be
+/// typing there); the notes stay in the file either way.
+fn deliver_mission_notes(app: &mut app::App) {
+    let now = std::time::Instant::now();
+    for project in &mut app.projects {
+        project.collect_mission_notes();
+        let due = project.take_due_mission_notes(now);
+        if due == mission_notes::DueNotes::default() {
+            continue;
+        }
+        let project_root = project.config.project_root.clone();
+        thread::spawn(move || {
+            let mut failures = Vec::new();
+            for (mission_id, notes) in &due.writes {
+                if let Err(e) = ops::append_mission_notes(&project_root, mission_id, notes) {
+                    failures.push(format!("notes for mission {mission_id} not saved: {e:#}"));
+                }
+            }
+            for nudge in &due.nudges {
+                if external::tmux::session_attached(&nudge.session_name) {
+                    continue;
+                }
+                let text = mission_notes::nudge_text(&nudge.mission_id);
+                if let Err(e) = ops::type_into_agent(&project_root, &nudge.session_name, &text) {
+                    failures.push(format!("mission {} not nudged: {e:#}", nudge.mission_id));
+                }
+            }
+            config::append_error_log(&project_root, &failures);
+        });
+    }
 }
 
 /// Publish the identifiers every board holds without a Linear id for the
@@ -1266,6 +1301,16 @@ enum MissionCommand {
     Restart {
         /// Mission ID (e.g. bork-1)
         mission_id: String,
+    },
+
+    /// Turn the board's notes about member cards to mission control on or off
+    Notes {
+        /// Mission ID (e.g. bork-1)
+        mission_id: String,
+
+        /// on or off
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
     },
 }
 
@@ -2319,6 +2364,12 @@ fn run_mission_command(command: MissionCommand) -> anyhow::Result<()> {
         MissionCommand::Restart { mission_id } => {
             let session_name = ops::restart_mission(&project_root, &mission_id)?;
             println!("Restarted mission control in {session_name}");
+            Ok(())
+        }
+        MissionCommand::Notes { mission_id, state } => {
+            let on = state == "on";
+            let mission_id = ops::set_mission_notes(&project_root, &mission_id, on)?;
+            println!("Notes to {mission_id}'s mission control are {state}");
             Ok(())
         }
     }
@@ -3735,6 +3786,7 @@ fn run_tui() -> anyhow::Result<()> {
             state_poll_counter = 0;
 
             sync_linear_lookup(&app, &shared.linear_lookup);
+            deliver_mission_notes(&mut app);
 
             // The 48h backup warning depends on the clock, not on a worker
             // report (the worker may be blocked on the backup lock).

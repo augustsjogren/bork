@@ -587,6 +587,22 @@ pub fn leave_mission_in(
     left
 }
 
+/// Turn the TUI's notes about member cards to this mission's mission control
+/// on or off. Returns the mission's id.
+pub fn set_mission_notes(
+    project_root: &Path,
+    mission_id: &str,
+    on: bool,
+) -> anyhow::Result<String> {
+    let mut state = config::load_state(project_root);
+    let mission_id = require_mission(&state.issues, mission_id)?.id.clone();
+    let idx = find_issue_index(&state.issues, &mission_id)
+        .ok_or_else(|| anyhow::anyhow!("Issue '{}' not found", mission_id))?;
+    state.issues[idx].mission_notes_off = !on;
+    config::save_state(&state, project_root)?;
+    Ok(mission_id)
+}
+
 pub fn leave_mission(project_root: &Path, issue_id: &str) -> anyhow::Result<Issue> {
     let mut state = config::load_state(project_root);
     let idx = find_issue_index(&state.issues, issue_id)
@@ -655,36 +671,76 @@ fn mission_context_dir(
     Ok(crate::backup::issue_plan_dir(project_root, mission_id))
 }
 
+/// Append the board's notes about a mission's cards to its `notes.md`, one
+/// list item per note stamped with the local time.
+pub fn append_mission_notes(
+    project_root: &Path,
+    mission_id: &str,
+    notes: &[String],
+) -> anyhow::Result<()> {
+    let dir = mission_context_dir(project_root, mission_id)?;
+    std::fs::create_dir_all(&dir)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(crate::backup::MISSION_NOTES_NAME))?;
+    let now = local_minute(crate::app::unix_now());
+    for note in notes {
+        writeln!(file, "- [{now}] {note}")?;
+    }
+    Ok(())
+}
+
+/// `unix_secs` as `YYYY-MM-DD HH:MM` in the machine's time zone.
+fn local_minute(unix_secs: u64) -> String {
+    let time = unix_secs as libc::time_t;
+    // SAFETY: `tm` is plain data that localtime_r fills; both pointers are valid.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
+        return unix_secs.to_string();
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min
+    )
+}
+
 /// Ask a running mission control to write a handoff into its plan, so a
 /// fresh session (`restart_mission`) can take over. Returns its session name.
 pub fn request_mission_handoff(project_root: &Path, mission_id: &str) -> anyhow::Result<String> {
-    use crate::external::tmux;
-
     let state = config::load_state(project_root);
     let config = config::load_config_from(project_root);
     let mission = require_mission(&state.issues, mission_id)?;
     let session_name = mission.session_name(&config.project_name);
-    if !tmux::session_exists(&session_name) {
+    if !crate::external::tmux::session_exists(&session_name) {
         anyhow::bail!("{} has no running session to hand off", mission.id);
     }
 
-    // The text is typed into the pane, so it must reach the agent itself: at
-    // a shell prompt it would run as a command, and in an approval menu its
-    // keys would pick options.
-    let pane = tmux::agent_pane(&session_name);
+    type_into_agent(project_root, &session_name, &handoff_request(&mission.id))?;
+    Ok(session_name)
+}
+
+/// Type one line into the agent pane of `session_name`. The text must reach
+/// the agent itself: at a shell prompt it would run as a command, and in an
+/// approval menu its keys would pick options, so both are refused.
+pub fn type_into_agent(project_root: &Path, session_name: &str, text: &str) -> anyhow::Result<()> {
+    use crate::external::tmux;
+
+    let pane = tmux::agent_pane(session_name);
     match tmux::pane_current_command(&pane) {
         Some(command) if !tmux::is_shell(&command) => {}
-        _ => anyhow::bail!("{}'s agent isn't running in {}", mission.id, session_name),
+        _ => anyhow::bail!("no agent is running in {session_name}"),
     }
-    if agent_waits_for_approval(project_root, &session_name) {
-        anyhow::bail!(
-            "{}'s agent is waiting for an approval; answer it first",
-            mission.id
-        );
+    if agent_waits_for_approval(project_root, session_name) {
+        anyhow::bail!("the agent in {session_name} is waiting for an approval; answer it first");
     }
 
-    tmux::type_line(&pane, &handoff_request(&mission.id))?;
-    Ok(session_name)
+    tmux::type_line(&pane, text)?;
+    Ok(())
 }
 
 fn agent_waits_for_approval(project_root: &Path, session_name: &str) -> bool {
@@ -776,10 +832,11 @@ pub fn show_mission(project_root: &Path, mission_id: &str) -> anyhow::Result<Str
     }
     let _ = writeln!(
         out,
-        "Context:  {} ({}, {})",
+        "Context:  {} ({}, {}, {})",
         context_dir.display(),
         crate::backup::PLAN_NAME,
-        crate::backup::MISSION_LINKS_NAME
+        crate::backup::MISSION_LINKS_NAME,
+        crate::backup::MISSION_NOTES_NAME
     );
 
     let members: Vec<&Issue> = state
@@ -2656,6 +2713,22 @@ mod tests {
     }
 
     #[test]
+    fn set_mission_notes_mutes_and_unmutes_a_mission_only() {
+        let dir = setup_project();
+        let root = dir.path();
+        seed_mission(root, "test-1", &["test-2"]);
+
+        let muted = set_mission_notes(root, "TEST-1", false).unwrap();
+        assert_eq!(muted, "test-1");
+        assert!(config::load_state(root).issues[0].mission_notes_off);
+        set_mission_notes(root, "test-1", true).unwrap();
+        assert!(!config::load_state(root).issues[0].mission_notes_off);
+
+        let error = set_mission_notes(root, "test-2", false).unwrap_err();
+        assert_eq!(error.to_string(), "test-2 is not a mission");
+    }
+
+    #[test]
     fn leave_mission_drops_membership() {
         let dir = setup_project();
         let root = dir.path();
@@ -2734,6 +2807,26 @@ mod tests {
             fs::read_to_string(path).unwrap(),
             "- https://chat.example/t/1 — kickoff\n- https://docs.example/d\n"
         );
+    }
+
+    #[test]
+    fn mission_notes_are_stamped_with_the_local_minute() {
+        let dir = setup_project();
+        let root = dir.path();
+
+        append_mission_notes(root, "test-1", &["test-2 moved to Done".into()]).unwrap();
+
+        let written = fs::read_to_string(root.join("plans/test-1/notes.md")).unwrap();
+        let (stamp, note) = written
+            .strip_prefix("- [")
+            .and_then(|rest| rest.split_once("] "))
+            .unwrap();
+        assert_eq!(note, "test-2 moved to Done\n");
+        let shape: String = stamp
+            .chars()
+            .map(|c| if c.is_ascii_digit() { '9' } else { c })
+            .collect();
+        assert_eq!(shape, "9999-99-99 99:99");
     }
 
     #[test]

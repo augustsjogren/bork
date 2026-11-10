@@ -146,6 +146,7 @@ bork mission link bork-1 https://chat.example/t/123 --note "kickoff thread"
 bork mission show bork-1                # scope, members, saved links
 bork mission handoff bork-1             # ask mission control to write a handoff
 bork mission restart bork-1             # fresh session from the plan and links (run from outside its session)
+bork mission notes bork-1 off           # stop notes about member cards (plans/<id>/notes.md and [bork] nudges)
 ```
 
 `plans/<mission-id>/` at the project root holds the mission's durable context: `planning.md` (the mission's plan and status log) and `links.md` (written by `bork mission link`). Inside a mission's own session the mission id is optional for `link` and `show`.

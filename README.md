@@ -150,6 +150,7 @@ bork --help
 | `bork mission show [mission-id]` | Show a mission's scope, members and saved links |
 | `bork mission handoff <mission-id>` | Ask the running mission control to write a handoff into its `planning.md` |
 | `bork mission restart <mission-id>` | Kill mission control and launch a fresh session that starts from its plan and links |
+| `bork mission notes <mission-id> on\|off` | Turn the TUI's notes about member cards on or off. When on (the default), the TUI appends a note to the mission's `plans/<id>/notes.md` when a member card moves column (unless you or a busy mission control moved it), starts needing someone (checks failing, changes requested, agent waiting on an approval…), or its PR merges. It types a one-line `[bork]` nudge pointing at the file only right after mission control finishes a turn, with nobody attached to its session, at most every 3 minutes; the sidebar shows `✉N` for notes not nudged yet |
 | `bork integration attach-linear <id> <identifier>` | Link a Linear ticket to an issue (can attach multiple) |
 | `bork integration attach-linear-from-titles [--dry-run]` | Link every ticketless issue to the Linear ticket its title starts with (`[VIL-123] fix: …`). Imported PRs get theirs at import; this catches up older cards |
 | `bork integration attach-linear-project <id> <url-or-slug>` | Link a Linear project to a mission (can attach multiple) |
