@@ -129,6 +129,9 @@ pub const PLAN_NAME: &str = "planning.md";
 /// A mission's saved references, next to its plan in `plans/<mission-id>/`.
 pub const MISSION_LINKS_NAME: &str = "links.md";
 
+/// The board's notes about a mission's cards, next to its plan.
+pub const MISSION_NOTES_NAME: &str = "notes.md";
+
 /// What a backup run covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
