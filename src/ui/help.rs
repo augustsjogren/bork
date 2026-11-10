@@ -33,6 +33,7 @@ const PROJECTS_SECTION: Section = Section {
         ("Shift+J / K", "Move project (sidebar)"),
         ("Shift+R", "Rename project (sidebar)"),
         ("Shift+D", "Remove from list (sidebar)"),
+        ("Enter", "Open project / filter to mission (sidebar)"),
         ("Tab / S-Tab", "Switch swimlane focus"),
     ],
 };
