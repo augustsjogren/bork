@@ -44,16 +44,19 @@ pub fn render_card(frame: &mut Frame, ctx: &CardContext, area: Rect, card_size: 
     } else {
         format!(" {} ", ctx.issue.id)
     };
+    // The full mission badge only when the id still fits beside it; narrow
+    // cards get the sidebar's mission glyph so the id isn't truncated.
+    let id_room = |label: &str| (area.width as usize).saturating_sub(Span::raw(label).width() + 3);
     let (type_label, type_style) = match ctx.issue.kind {
-        IssueKind::Orchestrator => ("· orch ", styles::orchestrator_badge_style()),
+        IssueKind::Orchestrator if id_room("· mission ") >= Span::raw(id_text.as_str()).width() => {
+            ("· mission ", styles::orchestrator_badge_style())
+        }
+        IssueKind::Orchestrator => ("· ◆ ", styles::orchestrator_badge_style()),
         IssueKind::NonAgentic => ("· todo ", styles::dim_style()),
         IssueKind::Cloud => ("· cloud ", styles::cloud_badge_style()),
         IssueKind::Agentic => ("", title_style),
     };
-    let id_text = styles::truncate(
-        &id_text,
-        (area.width as usize).saturating_sub(Span::raw(type_label).width() + 3),
-    );
+    let id_text = styles::truncate(&id_text, id_room(type_label));
     let mut title = highlight_spans(&id_text, ctx.search_query, title_style);
     if !type_label.is_empty() {
         title.push(Span::styled(type_label, type_style));

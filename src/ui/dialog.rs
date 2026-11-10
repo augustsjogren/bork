@@ -470,9 +470,9 @@ fn render_kind_field(
     let indicator = |selected: bool| if selected { "\u{25cf}" } else { "\u{25cb}" };
 
     let options = [
-        (IssueKind::Agentic, "Agentic"),
-        (IssueKind::Orchestrator, "Orchestrator"),
-        (IssueKind::NonAgentic, "Todo"),
+        IssueKind::Agentic,
+        IssueKind::Orchestrator,
+        IssueKind::NonAgentic,
     ];
 
     let mut spans = vec![Span::styled(
@@ -488,13 +488,13 @@ fn render_kind_field(
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
-    for (i, (option, label)) in options.iter().enumerate() {
+    for (i, option) in options.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw("  "));
         }
         let selected = kind == *option;
         spans.push(Span::styled(
-            format!("[{} {}]", indicator(selected), label),
+            format!("[{} {}]", indicator(selected), option),
             if selected {
                 selected_style
             } else {

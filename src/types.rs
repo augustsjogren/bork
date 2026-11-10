@@ -216,7 +216,7 @@ impl fmt::Display for IssueKind {
         match self {
             Self::Agentic => write!(f, "Agentic"),
             Self::NonAgentic => write!(f, "Todo"),
-            Self::Orchestrator => write!(f, "Orchestrator"),
+            Self::Orchestrator => write!(f, "Mission"),
             Self::Cloud => write!(f, "Cloud"),
         }
     }
@@ -1245,7 +1245,7 @@ mod tests {
     fn issue_kind_display() {
         assert_eq!(IssueKind::Agentic.to_string(), "Agentic");
         assert_eq!(IssueKind::NonAgentic.to_string(), "Todo");
-        assert_eq!(IssueKind::Orchestrator.to_string(), "Orchestrator");
+        assert_eq!(IssueKind::Orchestrator.to_string(), "Mission");
     }
 
     #[test]
