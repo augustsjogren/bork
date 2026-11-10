@@ -570,6 +570,23 @@ pub fn assign_mission_in(
     Ok(mission_id)
 }
 
+/// Take those of `issue_ids` that are members of `mission_id` out of it.
+/// Returns the ids that changed.
+pub fn leave_mission_in(
+    issues: &mut [Issue],
+    mission_id: &str,
+    issue_ids: &[String],
+) -> Vec<String> {
+    let mut left = Vec::new();
+    for issue in issues.iter_mut() {
+        if issue_ids.contains(&issue.id) && is_member_of(issue, mission_id) {
+            issue.mission_id = None;
+            left.push(issue.id.clone());
+        }
+    }
+    left
+}
+
 pub fn leave_mission(project_root: &Path, issue_id: &str) -> anyhow::Result<Issue> {
     let mut state = config::load_state(project_root);
     let idx = find_issue_index(&state.issues, issue_id)

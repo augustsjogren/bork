@@ -17,7 +17,9 @@ pub enum Action {
     StartSession,
     OpenTerminal,
     KillSession,
-    MissionHandoff,
+    /// `M`: hand off a mission card's mission control, or put any other card
+    /// into a mission.
+    Mission,
     MoveIssueLeft,
     MoveIssueRight,
     MoveIssueUp,

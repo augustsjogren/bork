@@ -2257,6 +2257,17 @@ pub struct LinkPickerState {
     pub anchor_id: String,
     pub search: String,
     pub selected: usize,
+    pub purpose: PickerPurpose,
+}
+
+/// What the link picker's Enter does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerPurpose {
+    /// Toggle a symmetric link between the anchor and the candidate.
+    Link,
+    /// Put `issue_ids` (the selected card, or every marked one) into the
+    /// picked mission, or take them out when they are all already in it.
+    Mission { issue_ids: Vec<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -3609,6 +3620,39 @@ impl App {
             anchor_id,
             search: String::new(),
             selected: 0,
+            purpose: PickerPurpose::Link,
+        });
+        self.input_mode = InputMode::LinkPicker;
+    }
+
+    /// Open the picker on the active project's open missions, for the
+    /// selected card or every marked one. Missions themselves can't join a
+    /// mission, so they are left out of the targets.
+    pub fn open_mission_picker(&mut self, ctx: &ActionContext) {
+        let query = self.search_query.clone();
+        let project = self.context_project(ctx);
+        let Some(anchor) = project.selected_issue(&query) else {
+            return;
+        };
+        if project.open_missions().next().is_none() {
+            self.set_warning("No missions yet: create a card with kind Orchestrator first");
+            return;
+        }
+        let issue_ids: Vec<String> = project
+            .target_issues(&query)
+            .into_iter()
+            .filter(|issue| issue.kind != IssueKind::Orchestrator)
+            .map(|issue| issue.id.clone())
+            .collect();
+        if issue_ids.is_empty() {
+            self.set_warning("Missions can't join another mission");
+            return;
+        }
+        self.link_picker = Some(LinkPickerState {
+            anchor_id: anchor.id.clone(),
+            search: String::new(),
+            selected: 0,
+            purpose: PickerPurpose::Mission { issue_ids },
         });
         self.input_mode = InputMode::LinkPicker;
     }
@@ -3618,8 +3662,9 @@ impl App {
         self.input_mode = InputMode::Normal;
     }
 
-    /// Candidate issues for the link picker: every other issue in the anchor's
-    /// project, filtered by the picker search (matches id or title).
+    /// Candidates for the picker, filtered by its search (matches id or
+    /// title), each with whether the anchor already has it: every other issue
+    /// in the anchor's project for links, the open missions for missions.
     pub fn link_picker_candidates(&self) -> Vec<(String, String, bool)> {
         let Some(picker) = &self.link_picker else {
             return Vec::new();
@@ -3630,15 +3675,36 @@ impl App {
             .iter()
             .find(|i| i.id.eq_ignore_ascii_case(&picker.anchor_id));
         let query = picker.search.to_lowercase();
+        let matches_query = |i: &&Issue| {
+            query.is_empty()
+                || i.id.to_lowercase().contains(&query)
+                || i.title.to_lowercase().contains(&query)
+        };
+
+        if let PickerPurpose::Mission { issue_ids } = &picker.purpose {
+            let targets: Vec<&Issue> = project
+                .issues
+                .iter()
+                .filter(|issue| issue_ids.contains(&issue.id))
+                .collect();
+            return project
+                .open_missions()
+                .filter(matches_query)
+                .map(|mission| {
+                    let all_members = !targets.is_empty()
+                        && targets
+                            .iter()
+                            .all(|target| crate::ops::is_member_of(target, &mission.id));
+                    (mission.id.clone(), mission.title.clone(), all_members)
+                })
+                .collect();
+        }
+
         project
             .issues
             .iter()
             .filter(|i| !i.id.eq_ignore_ascii_case(&picker.anchor_id))
-            .filter(|i| {
-                query.is_empty()
-                    || i.id.to_lowercase().contains(&query)
-                    || i.title.to_lowercase().contains(&query)
-            })
+            .filter(matches_query)
             .map(|i| {
                 let linked = anchor.is_some_and(|a| a.is_linked_to(&i.id));
                 (i.id.clone(), i.title.clone(), linked)

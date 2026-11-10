@@ -4,7 +4,7 @@ use std::thread;
 
 use crate::app::{
     ActionContext, App, ConfirmAction, ImportSource, InputMode, LinearPickerContext, MessageKind,
-    Project, ProjectId, ProjectRename,
+    PickerPurpose, Project, ProjectId, ProjectRename,
 };
 use crate::config::AppConfig;
 use crate::external::linear::LinearProject;
@@ -731,12 +731,13 @@ fn handle_normal(
             PostAction::None
         }
 
-        Action::MissionHandoff => {
+        Action::Mission => {
             let Some(mission) = app.context_project(ctx).selected_issue(&q).cloned() else {
                 return PostAction::None;
             };
-            if mission.kind != IssueKind::Orchestrator {
-                app.set_warning("Only a mission's card hands off mission control");
+            let has_marks = !app.context_project(ctx).marked_issues.is_empty();
+            if has_marks || mission.kind != IssueKind::Orchestrator {
+                app.open_mission_picker(ctx);
                 return PostAction::None;
             }
 
@@ -1973,7 +1974,19 @@ fn handle_link_picker(app: &mut App, action: Action, ctx: &ActionContext) {
         Action::LinkPickerUp => app.link_picker_move_up(),
         Action::LinkPickerChar(c) => app.link_picker_push_char(c),
         Action::LinkPickerBackspace => app.link_picker_delete_char(),
-        Action::LinkPickerSelect => toggle_selected_link(app, ctx),
+        Action::LinkPickerSelect => {
+            let purpose = app
+                .link_picker
+                .as_ref()
+                .map(|picker| picker.purpose.clone());
+            match purpose {
+                Some(PickerPurpose::Mission { issue_ids }) => {
+                    toggle_selected_mission(app, ctx, &issue_ids)
+                }
+                Some(PickerPurpose::Link) => toggle_selected_link(app, ctx),
+                None => {}
+            }
+        }
         _ => {}
     }
 }
@@ -2014,6 +2027,46 @@ fn toggle_selected_link(app: &mut App, ctx: &ActionContext) {
         }
     }
     project.mark_dirty();
+}
+
+/// Take `issue_ids` out of the highlighted mission when they are all already
+/// in it (its row is ticked), otherwise put them all in it, then close the
+/// picker and drop the marks.
+fn toggle_selected_mission(app: &mut App, ctx: &ActionContext, issue_ids: &[String]) {
+    let Some(picker) = &app.link_picker else {
+        return;
+    };
+    let candidates = app.link_picker_candidates();
+    let Some((mission_id, _, all_members)) = candidates.get(picker.selected).cloned() else {
+        return;
+    };
+    app.close_link_picker();
+
+    let query = app.search_query.clone();
+    let project = app.context_project_mut(ctx);
+    let message = if all_members {
+        let left = crate::ops::leave_mission_in(&mut project.issues, &mission_id, issue_ids);
+        format!("Took {} out of mission {mission_id}", cards_label(&left))
+    } else {
+        let assigned = crate::ops::assign_mission_in(&mut project.issues, &mission_id, issue_ids);
+        if let Err(e) = assigned {
+            app.set_error(format!("{e:#}"));
+            return;
+        }
+        format!("Added {} to mission {mission_id}", cards_label(issue_ids))
+    };
+    project.clear_marks();
+    project.mark_dirty();
+    project.clamp_all_rows(&query);
+    app.set_message(message);
+}
+
+/// One card by id, several by count, so a long marked set stays one line.
+fn cards_label(ids: &[String]) -> String {
+    match ids {
+        [id] => id.clone(),
+        _ => count_of(ids.len(), "card"),
+    }
 }
 
 fn attach_linear_to_dialog(app: &mut App, _ctx: &ActionContext) {
@@ -5573,16 +5626,129 @@ mod tests {
     }
 
     #[test]
-    fn mission_handoff_refuses_a_non_mission_card() {
+    fn mission_key_on_a_card_without_any_missions_warns() {
         let mut app = app_with_issues();
 
-        act(&mut app, Action::MissionHandoff);
+        act(&mut app, Action::Mission);
 
-        assert!(app.project().handoffs_requested.is_empty());
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(
             app.message.as_ref().map(|(text, _)| text.as_str()),
-            Some("Only a mission's card hands off mission control")
+            Some("No missions yet: create a card with kind Orchestrator first")
+        );
+    }
+
+    /// `app_with_issues` with `bork-3` as a mission; the cursor is on `bork-1`.
+    fn app_with_mission_bork_3() -> App {
+        let mut app = app_with_issues();
+        app.project_mut().issues[2].kind = IssueKind::Orchestrator;
+        app
+    }
+
+    #[test]
+    fn mission_key_puts_a_card_in_the_picked_mission_and_again_takes_it_out() {
+        let mut app = app_with_mission_bork_3();
+
+        act(&mut app, Action::Mission);
+        assert_eq!(app.input_mode, InputMode::LinkPicker);
+        act(&mut app, Action::LinkPickerSelect);
+
+        assert_eq!(
+            app.project().issues[0].mission_id.as_deref(),
+            Some("bork-3")
+        );
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        act(&mut app, Action::Mission);
+        act(&mut app, Action::LinkPickerSelect);
+
+        assert_eq!(app.project().issues[0].mission_id, None);
+    }
+
+    #[test]
+    fn mission_key_with_marks_moves_every_marked_card_but_missions() {
+        let mut app = app_with_mission_bork_3();
+        for id in ["bork-1", "bork-2", "bork-3"] {
+            app.project_mut().marked_issues.insert(id.to_string());
+        }
+
+        act(&mut app, Action::Mission);
+
+        assert_eq!(
+            app.link_picker
+                .as_ref()
+                .map(|picker| picker.purpose.clone()),
+            Some(PickerPurpose::Mission {
+                issue_ids: vec!["bork-1".to_string(), "bork-2".to_string()],
+            })
+        );
+        act(&mut app, Action::LinkPickerSelect);
+
+        assert_eq!(
+            mission_ids(&app),
+            vec![Some("bork-3"), Some("bork-3"), None]
+        );
+        assert!(app.project().marked_issues.is_empty());
+        assert_eq!(
+            app.message.as_ref().map(|(text, _)| text.as_str()),
+            Some("Added 2 cards to mission bork-3")
+        );
+    }
+
+    fn mission_ids(app: &App) -> Vec<Option<&str>> {
+        app.project()
+            .issues
+            .iter()
+            .map(|issue| issue.mission_id.as_deref())
+            .collect()
+    }
+
+    fn mark(app: &mut App, ids: &[&str]) {
+        for id in ids {
+            app.project_mut().marked_issues.insert(id.to_string());
+        }
+    }
+
+    #[test]
+    fn a_marked_set_only_partly_in_the_mission_joins_it_then_leaves_together() {
+        let mut app = app_with_mission_bork_3();
+        app.project_mut().issues[1].mission_id = Some("bork-3".into());
+
+        mark(&mut app, &["bork-1", "bork-2"]);
+        act(&mut app, Action::Mission);
+        act(&mut app, Action::LinkPickerSelect);
+        assert_eq!(
+            mission_ids(&app),
+            vec![Some("bork-3"), Some("bork-3"), None]
+        );
+
+        mark(&mut app, &["bork-1", "bork-2"]);
+        act(&mut app, Action::Mission);
+        act(&mut app, Action::LinkPickerSelect);
+        assert_eq!(mission_ids(&app), vec![None, None, None]);
+        assert_eq!(
+            app.message.as_ref().map(|(text, _)| text.as_str()),
+            Some("Took 2 cards out of mission bork-3")
+        );
+    }
+
+    #[test]
+    fn picking_another_mission_moves_the_card_there() {
+        let mut app = app_with_mission_bork_3();
+        app.project_mut().issues[1].kind = IssueKind::Orchestrator;
+        app.project_mut().issues[0].mission_id = Some("bork-2".into());
+
+        act(&mut app, Action::Mission);
+        act(&mut app, Action::LinkPickerDown);
+        act(&mut app, Action::LinkPickerSelect);
+
+        assert_eq!(
+            app.project().issues[0].mission_id.as_deref(),
+            Some("bork-3")
+        );
+        assert_eq!(
+            app.message.as_ref().map(|(text, _)| text.as_str()),
+            Some("Added bork-1 to mission bork-3")
         );
     }
 
@@ -5601,7 +5767,7 @@ mod tests {
             .handoffs_requested
             .insert("bork-1".to_string(), Some("s-1".to_string()));
 
-        act(&mut app, Action::MissionHandoff);
+        act(&mut app, Action::Mission);
 
         assert_eq!(app.input_mode, InputMode::Confirm);
         assert!(matches!(
@@ -5617,7 +5783,7 @@ mod tests {
             .handoffs_requested
             .insert("bork-1".to_string(), Some("s-1".to_string()));
 
-        act(&mut app, Action::MissionHandoff);
+        act(&mut app, Action::Mission);
 
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(
