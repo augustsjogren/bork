@@ -1674,6 +1674,7 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
             p.issues[idx].agent_mode = dialog.agent_mode;
             p.issues[idx].model = dialog.model.clone();
             let _ = p.issues[idx].set_kind(dialog.kind);
+            p.clear_stale_filters();
 
             apply_linear_fields(&mut p.issues[idx], &dialog);
             apply_linear_project_fields(&mut p.issues[idx], &dialog);
@@ -2630,53 +2631,56 @@ fn format_prune_result(outcome: &crate::prune::PruneOutcome, verb: &str) -> (Str
 fn handle_sidebar(app: &mut App, action: Action) -> PostAction {
     match action {
         Action::ToggleSidebar => {
-            if let Some(ref mut sidebar) = app.sidebar {
-                sidebar.focused = false;
-                sidebar.visible = false;
-                app.input_mode = InputMode::Normal;
-            }
+            close_sidebar(app);
             PostAction::None
         }
         Action::SidebarSelect => {
+            if let Some(mission_id) = app.sidebar_selected_mission_id() {
+                let already_filtered = app.active_project().is_mission_filtered(&mission_id);
+                app.set_mission_filter((!already_filtered).then_some(mission_id));
+                close_sidebar(app);
+                return PostAction::None;
+            }
+            let Some(proj_id) = app.sidebar_selected_id() else {
+                return PostAction::None;
+            };
             if let Some(ref mut sidebar) = app.sidebar {
-                let proj_id = app.projects[sidebar.selected].id();
                 sidebar.swimlanes = vec![proj_id.clone()];
-                sidebar.focused = false;
-                sidebar.visible = false;
-                app.input_mode = InputMode::Normal;
-                app.focused_swimlane = 0;
-
-                if proj_id != app.focused_project {
-                    return PostAction::SwitchProject { id: proj_id };
-                }
+            }
+            close_sidebar(app);
+            app.focused_swimlane = 0;
+            if proj_id != app.focused_project {
+                return PostAction::SwitchProject { id: proj_id };
             }
             PostAction::None
         }
         Action::SidebarDown => {
+            let row_count = app.sidebar_row_count();
             if let Some(ref mut sidebar) = app.sidebar {
-                if !app.projects.is_empty() {
-                    sidebar.selected = (sidebar.selected + 1) % app.projects.len();
+                if row_count > 0 {
+                    sidebar.selected = (sidebar.selected.min(row_count - 1) + 1) % row_count;
                 }
             }
             PostAction::None
         }
         Action::SidebarUp => {
+            let row_count = app.sidebar_row_count();
             if let Some(ref mut sidebar) = app.sidebar {
-                if !app.projects.is_empty() {
-                    if sidebar.selected == 0 {
-                        sidebar.selected = app.projects.len() - 1;
-                    } else {
-                        sidebar.selected -= 1;
-                    }
+                if row_count > 0 {
+                    sidebar.selected = match sidebar.selected {
+                        0 => row_count - 1,
+                        selected => selected.min(row_count) - 1,
+                    };
                 }
             }
             PostAction::None
         }
         Action::SidebarToggleSwimlane => {
             let lane_count = app.visible_swimlane_count();
+            let Some(proj_id) = app.sidebar_selected_id() else {
+                return PostAction::None;
+            };
             if let Some(ref mut sidebar) = app.sidebar {
-                let idx = sidebar.selected;
-                let proj_id = app.projects[idx].id();
                 if let Some(pos) = sidebar.swimlanes.iter().position(|id| *id == proj_id) {
                     if sidebar.swimlanes.len() > 1 {
                         sidebar.swimlanes.remove(pos);
@@ -2740,6 +2744,14 @@ fn handle_sidebar(app: &mut App, action: Action) -> PostAction {
             PostAction::None
         }
         _ => PostAction::None,
+    }
+}
+
+fn close_sidebar(app: &mut App) {
+    if let Some(ref mut sidebar) = app.sidebar {
+        sidebar.focused = false;
+        sidebar.visible = false;
+        app.input_mode = InputMode::Normal;
     }
 }
 
@@ -3275,13 +3287,7 @@ pub fn delete_issue_from_app(app: &mut App, project_id: &ProjectId, issue_id: &s
 
     let removed = project.issues.remove(index);
     crate::ops::remove_link_references(&mut project.issues, &removed.id);
-    if project
-        .link_filter
-        .as_deref()
-        .is_some_and(|anchor| anchor.eq_ignore_ascii_case(&removed.id))
-    {
-        project.link_filter = None;
-    }
+    project.clear_stale_filters();
     project.marked_issues.remove(&removed.id.to_lowercase());
     project.clamp_all_rows(&query);
     project.mark_dirty();
@@ -6966,6 +6972,141 @@ mod tests {
             app.sidebar.as_ref().unwrap().swimlanes,
             vec![app.projects[1].id()]
         );
+    }
+
+    /// `test_multi_app` with a mission `alpha-2` (member `alpha-1`) on the
+    /// focused board, so the sidebar has 3 project rows then 1 mission row.
+    fn test_multi_app_with_mission() -> App {
+        let mut app = test_multi_app();
+        let mut mission = test_issue("alpha-2", Column::InProgress);
+        mission.kind = IssueKind::Orchestrator;
+        let project = app.active_project_mut();
+        project.issues[0].mission_id = Some("alpha-2".into());
+        project.issues.push(mission);
+        app.sidebar.as_mut().unwrap().focused = true;
+        app.input_mode = InputMode::Sidebar;
+        app
+    }
+
+    #[test]
+    fn sidebar_navigation_runs_through_missions() {
+        let mut app = test_multi_app_with_mission();
+        app.sidebar.as_mut().unwrap().selected = 2;
+
+        handle_sidebar(&mut app, Action::SidebarDown);
+        assert_eq!(
+            app.sidebar_selected_mission_id().as_deref(),
+            Some("alpha-2")
+        );
+
+        handle_sidebar(&mut app, Action::SidebarDown);
+        assert_eq!(app.sidebar.as_ref().unwrap().selected, 0);
+
+        handle_sidebar(&mut app, Action::SidebarUp);
+        assert_eq!(
+            app.sidebar_selected_mission_id().as_deref(),
+            Some("alpha-2")
+        );
+    }
+
+    #[test]
+    fn sidebar_select_on_a_mission_toggles_its_filter() {
+        let mut app = test_multi_app_with_mission();
+        app.sidebar.as_mut().unwrap().selected = 3;
+
+        let post = handle_sidebar(&mut app, Action::SidebarSelect);
+
+        assert!(matches!(post, PostAction::None));
+        assert_eq!(
+            app.active_project().mission_filter.as_deref(),
+            Some("alpha-2")
+        );
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        handle_sidebar(&mut app, Action::SidebarSelect);
+        assert_eq!(app.active_project().mission_filter, None);
+    }
+
+    #[test]
+    fn sidebar_lists_missions_under_projects() {
+        let mut app = test_multi_app_with_mission();
+        app.set_mission_filter(Some("alpha-2".into()));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+            crate::ui::sidebar::SIDEBAR_WIDTH,
+            8,
+        ))
+        .unwrap();
+
+        terminal
+            .draw(|frame| crate::ui::sidebar::render_sidebar(frame, &app, frame.area()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        assert!(rows[5].contains("Missions"));
+        assert!(rows[6].contains('◆'));
+        assert!(rows[6].ends_with("0/1│"));
+    }
+
+    #[test]
+    fn deleting_the_filtered_mission_clears_the_filter() {
+        let mut app = test_multi_app_with_mission();
+        app.set_mission_filter(Some("alpha-2".into()));
+        let project_id = app.active_project_id();
+
+        assert!(delete_issue_from_app(&mut app, &project_id, "alpha-2"));
+
+        assert_eq!(app.active_project().mission_filter, None);
+        let visible = app.active_project().issues_in_column(Column::Todo, "");
+        assert_eq!(visible.len(), 1);
+    }
+
+    #[test]
+    fn a_selected_mission_row_survives_a_project_leaving_the_list() {
+        let mut app = test_multi_app_with_mission();
+        app.sidebar.as_mut().unwrap().selected = 3;
+        let gamma_id = app.projects[2].id();
+
+        app.remove_projects(&[gamma_id]);
+
+        assert_eq!(app.sidebar.as_ref().unwrap().selected, 2);
+        assert_eq!(
+            app.sidebar_selected_mission_id().as_deref(),
+            Some("alpha-2")
+        );
+    }
+
+    #[test]
+    fn sidebar_down_from_a_vanished_row_wraps_to_the_top() {
+        let mut app = test_multi_app_with_mission();
+        app.sidebar.as_mut().unwrap().selected = 3;
+        app.active_project_mut().issues[1].column = Column::Done;
+
+        handle_sidebar(&mut app, Action::SidebarDown);
+
+        assert_eq!(app.sidebar.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn project_only_sidebar_actions_ignore_mission_rows() {
+        let mut app = test_multi_app_with_mission();
+        app.sidebar.as_mut().unwrap().selected = 3;
+        let order_before: Vec<ProjectId> = app.projects.iter().map(|p| p.id()).collect();
+        let lanes_before = app.sidebar.as_ref().unwrap().swimlanes.clone();
+
+        handle_sidebar(&mut app, Action::SidebarToggleSwimlane);
+        handle_sidebar(&mut app, Action::SidebarMoveUp);
+
+        let order_after: Vec<ProjectId> = app.projects.iter().map(|p| p.id()).collect();
+        assert_eq!(order_after, order_before);
+        assert_eq!(app.sidebar.as_ref().unwrap().swimlanes, lanes_before);
+        assert_eq!(app.sidebar.as_ref().unwrap().selected, 3);
     }
 
     #[test]

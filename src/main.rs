@@ -2090,9 +2090,9 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
     // Reload state so we don't clobber concurrent updates that happened during launch
     let mut state = config::load_state(project_root);
 
-    // The spawning agent's issue from BORK_ISSUE_ID backs both --mission (when
-    // it leads a mission) and --link. Only link when the target exists in
-    // this same project (cross-project spawns won't resolve and are skipped).
+    // The spawning agent's issue from BORK_ISSUE_ID takes the new issue as a
+    // member when it leads a mission, and is linked to it otherwise, so the
+    // two always stay tied. Explicit --mission / --link win.
     let spawner_id =
         session_issue_id().filter(|id| !id.is_empty() && !id.eq_ignore_ascii_case(&issue.id));
     let mission_target = opts.mission.or_else(|| {
@@ -2100,11 +2100,6 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
             .clone()
             .filter(|id| ops::is_mission(&state.issues, id))
     });
-    let explicit_link = opts.link.is_some();
-    let link_target = opts
-        .link
-        .or(spawner_id)
-        .filter(|id| !id.is_empty() && !id.eq_ignore_ascii_case(&issue.id));
 
     if let Some(saved) = state.issues.iter_mut().find(|i| i.id == issue.id) {
         if saved.column == Column::Todo {
@@ -2135,6 +2130,18 @@ fn start_issue(project_root: &Path, opts: StartIssueOptions) -> anyhow::Result<S
         }
     });
     config::save_state(&state, project_root)?;
+
+    // Only link when the target exists in this same project (cross-project
+    // spawns won't resolve and are skipped).
+    let spawner_is_mission = spawner_id
+        .as_deref()
+        .zip(mission.as_deref())
+        .is_some_and(|(spawner, mission)| spawner.eq_ignore_ascii_case(mission));
+    let explicit_link = opts.link.is_some();
+    let link_target = opts
+        .link
+        .or(spawner_id.filter(|_| !spawner_is_mission))
+        .filter(|id| !id.is_empty() && !id.eq_ignore_ascii_case(&issue.id));
 
     let linked_to = link_target.and_then(|target| {
         let target_exists = state

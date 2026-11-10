@@ -101,7 +101,7 @@ src/
     ├── mod.rs         # Root render, layout composition, swimlane splitting
     ├── board.rs       # 4-column kanban board with adaptive card sizes
     ├── card.rs        # Issue card widget (Full/Medium/Compact sizes)
-    ├── sidebar.rs     # Project sidebar with needs-you markers
+    ├── sidebar.rs     # Project sidebar with needs-you markers, plus the Missions section
     ├── dialog.rs      # New/edit issue dialog overlay
     ├── help.rs        # Help overlay (keybinding reference popup)
     ├── linear_picker.rs # Import picker for Linear issues, Linear projects, and GitHub PRs
@@ -240,13 +240,15 @@ The dialog picker uses multi-select in Attach mode (Enter toggles, Backspace rem
 
 Issues can be tied to other issues in the same project via a symmetric `linked_issues: Vec<String>` field (each side stores the other's id, case-insensitive). Links power a board filter that narrows the view to one connected component (BFS over `linked_issues`, see `Project::linked_component` and `ops::linked_component`).
 
-- **Auto-link on spawn**: agent sessions export `BORK_ISSUE_ID`; `bork issue start` links the new issue back to the spawning issue (or to `--link <id>`) when the target resolves in the same project. This ties an orchestrator to the sub-issues it spawns.
+- **Auto-link on spawn**: agent sessions export `BORK_ISSUE_ID`; `bork issue start` links the new issue back to the spawning issue (or to `--link <id>`) when the target resolves in the same project. A spawning orchestrator takes the new issue as a mission member instead (see Missions below).
 - **Manual links**: `bork integration link <a> <b>` / `unlink <a> <b>`, or the TUI link picker (`c`, model after `linear_picker`).
 - **Filter**: `f` toggles the board to the selected issue's connected component; `Esc`/`f` clears. `bork issue list --linked <id>` does the same from the CLI.
 - Cards show a cyan `∞N` badge (link count). Deleting an issue strips its id from every other issue's `linked_issues` (`ops::remove_link_references`).
 - Any new `Issue` field (including `linked_issues`) must be added to `merge_issue_fields` in `app.rs` or concurrent TUI edits drop CLI-written values.
 
-Missions group issues under an orchestrator through a one-way `Issue.mission_id`. `ops::mission_of` resolves it, and returns `None` when the id no longer names an orchestrator or the member became one. Ids survive kind changes, so switching back restores the membership. `bork issue start` adds the new issue to `--mission <id>`, or to the spawning issue when `BORK_ISSUE_ID` is an orchestrator; it still links the two as well. `bork mission add <mission-id> <id>...` / `remove <id>` edit membership, `bork issue list --mission <id>` lists members, and deleting a mission clears its members' `mission_id` (`ops::remove_link_references`). Orchestrators can't join a mission.
+Missions group issues under an orchestrator through a one-way `Issue.mission_id`. `ops::mission_of` resolves it, and returns `None` when the id no longer names an orchestrator or the member became one. Ids survive kind changes, so switching back restores the membership. `bork issue start` adds the new issue to `--mission <id>`, or to the spawning issue when `BORK_ISSUE_ID` is an orchestrator, in which case it doesn't also link them (`--link` still does). `bork mission add <mission-id> <id>...` / `remove <id>` edit membership, `bork issue list --mission <id>` lists members, and deleting a mission clears its members' `mission_id` (`ops::remove_link_references`). Orchestrators can't join a mission.
+
+The sidebar lists the active project's open missions (`Project::open_missions`) below the projects. `SidebarState.selected` indexes one list of rows: projects first, then missions (`App::sidebar_row_count`, `sidebar_selected_mission_id`); project-only actions do nothing on a mission row. `Enter` on a mission toggles `Project.mission_filter`, which narrows `issues_in_column` to the mission and its members (`ops::is_member_of`, linear per frame because the filter's mission is checked when it is set and on every external merge). Esc peels it after the link filter.
 
 ## Loading indicators
 

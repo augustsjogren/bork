@@ -504,7 +504,18 @@ fn find_mission<'a>(issues: &'a [Issue], mission_id: &str) -> Option<&'a Issue> 
 }
 
 fn in_mission(issues: &[Issue], issue: &Issue, mission_id: &str) -> bool {
-    mission_of(issues, issue).is_some_and(|mission| mission.id.eq_ignore_ascii_case(mission_id))
+    is_mission(issues, mission_id) && is_member_of(issue, mission_id)
+}
+
+/// Whether `issue` names `mission_id` as its mission. Callers must already
+/// know `mission_id` is a mission (see `is_mission`); this skips that lookup
+/// so per-frame board filters stay linear.
+pub fn is_member_of(issue: &Issue, mission_id: &str) -> bool {
+    issue.kind != IssueKind::Orchestrator
+        && issue
+            .mission_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case(mission_id))
 }
 
 fn mission_members<'a>(

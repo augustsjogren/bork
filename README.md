@@ -322,7 +322,7 @@ With issues marked, `H`, `L`, `D`, `T`, `Shift+Enter`, `o`, `O`, `x`, `d` and `A
 |-----|--------|
 | `j` / `Down` | Move selection down |
 | `k` / `Up` | Move selection up |
-| `Enter` | Focus selected project (single board view) |
+| `Enter` | Focus selected project (single board view), or filter the board to the selected mission (again to clear) |
 | `Space` | Toggle project as swimlane (add/remove from view) |
 | `Shift+J` / `Shift+K` | Move project down / up in the list |
 | `Shift+R` | Rename project in bork's UI (issue IDs and tmux sessions keep the config name). Renaming back to the config name clears it |
@@ -730,6 +730,8 @@ Use `j`/`k` to navigate, then:
 - **`Enter`** &mdash; Focus the selected project. This switches to a single board view showing only that project.
 - **`Space`** &mdash; Toggle the selected project as a swimlane. This adds or removes it from the stacked view. You can have up to 3 projects visible at once.
 - **`Esc`** or **`Ctrl+P`** &mdash; Close the sidebar.
+
+When the active board has missions (orchestrator issues not in Done), a **Missions** section lists them below the projects. Each row shows `done/members`, a yellow `●` when the mission or a member needs you, and `◆` while the board is filtered to it. `Enter` on a mission filters the board to the mission and its members; `Enter` again or `Esc` on the board clears the filter.
 
 ### Swimlane View
 

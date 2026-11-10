@@ -241,6 +241,21 @@ fn render_footer_content(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    if let Some(mission_id) = &app.active_project().mission_filter {
+        let line = Line::from(vec![
+            Span::styled(
+                format!(" \u{25c6} mission: {}", mission_id),
+                Style::default().fg(styles::ACCENT),
+            ),
+            Span::raw("  "),
+            Span::styled("Esc", styles::statusbar_key_style()),
+            Span::styled(":clear", styles::statusbar_desc_style()),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        render_right_indicators(frame, app, area);
+        return;
+    }
+
     if app.attention_filter_active() {
         let line = Line::from(vec![
             Span::styled(

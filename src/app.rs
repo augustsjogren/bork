@@ -105,6 +105,21 @@ fn review_cards_last(mut items: Vec<(usize, &Issue)>) -> Vec<(usize, &Issue)> {
     items
 }
 
+/// The mission's own card or one of its members: what the board shows while
+/// `mission_filter` names `mission_id`.
+fn in_mission_view(issue: &Issue, mission_id: &str) -> bool {
+    issue.id.eq_ignore_ascii_case(mission_id) || crate::ops::is_member_of(issue, mission_id)
+}
+
+/// A sidebar mission row's summary.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct MissionProgress {
+    pub members: usize,
+    pub done: usize,
+    /// The mission card or any member needs you.
+    pub needs_you: bool,
+}
+
 pub fn apply_git_poll(live: &mut LiveState, result: crate::external::git::GitPollResult) -> bool {
     let branches = result.branches;
     let existing = result.existing;
@@ -273,6 +288,9 @@ pub struct Project {
     /// contains this issue id (the anchor itself plus everything reachable
     /// through `linked_issues`). Cleared with the same key or Esc.
     pub link_filter: Option<String>,
+    /// When set, the board shows only this mission and its members. Picked
+    /// from the sidebar's Missions section, cleared with Esc.
+    pub mission_filter: Option<String>,
     /// Show only cards that need their owner (see `attention_for`).
     pub attention_filter: bool,
     /// Cards whose worktree is still being created. `git worktree list`
@@ -351,6 +369,7 @@ impl Project {
             selected_row: [0; 4],
             marked_issues: HashSet::new(),
             link_filter: None,
+            mission_filter: None,
             attention_filter: false,
             worktrees_in_flight: HashSet::new(),
             linear_available: false,
@@ -451,7 +470,7 @@ impl Project {
             // No local changes pending, safe to fully replace
             self.issues = file_issues.clone();
             self.base_issues = file_issues;
-            self.clear_stale_link_filter();
+            self.clear_stale_filters();
             self.clear_stale_marks();
             self.clamp_all_rows("");
             return;
@@ -492,23 +511,31 @@ impl Project {
         }
 
         self.base_issues = file_issues;
-        self.clear_stale_link_filter();
+        self.clear_stale_filters();
         self.clear_stale_marks();
         self.clamp_all_rows("");
     }
 
-    /// Drop the link filter when its anchor issue no longer exists (e.g. it was
-    /// deleted via the CLI while the filter was active), so the board doesn't
-    /// get stuck showing nothing.
-    fn clear_stale_link_filter(&mut self) {
-        let stale = self.link_filter.as_deref().is_some_and(|anchor| {
+    /// Drop the link filter when its anchor issue no longer exists, and the
+    /// mission filter when its issue is no longer a mission (e.g. deleted via
+    /// the CLI while the filter was active), so the board doesn't get stuck
+    /// showing nothing. Call it after any local delete or kind change too.
+    pub fn clear_stale_filters(&mut self) {
+        let stale_link = self.link_filter.as_deref().is_some_and(|anchor| {
             !self
                 .issues
                 .iter()
                 .any(|i| i.id.eq_ignore_ascii_case(anchor))
         });
-        if stale {
+        if stale_link {
             self.link_filter = None;
+        }
+        let stale_mission = self
+            .mission_filter
+            .as_deref()
+            .is_some_and(|mission_id| !crate::ops::is_mission(&self.issues, mission_id));
+        if stale_mission {
+            self.mission_filter = None;
         }
     }
 
@@ -527,6 +554,11 @@ impl Project {
                 issue.column == column && (query.is_empty() || self.issue_matches(issue, &query))
             })
             .filter(|(_, issue)| !self.attention_filter || self.needs_you(issue))
+            .filter(|(_, issue)| {
+                self.mission_filter
+                    .as_deref()
+                    .is_none_or(|mission_id| in_mission_view(issue, mission_id))
+            })
             .collect();
         let Some(anchor) = self.link_filter.as_deref() else {
             return review_cards_last(matches);
@@ -1202,6 +1234,36 @@ impl Project {
             .count()
     }
 
+    pub fn is_mission_filtered(&self, mission_id: &str) -> bool {
+        self.mission_filter
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case(mission_id))
+    }
+
+    /// Missions shown in the sidebar: orchestrators not yet in Done, in board
+    /// order.
+    pub fn open_missions(&self) -> impl Iterator<Item = &Issue> {
+        self.issues
+            .iter()
+            .filter(|issue| issue.kind == IssueKind::Orchestrator && issue.column != Column::Done)
+    }
+
+    pub fn mission_progress(&self, mission_id: &str) -> MissionProgress {
+        let mut progress = MissionProgress::default();
+        for issue in self
+            .issues
+            .iter()
+            .filter(|issue| in_mission_view(issue, mission_id))
+        {
+            progress.needs_you |= self.needs_you(issue);
+            if crate::ops::is_member_of(issue, mission_id) {
+                progress.members += 1;
+                progress.done += usize::from(issue.column == Column::Done);
+            }
+        }
+        progress
+    }
+
     fn agent_attention(&self, issue: &Issue) -> Option<Attention> {
         match self.resolved_agent_status(issue) {
             AgentStatus::WaitingPermission | AgentStatus::WaitingApproval => {
@@ -1404,7 +1466,7 @@ impl Project {
             .collect();
         if !removable.is_empty() {
             self.issues.retain(|issue| !removable.contains(&issue.id));
-            self.clear_stale_link_filter();
+            self.clear_stale_filters();
             self.clamp_all_rows("");
         }
         removable.len()
@@ -2683,6 +2745,7 @@ impl App {
             .map(|entry| crate::global_config::normalize_path(&entry.path))
             .collect();
         let selected_id = self.sidebar_selected_id();
+        let selected_mission_id = self.sidebar_selected_mission_id();
 
         let mut ranked: Vec<(usize, Project)> = std::mem::take(&mut self.projects)
             .into_iter()
@@ -2698,6 +2761,9 @@ impl App {
         if let Some(id) = selected_id {
             self.select_sidebar_project(&id);
         }
+        if let Some(id) = selected_mission_id {
+            self.select_sidebar_mission(&id);
+        }
     }
 
     pub fn project_display_name(&self, id: &ProjectId) -> String {
@@ -2706,9 +2772,35 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// The selected sidebar row's project, when the selection is in the
+    /// Projects section.
     pub fn sidebar_selected_id(&self) -> Option<ProjectId> {
         let sidebar = self.sidebar.as_ref()?;
         self.projects.get(sidebar.selected).map(|p| p.id())
+    }
+
+    /// Sidebar rows run through every project, then the active project's
+    /// open missions.
+    pub fn sidebar_row_count(&self) -> usize {
+        self.projects.len() + self.active_project().open_missions().count()
+    }
+
+    /// The selected sidebar row's mission, when the selection is in the
+    /// Missions section.
+    pub fn sidebar_selected_mission_id(&self) -> Option<String> {
+        let selected = self.sidebar.as_ref()?.selected;
+        let mission_row = selected.checked_sub(self.projects.len())?;
+        self.active_project()
+            .open_missions()
+            .nth(mission_row)
+            .map(|mission| mission.id.clone())
+    }
+
+    pub fn set_mission_filter(&mut self, mission_id: Option<String>) {
+        let query = self.search_query.clone();
+        let project = self.active_project_mut();
+        project.mission_filter = mission_id;
+        project.clamp_all_rows(&query);
     }
 
     fn select_sidebar_project(&mut self, id: &ProjectId) {
@@ -2718,10 +2810,24 @@ impl App {
         }
     }
 
+    fn select_sidebar_mission(&mut self, mission_id: &str) {
+        let row = self
+            .active_project()
+            .open_missions()
+            .position(|mission| mission.id.eq_ignore_ascii_case(mission_id))
+            .map(|position| self.projects.len() + position);
+        if let (Some(sidebar), Some(row)) = (self.sidebar.as_mut(), row) {
+            sidebar.selected = row;
+        }
+    }
+
     /// Swaps the selected sidebar project with its neighbour and returns the
-    /// new order, or `None` at the edge of the list.
+    /// new order, or `None` at the edge of the list or on a mission row.
     pub fn move_sidebar_project(&mut self, up: bool) -> Option<Vec<ProjectId>> {
         let selected = self.sidebar.as_ref()?.selected;
+        if selected >= self.projects.len() {
+            return None;
+        }
         let target = if up {
             selected.checked_sub(1)?
         } else {
@@ -2747,6 +2853,7 @@ impl App {
         let active_id = self.active_project_id();
         let old_selected = self.sidebar.as_ref().map_or(0, |sidebar| sidebar.selected);
         let selected_id = self.sidebar_selected_id();
+        let selected_mission_id = self.sidebar_selected_mission_id();
 
         self.projects.retain(|p| !to_remove.contains(&p.id()));
 
@@ -2766,6 +2873,9 @@ impl App {
             .iter()
             .position(|id| *id == active_id)
             .unwrap_or(0);
+        if let Some(id) = selected_mission_id {
+            self.select_sidebar_mission(&id);
+        }
     }
 
     pub fn find_project(&self, id: &ProjectId) -> Option<&Project> {
@@ -3382,6 +3492,10 @@ impl App {
         // Esc peels off one active board filter at a time.
         if self.active_project().link_filter.is_some() {
             self.clear_link_filter(ctx);
+            return;
+        }
+        if self.active_project().mission_filter.is_some() {
+            self.set_mission_filter(None);
             return;
         }
         if self.attention_filter_active() {
@@ -9960,6 +10074,76 @@ mod tests {
         });
 
         assert!(app.active_project().link_filter.is_none());
+    }
+
+    /// `bork-1` leads a mission with members `bork-2` (Done) and `bork-3`;
+    /// `bork-4` is outside it.
+    fn mission_board() -> App {
+        let mut mission = test_issue("bork-1", Column::InProgress);
+        mission.kind = IssueKind::Orchestrator;
+        let mut done_member = test_issue("bork-2", Column::Done);
+        done_member.mission_id = Some("bork-1".into());
+        let mut member = test_issue("bork-3", Column::Todo);
+        member.mission_id = Some("bork-1".into());
+        test_app(vec![
+            mission,
+            done_member,
+            member,
+            test_issue("bork-4", Column::Todo),
+        ])
+    }
+
+    #[test]
+    fn mission_filter_shows_the_mission_and_its_members() {
+        let mut app = mission_board();
+
+        app.set_mission_filter(Some("bork-1".into()));
+
+        let project = app.active_project();
+        let visible: Vec<&str> = Column::ALL
+            .iter()
+            .flat_map(|column| project.issues_in_column(*column, ""))
+            .map(|(_, issue)| issue.id.as_str())
+            .collect();
+        assert_eq!(visible, vec!["bork-3", "bork-1", "bork-2"]);
+    }
+
+    #[test]
+    fn mission_progress_counts_members_and_done() {
+        let app = mission_board();
+
+        assert_eq!(
+            app.active_project().mission_progress("bork-1"),
+            MissionProgress {
+                members: 2,
+                done: 1,
+                needs_you: false,
+            }
+        );
+    }
+
+    #[test]
+    fn esc_clears_the_mission_filter() {
+        let mut app = mission_board();
+        app.set_mission_filter(Some("bork-1".into()));
+        let ctx = app.action_context();
+
+        app.clear_search(&ctx);
+
+        assert_eq!(app.active_project().mission_filter, None);
+    }
+
+    #[test]
+    fn external_merge_clears_a_mission_filter_whose_mission_is_gone() {
+        let mut app = mission_board();
+        app.set_mission_filter(Some("bork-1".into()));
+
+        app.active_project_mut().merge_external_state(AppState {
+            issues: vec![test_issue("bork-3", Column::Todo)],
+            ..Default::default()
+        });
+
+        assert_eq!(app.active_project().mission_filter, None);
     }
 
     #[test]

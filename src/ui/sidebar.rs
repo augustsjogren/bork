@@ -1,14 +1,16 @@
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, SidebarState};
 use crate::ui::styles;
 
 pub const SIDEBAR_WIDTH: u16 = 22;
 const SIDEBAR_NAME_PADDING: u16 = 5;
+/// Two border rows plus one mission row.
+const MIN_MISSIONS_HEIGHT: u16 = 3;
 
 pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let sidebar = match &app.sidebar {
@@ -22,6 +24,26 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         Color::DarkGray
     };
 
+    if app.active_project().open_missions().next().is_none() {
+        render_projects(frame, app, sidebar, border_color, area);
+        return;
+    }
+
+    let projects_height =
+        (app.projects.len() as u16 + 2).min(area.height.saturating_sub(MIN_MISSIONS_HEIGHT));
+    let [projects_area, missions_area] =
+        Layout::vertical([Constraint::Length(projects_height), Constraint::Min(0)]).areas(area);
+    render_projects(frame, app, sidebar, border_color, projects_area);
+    render_missions(frame, app, sidebar, border_color, missions_area);
+}
+
+fn render_projects(
+    frame: &mut Frame,
+    app: &App,
+    sidebar: &SidebarState,
+    border_color: Color,
+    area: Rect,
+) {
     let block = Block::default()
         .title(" Projects ")
         .borders(Borders::ALL)
@@ -76,11 +98,6 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::DarkGray)
             };
 
-            let mut style = Style::default();
-            if sidebar.focused && i == sidebar.selected {
-                style = style.add_modifier(Modifier::REVERSED);
-            }
-
             let mut spans = vec![
                 Span::styled(format!(" {} ", marker), marker_style),
                 Span::styled(display_name, name_style),
@@ -89,10 +106,71 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled(" \u{1f50c}", Style::default()));
             }
 
-            ListItem::new(Line::from(spans)).style(style)
+            ListItem::new(Line::from(spans)).style(row_style(sidebar, i))
         })
         .collect();
 
-    let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    frame.render_widget(List::new(items).block(block), area);
+}
+
+fn render_missions(
+    frame: &mut Frame,
+    app: &App,
+    sidebar: &SidebarState,
+    border_color: Color,
+    area: Rect,
+) {
+    let block = Block::default()
+        .title(" Missions ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let project = app.active_project();
+    let first_row = app.projects.len();
+
+    let items: Vec<ListItem> = project
+        .open_missions()
+        .enumerate()
+        .map(|(i, mission)| {
+            let progress = project.mission_progress(&mission.id);
+            let is_filtered = project.is_mission_filtered(&mission.id);
+
+            let (marker, marker_style) = if is_filtered {
+                ("◆", Style::default().fg(styles::ACCENT))
+            } else if progress.needs_you {
+                ("●", Style::default().fg(Color::Yellow))
+            } else {
+                (" ", Style::default().fg(Color::DarkGray))
+            };
+
+            let count = format!(" {}/{}", progress.done, progress.members);
+            let max_title = area
+                .width
+                .saturating_sub(SIDEBAR_NAME_PADDING + count.len() as u16)
+                as usize;
+            let title_style = if is_filtered {
+                Style::default()
+                    .fg(styles::ACCENT)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let spans = vec![
+                Span::styled(format!(" {} ", marker), marker_style),
+                Span::styled(styles::truncate(&mission.title, max_title), title_style),
+                Span::styled(count, Style::default().fg(Color::DarkGray)),
+            ];
+            ListItem::new(Line::from(spans)).style(row_style(sidebar, first_row + i))
+        })
+        .collect();
+
+    frame.render_widget(List::new(items).block(block), area);
+}
+
+fn row_style(sidebar: &SidebarState, row: usize) -> Style {
+    if sidebar.focused && row == sidebar.selected {
+        return Style::default().add_modifier(Modifier::REVERSED);
+    }
+    Style::default()
 }
