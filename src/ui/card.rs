@@ -243,9 +243,36 @@ fn attention_spans(ctx: &CardContext) -> Vec<Span<'static>> {
     ]
 }
 
+/// Least room a Linear id or project chip is shown in, cut as needed.
+const MIN_CHIP_WIDTH: usize = 3;
+
 /// Room for the glyph and a few readable characters; narrower than this the
 /// chip is dropped rather than shown as a stub.
 const MIN_MISSION_CHIP_WIDTH: usize = 8;
+
+/// Append a footer chip cut to the columns left of `room`, or nothing when
+/// fewer than `min_width` are left. Chip text is free text (project and
+/// mission titles), so it is cut by terminal width.
+fn push_chip(
+    left: &mut Vec<Span<'static>>,
+    text: String,
+    style: Style,
+    min_width: usize,
+    room: usize,
+) {
+    let used = left.iter().map(Span::width).sum::<usize>();
+    let Some(available) = room
+        .checked_sub(used)
+        .filter(|available| *available >= min_width)
+    else {
+        return;
+    };
+    left.push(Span::styled(
+        styles::truncate_to_width(&text, available),
+        style,
+    ));
+    left.push(Span::raw(" "));
+}
 
 /// The card's open mission, unless the board is already filtered to it. A
 /// mission in Done is left out, as in the sidebar.
@@ -290,38 +317,41 @@ fn format_bottom_line(ctx: &CardContext, max_width: usize) -> Line<'static> {
     // Comments arrive after the first poll, so they go after the Linear IDs to
     // avoid shifting them. Their width is reserved so the IDs truncate first.
     let comments = comments_badge(ctx.project.unresolved_comments(issue));
-    let comments_width = comments.as_ref().map_or(0, |badge| badge.width() + 1);
-    let used = left.iter().map(Span::width).sum::<usize>() + comments_width;
-    if issue.has_linear() && left_budget > used + 2 {
+    let room = left_budget.saturating_sub(comments.as_ref().map_or(0, |badge| badge.width() + 1));
+    let linear_style = Style::default().fg(Color::Blue);
+    if issue.has_linear() {
         let identifiers = issue.linear_identifiers().join(", ");
-        left.push(Span::styled(
-            styles::truncate(&format!("◈ {identifiers}"), left_budget - used),
-            Style::default().fg(Color::Blue),
-        ));
-        left.push(Span::raw(" "));
+        push_chip(
+            &mut left,
+            format!("◈ {identifiers}"),
+            linear_style,
+            MIN_CHIP_WIDTH,
+            room,
+        );
     }
-    let used = left.iter().map(Span::width).sum::<usize>() + comments_width;
-    if !issue.linear_projects.is_empty() && left_budget > used + 2 {
+    if !issue.linear_projects.is_empty() {
         let names: Vec<&str> = issue
             .linear_projects
             .iter()
             .map(|p| p.name.as_str())
             .collect();
-        left.push(Span::styled(
-            styles::truncate(&format!("▤ {}", names.join(", ")), left_budget - used),
-            Style::default().fg(Color::Blue),
-        ));
-        left.push(Span::raw(" "));
+        push_chip(
+            &mut left,
+            format!("▤ {}", names.join(", ")),
+            linear_style,
+            MIN_CHIP_WIDTH,
+            room,
+        );
     }
-    let used = left.iter().map(Span::width).sum::<usize>() + comments_width;
     if let Some(title) = mission_title(ctx) {
-        if left_budget >= used + MIN_MISSION_CHIP_WIDTH {
-            left.push(Span::styled(
-                styles::truncate_to_width(&format!("◆ {title}"), left_budget - used),
-                styles::orchestrator_badge_style(),
-            ));
-            left.push(Span::raw(" "));
-        }
+        let style = styles::orchestrator_badge_style();
+        push_chip(
+            &mut left,
+            format!("◆ {title}"),
+            style,
+            MIN_MISSION_CHIP_WIDTH,
+            room,
+        );
     }
     if let Some(badge) = comments {
         left.push(badge);
@@ -610,6 +640,31 @@ pub(crate) fn pr_spans(pr: &PrStatus) -> Vec<Span<'static>> {
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    #[test]
+    fn a_chip_with_wide_characters_stays_within_its_room() {
+        let mut left = vec![Span::raw("  ")];
+
+        push_chip(
+            &mut left,
+            "▤ 🚀🚀🚀🚀🚀 launch".into(),
+            Style::default(),
+            MIN_CHIP_WIDTH,
+            12,
+        );
+        push_chip(
+            &mut left,
+            "◆ Roadmap".into(),
+            Style::default(),
+            MIN_MISSION_CHIP_WIDTH,
+            12,
+        );
+
+        let width: usize = left.iter().map(Span::width).sum();
+        assert_eq!(left.len(), 3, "the second chip has no room left");
+        assert!(width <= 13, "chip plus its trailing space fit: {width}");
+        assert_eq!(left[1].content, "▤ 🚀🚀...");
+    }
 
     #[test]
     fn humanize_age_seconds() {
