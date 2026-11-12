@@ -931,6 +931,10 @@ fn handle_normal(
             app.toggle_link_filter(ctx);
             PostAction::None
         }
+        Action::ToggleMissionFilter => {
+            app.toggle_mission_filter(ctx);
+            PostAction::None
+        }
         Action::ToggleAttentionFilter => {
             app.toggle_attention_filter(ctx);
             PostAction::None

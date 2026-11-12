@@ -3625,6 +3625,33 @@ impl App {
         project.clamp_all_rows(&query);
     }
 
+    /// Toggle the board filter to the selected card's mission: the mission
+    /// itself when a mission card is selected, otherwise the one it belongs to.
+    pub fn toggle_mission_filter(&mut self, ctx: &ActionContext) {
+        let query = self.search_query.clone();
+        let project = self.context_project(ctx);
+        let mission_id = if project.mission_filter.is_some() {
+            None
+        } else {
+            let Some(issue) = project.selected_issue(&query) else {
+                return;
+            };
+            let mission = if issue.kind == IssueKind::Orchestrator {
+                Some(issue)
+            } else {
+                crate::ops::mission_of(&project.issues, issue)
+            };
+            let Some(mission) = mission else {
+                self.set_warning("Card isn't in a mission");
+                return;
+            };
+            Some(mission.id.clone())
+        };
+        let project = self.context_project_mut(ctx);
+        project.mission_filter = mission_id;
+        project.clamp_all_rows(&query);
+    }
+
     pub fn toggle_popup_width_mode(&mut self) {
         self.popup_width_mode = self.popup_width_mode.cycle();
         self.set_message(format!("Popup width: {}", self.popup_width_mode.label()));
@@ -4062,6 +4089,69 @@ mod tests {
                 "bork-2 (#7): PR approved and green, but GitHub blocks the merge",
                 "bork-2 (#7): PR merged",
             ]
+        );
+    }
+
+    #[test]
+    fn a_member_taken_out_or_removed_from_the_board_is_noted() {
+        let mut app = mission_notes_app();
+        let mut second = test_issue("bork-3", Column::Todo);
+        second.mission_id = Some("bork-1".into());
+        app.project_mut().issues.push(second);
+        app.project_mut().collect_mission_notes();
+
+        app.project_mut().issues[0].mission_id = None;
+        app.project_mut()
+            .issues
+            .retain(|issue| issue.id != "bork-3");
+        app.project_mut().collect_mission_notes();
+        let due = app
+            .project_mut()
+            .take_due_mission_notes(std::time::Instant::now());
+
+        let mut notes = written(&due);
+        notes.sort();
+        assert_eq!(
+            notes,
+            vec![
+                "bork-2 left the mission",
+                "bork-3: card removed from the board",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_cards_file_lists_members_and_is_handed_out_only_when_it_changes() {
+        let mut app = mission_notes_app();
+        app.project_mut().issues[0]
+            .github_pr_links
+            .push(LinkedGithubPr {
+                number: 7,
+                imported: false,
+                import_source: None,
+            });
+        let mut pr = test_pr(7, "feature");
+        pr.is_draft = true;
+        app.project_mut().live.user_prs = vec![pr];
+
+        let first = app.project_mut().take_changed_mission_cards();
+        assert_eq!(
+            first,
+            vec![(
+                "bork-1".to_string(),
+                "# Cards in bork-1\n\nWritten by bork whenever a card changes; edits are overwritten.\n\n\
+| Card | Column | PR | Needs | Title |\n| --- | --- | --- | --- | --- |\n\
+| bork-2 | To Do | #7 draft |  | Test issue bork-2 |\n"
+                    .to_string()
+            )]
+        );
+        assert!(app.project_mut().take_changed_mission_cards().is_empty());
+
+        app.project_mut().issues[0].column = Column::CodeReview;
+        let changed = app.project_mut().take_changed_mission_cards();
+        assert!(
+            changed[0].1.contains("| bork-2 | Code Review |"),
+            "{changed:?}"
         );
     }
 
@@ -10552,6 +10642,39 @@ mod tests {
                 needs_you: false,
             }
         );
+    }
+
+    #[test]
+    fn toggle_mission_filter_follows_the_selected_card_and_clears_again() {
+        let mut app = mission_board();
+        let ctx = app.action_context();
+
+        app.toggle_mission_filter(&ctx);
+        assert_eq!(
+            app.active_project().mission_filter.as_deref(),
+            Some("bork-1")
+        );
+        app.toggle_mission_filter(&ctx);
+        assert_eq!(app.active_project().mission_filter, None);
+
+        app.project_mut().selected_column = 1;
+        app.toggle_mission_filter(&ctx);
+        assert_eq!(
+            app.active_project().mission_filter.as_deref(),
+            Some("bork-1")
+        );
+    }
+
+    #[test]
+    fn toggle_mission_filter_warns_on_a_card_outside_any_mission() {
+        let mut app = mission_board();
+        app.project_mut().selected_row[0] = 1;
+        let ctx = app.action_context();
+
+        app.toggle_mission_filter(&ctx);
+
+        assert_eq!(app.active_project().mission_filter, None);
+        assert!(app.message.is_some());
     }
 
     #[test]

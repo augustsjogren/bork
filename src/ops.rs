@@ -691,6 +691,20 @@ pub fn append_mission_notes(
     Ok(())
 }
 
+/// Replace a mission's `cards.md` with the board's current list of its cards.
+pub fn write_mission_cards(
+    project_root: &Path,
+    mission_id: &str,
+    cards: &str,
+) -> anyhow::Result<()> {
+    let dir = mission_context_dir(project_root, mission_id)?;
+    std::fs::create_dir_all(&dir)?;
+    config::atomic_write(
+        &dir.join(crate::backup::MISSION_CARDS_NAME),
+        cards.as_bytes(),
+    )
+}
+
 /// `unix_secs` as `YYYY-MM-DD HH:MM` in the machine's time zone.
 fn local_minute(unix_secs: u64) -> String {
     let time = unix_secs as libc::time_t;
@@ -832,11 +846,12 @@ pub fn show_mission(project_root: &Path, mission_id: &str) -> anyhow::Result<Str
     }
     let _ = writeln!(
         out,
-        "Context:  {} ({}, {}, {})",
+        "Context:  {} ({}, {}, {}, {})",
         context_dir.display(),
         crate::backup::PLAN_NAME,
         crate::backup::MISSION_LINKS_NAME,
-        crate::backup::MISSION_NOTES_NAME
+        crate::backup::MISSION_NOTES_NAME,
+        crate::backup::MISSION_CARDS_NAME
     );
 
     let members: Vec<&Issue> = state

@@ -2,14 +2,15 @@
 //! nobody on the mission's side made, a new reason the card needs someone, a
 //! merged PR. Every note goes to the mission's `plans/<id>/notes.md`; when it
 //! is safe to type into mission control's pane, bork also types a one-line
-//! nudge pointing at the file.
+//! nudge pointing at the file. Next to it, `cards.md` lists every member as
+//! the board sees it now, rewritten whenever that changes.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::app::Project;
 use crate::attention::Attention;
-use crate::types::{AgentStatus, Column, IssueKind, MergeQueueState, PrState};
+use crate::types::{AgentStatus, Column, Issue, IssueKind, MergeQueueState, PrState};
 
 /// Shortest gap between two nudges to one mission control.
 pub const NUDGE_INTERVAL: Duration = Duration::from_secs(3 * 60);
@@ -25,10 +26,15 @@ pub struct MissionNotes {
     /// Notes mission control hasn't been nudged about yet, by mission id.
     unread: HashMap<String, usize>,
     nudged_at: HashMap<String, Instant>,
+    /// The cards file last handed out per mission, to skip unchanged rewrites.
+    cards_written: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
 struct MemberSnapshot {
+    mission_id: String,
+    /// The card as notes name it, kept for the note when it leaves.
+    card: String,
     column: Column,
     /// Attention states already noted since the card last changed column, so
     /// one flapping between two states is noted once.
@@ -81,17 +87,28 @@ impl Project {
             };
             let mission_control_busy = self.resolved_agent_status(mission) == AgentStatus::Busy;
             let moved_by_user = self.mission_notes.user_moved.contains(&issue.id);
+            let first_seen = MemberSnapshot {
+                mission_id: mission.id.clone(),
+                card: card.clone(),
+                column,
+                reported: attention.into_iter().collect(),
+                merged_reported: merged,
+            };
             let Some(snapshot) = self.mission_notes.snapshots.get_mut(&issue.id) else {
-                self.mission_notes.snapshots.insert(
-                    issue.id.clone(),
-                    MemberSnapshot {
-                        column,
-                        reported: attention.into_iter().collect(),
-                        merged_reported: merged,
-                    },
-                );
+                self.mission_notes
+                    .snapshots
+                    .insert(issue.id.clone(), first_seen);
                 continue;
             };
+            if snapshot.mission_id != mission.id {
+                notes.push((
+                    snapshot.mission_id.clone(),
+                    format!("{} left the mission", snapshot.card),
+                ));
+                *snapshot = first_seen;
+                continue;
+            }
+            snapshot.card = card.clone();
 
             if column != snapshot.column {
                 if !moved_by_user && !mission_control_busy {
@@ -113,9 +130,19 @@ impl Project {
             }
         }
 
-        self.mission_notes
-            .snapshots
-            .retain(|id, _| seen.contains(id));
+        let issues = &self.issues;
+        self.mission_notes.snapshots.retain(|id, snapshot| {
+            if seen.contains(id) {
+                return true;
+            }
+            let note = if issues.iter().any(|issue| issue.id == *id) {
+                format!("{} left the mission", snapshot.card)
+            } else {
+                format!("{}: card removed from the board", snapshot.card)
+            };
+            notes.push((snapshot.mission_id.clone(), note));
+            false
+        });
         self.mission_notes.user_moved.clear();
         for (mission_id, note) in notes {
             *self
@@ -193,6 +220,67 @@ impl Project {
         }
         self.mission_notes.unread.retain(|_, count| *count > 0);
         DueNotes { writes, nudges }
+    }
+
+    /// The cards file of every open mission whose content changed since it
+    /// was last handed out, by mission id.
+    pub fn take_changed_mission_cards(&mut self) -> Vec<(String, String)> {
+        if !self.live.pr_poll_done {
+            return Vec::new();
+        }
+        let current: Vec<(String, String)> = self
+            .open_missions()
+            .map(|mission| (mission.id.clone(), self.mission_cards(&mission.id)))
+            .collect();
+        let mut changed = Vec::new();
+        for (mission_id, cards) in current {
+            if self.mission_notes.cards_written.get(&mission_id) == Some(&cards) {
+                continue;
+            }
+            self.mission_notes
+                .cards_written
+                .insert(mission_id.clone(), cards.clone());
+            changed.push((mission_id, cards));
+        }
+        changed
+    }
+
+    fn mission_cards(&self, mission_id: &str) -> String {
+        let mut out = format!(
+            "# Cards in {mission_id}\n\nWritten by bork whenever a card changes; edits are overwritten.\n\n"
+        );
+        let mut members: Vec<&Issue> = self
+            .issues
+            .iter()
+            .filter(|issue| crate::ops::is_member_of(issue, mission_id))
+            .collect();
+        if members.is_empty() {
+            out.push_str("No cards yet.\n");
+            return out;
+        }
+        members.sort_by_key(|issue| issue.column.index());
+
+        out.push_str("| Card | Column | PR | Needs | Title |\n| --- | --- | --- | --- | --- |\n");
+        for issue in members {
+            let pr = match self.pr_for(issue) {
+                Some(pr) if pr.state != PrState::Open => format!("#{} {}", pr.number, pr.state),
+                Some(pr) if pr.is_draft => format!("#{} draft", pr.number),
+                Some(pr) => format!("#{}", pr.number),
+                None => String::new(),
+            };
+            let needs = self
+                .attention_for(issue)
+                .filter(|attention| attention.needs_you())
+                .map(attention_note)
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "| {} | {} | {pr} | {needs} | {} |\n",
+                issue.id,
+                issue.column,
+                issue.title.replace('|', "\\|"),
+            ));
+        }
+        out
     }
 }
 

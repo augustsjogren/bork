@@ -435,7 +435,8 @@ fn spawn_linear_worker(
 }
 
 /// Collect notes about mission members on every board, then on a background
-/// thread append them to each mission's notes file and type the due nudges.
+/// thread append them to each mission's notes file, rewrite changed cards
+/// files and type the due nudges.
 /// A nudge is skipped while someone is attached to the session (they may be
 /// typing there); the notes stay in the file either way.
 fn deliver_mission_notes(app: &mut app::App) {
@@ -443,12 +444,18 @@ fn deliver_mission_notes(app: &mut app::App) {
     for project in &mut app.projects {
         project.collect_mission_notes();
         let due = project.take_due_mission_notes(now);
-        if due == mission_notes::DueNotes::default() {
+        let cards = project.take_changed_mission_cards();
+        if due == mission_notes::DueNotes::default() && cards.is_empty() {
             continue;
         }
         let project_root = project.config.project_root.clone();
         thread::spawn(move || {
             let mut failures = Vec::new();
+            for (mission_id, cards) in &cards {
+                if let Err(e) = ops::write_mission_cards(&project_root, mission_id, cards) {
+                    failures.push(format!("cards for mission {mission_id} not saved: {e:#}"));
+                }
+            }
             for (mission_id, notes) in &due.writes {
                 if let Err(e) = ops::append_mission_notes(&project_root, mission_id, notes) {
                     failures.push(format!("notes for mission {mission_id} not saved: {e:#}"));
