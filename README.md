@@ -300,7 +300,7 @@ bork update --check   # force a fresh check without pulling
 | `x` | Kill session (with confirmation) |
 | `M` | On a card that isn't a mission, or with cards marked: pick a mission to put them in. A ticked mission already holds them all, and picking it takes them out. On a mission card with nothing marked: ask mission control for a handoff; press again to restart it with a fresh session (with confirmation) |
 | `N` | Show the newest notes bork wrote for the filtered mission, or for the selected card's mission (`plans/<id>/notes.md`, newest first) |
-| `F` | Filter the board to the selected card's mission (or to the mission itself on a mission card); the header names the mission while the filter is on. `F` or `Esc` clears |
+| `F` | Filter the board to the selected card's mission (or to the mission itself on a mission card); the header names the mission while the filter is on, and cards you create join it. `F` or `Esc` clears |
 | `a` | Add issue in current column |
 | `H` | Move issue to previous column |
 | `L` | Move issue to next column |

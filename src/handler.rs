@@ -1839,6 +1839,11 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
         app.set_warning("Project no longer available");
         return;
     };
+    // Created while filtered to a mission, the card joins it; otherwise the
+    // filter would hide the card that was just made.
+    if issue.kind != IssueKind::Orchestrator {
+        issue.mission_id = p.mission_filter.clone();
+    }
     p.issues.push(issue);
     p.selected_column = column_index;
     let count = p.issues_in_column(column, "").len();
@@ -7571,6 +7576,22 @@ mod tests {
         assert_eq!(styles.len(), 1, "{styles:?}");
         assert_eq!(buffer[(0, 7)].symbol(), "└");
         assert_eq!(buffer[(0, 8)].symbol(), " ");
+    }
+
+    #[test]
+    fn a_card_created_while_filtered_to_a_mission_joins_it() {
+        let mut app = test_multi_app_with_mission();
+        app.input_mode = InputMode::Normal;
+        app.set_mission_filter(Some("alpha-2".into()));
+        let ctx = app.action_context();
+
+        app.open_dialog(&ctx);
+        app.dialog.as_mut().unwrap().title = "Next step".to_string();
+        submit_dialog(&mut app, &ctx);
+
+        let created = app.active_project().issues.last().unwrap();
+        assert_eq!(created.title, "Next step");
+        assert_eq!(created.mission_id.as_deref(), Some("alpha-2"));
     }
 
     #[test]
