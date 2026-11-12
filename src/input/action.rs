@@ -89,6 +89,7 @@ pub enum Action {
     LinearPickerCycleFilter,
     ToggleLinkFilter,
     ToggleMissionFilter,
+    OpenMissionNotes,
     ToggleAttentionFilter,
     TogglePopupWidth,
     OpenLinkPicker,

@@ -37,7 +37,7 @@ pub fn render_debug_inspector(frame: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(styles::ACCENT))
         .title(Span::styled(
-            " Debug: Issue ",
+            format!(" {} ", app.debug_inspector_title),
             Style::default()
                 .fg(styles::ACCENT)
                 .add_modifier(Modifier::BOLD),
