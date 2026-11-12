@@ -4104,6 +4104,65 @@ mod tests {
     }
 
     #[test]
+    fn a_member_getting_its_first_pr_is_noted_once() {
+        let mut app = mission_notes_app();
+        app.project_mut().collect_mission_notes();
+
+        app.project_mut().issues[0]
+            .github_pr_links
+            .push(LinkedGithubPr {
+                number: 7,
+                imported: false,
+                import_source: None,
+            });
+        let mut pr = test_pr(7, "feature");
+        pr.review = Some(crate::types::ReviewDecision::ReviewRequired);
+        app.project_mut().live.user_prs = vec![pr.clone()];
+        app.project_mut().collect_mission_notes();
+        app.project_mut().live.user_prs.clear();
+        app.project_mut().collect_mission_notes();
+        app.project_mut().live.user_prs = vec![pr];
+        app.project_mut().collect_mission_notes();
+        let due = app
+            .project_mut()
+            .take_due_mission_notes(std::time::Instant::now());
+
+        assert_eq!(written(&due), vec!["bork-2 (#7): PR opened"]);
+    }
+
+    #[test]
+    fn a_member_agent_going_idle_after_a_long_run_is_noted() {
+        let mut app = mission_notes_app();
+        let long_run = crate::mission_notes::LONG_RUN.as_secs();
+        app.project_mut().collect_mission_notes_at(0);
+
+        set_status(&mut app, 0, AgentStatus::Busy);
+        app.project_mut().collect_mission_notes_at(100);
+        set_status(&mut app, 0, AgentStatus::Idle);
+        app.project_mut()
+            .collect_mission_notes_at(100 + long_run - 1);
+        set_status(&mut app, 0, AgentStatus::Busy);
+        app.project_mut().collect_mission_notes_at(10_000);
+        set_status(&mut app, 0, AgentStatus::WaitingPermission);
+        app.project_mut().collect_mission_notes_at(10_060);
+        set_status(&mut app, 0, AgentStatus::Busy);
+        app.project_mut().collect_mission_notes_at(10_120);
+        set_status(&mut app, 0, AgentStatus::WaitingInput);
+        app.project_mut().collect_mission_notes_at(10_000 + 25 * 60);
+        let due = app
+            .project_mut()
+            .take_due_mission_notes(std::time::Instant::now());
+
+        assert_eq!(
+            written(&due),
+            vec![
+                "bork-2: agent waiting on an approval",
+                "bork-2: agent finished after 25 min",
+            ]
+        );
+    }
+
+    #[test]
     fn a_member_with_a_pr_is_named_with_its_pr_number() {
         let mut app = mission_notes_app();
         app.project_mut().issues[0]

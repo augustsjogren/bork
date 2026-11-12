@@ -12,6 +12,10 @@ use crate::app::Project;
 use crate::attention::Attention;
 use crate::types::{AgentStatus, Column, Issue, IssueKind, MergeQueueState, PrState};
 
+/// Shortest stretch of work after which an agent going idle is noted, so
+/// quick replies don't each make a note.
+pub const LONG_RUN: Duration = Duration::from_secs(5 * 60);
+
 /// Shortest gap between two nudges to one mission control.
 pub const NUDGE_INTERVAL: Duration = Duration::from_secs(3 * 60);
 
@@ -41,6 +45,9 @@ struct MemberSnapshot {
     /// one flapping between two states is noted once.
     reported: Vec<Attention>,
     merged_reported: bool,
+    /// When the card's agent was first seen working in its current run, in
+    /// unix seconds. Kept through permission prompts, which pause the run.
+    busy_since: Option<u64>,
 }
 
 /// One line for a mission's notes file.
@@ -93,6 +100,10 @@ impl Project {
     /// starting the TUI or joining a mission notes nothing. A move made while
     /// mission control is mid-turn is taken to be its own and not noted back.
     pub fn collect_mission_notes(&mut self) {
+        self.collect_mission_notes_at(crate::app::unix_now());
+    }
+
+    pub fn collect_mission_notes_at(&mut self, now: u64) {
         if !self.live.pr_poll_done {
             return;
         }
@@ -119,6 +130,7 @@ impl Project {
             };
             let mission_control_busy = self.resolved_agent_status(mission) == AgentStatus::Busy;
             let moved_by_user = self.mission_notes.user_moved.contains(&issue.id);
+            let agent_status = self.resolved_agent_status(issue);
             let first_seen = MemberSnapshot {
                 mission_id: mission.id.clone(),
                 card: card.clone(),
@@ -126,6 +138,7 @@ impl Project {
                 column,
                 reported: attention.into_iter().collect(),
                 merged_reported: merged,
+                busy_since: (agent_status == AgentStatus::Busy).then_some(now),
             };
             let Some(snapshot) = self.mission_notes.snapshots.get_mut(&issue.id) else {
                 self.mission_notes
@@ -142,7 +155,16 @@ impl Project {
                 continue;
             }
             snapshot.card = card.clone();
-            snapshot.pr_number = pr_number;
+            if snapshot.pr_number.is_none() && pr_number.is_some() {
+                notes.push((mission.id.clone(), format!("{card}: PR opened").into()));
+            }
+            snapshot.pr_number = pr_number.or(snapshot.pr_number);
+            if let Some(minutes) = finished_run(snapshot, agent_status, now) {
+                notes.push((
+                    mission.id.clone(),
+                    format!("{card}: agent finished after {minutes} min").into(),
+                ));
+            }
 
             if column != snapshot.column {
                 if !moved_by_user && !mission_control_busy {
@@ -321,6 +343,26 @@ impl Project {
             ));
         }
         out
+    }
+}
+
+/// Track the card's agent run, returning its length in minutes when a run of
+/// at least `LONG_RUN` just ended with the agent idle.
+fn finished_run(snapshot: &mut MemberSnapshot, status: AgentStatus, now: u64) -> Option<u64> {
+    match status {
+        AgentStatus::Busy => {
+            snapshot.busy_since.get_or_insert(now);
+            None
+        }
+        AgentStatus::WaitingPermission | AgentStatus::WaitingApproval => None,
+        AgentStatus::Idle | AgentStatus::WaitingInput => {
+            let ran = now.saturating_sub(snapshot.busy_since.take()?);
+            (ran >= LONG_RUN.as_secs()).then_some(ran / 60)
+        }
+        AgentStatus::Stopped | AgentStatus::Error => {
+            snapshot.busy_since = None;
+            None
+        }
     }
 }
 
