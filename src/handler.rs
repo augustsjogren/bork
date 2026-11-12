@@ -7544,7 +7544,33 @@ mod tests {
             .collect();
         assert!(rows[5].contains("Missions"));
         assert!(rows[6].contains('◆'));
-        assert!(rows[6].ends_with("0/1│"));
+        assert!(!rows[6].contains("0/1"));
+    }
+
+    #[test]
+    fn the_selected_mission_row_is_one_even_bar_and_the_box_fits_its_rows() {
+        let mut app = test_multi_app_with_mission();
+        app.project_mut().issues[0].column = Column::Done;
+        app.sidebar.as_mut().unwrap().selected = 3;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+            crate::ui::sidebar::SIDEBAR_WIDTH,
+            12,
+        ))
+        .unwrap();
+
+        terminal
+            .draw(|frame| crate::ui::sidebar::render_sidebar(frame, &app, frame.area()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let inner = 1..crate::ui::sidebar::SIDEBAR_WIDTH - 1;
+        let styles: std::collections::HashSet<_> = inner
+            .clone()
+            .map(|x| (buffer[(x, 6)].fg, buffer[(x, 6)].modifier))
+            .collect();
+        assert_eq!(styles.len(), 1, "{styles:?}");
+        assert_eq!(buffer[(0, 7)].symbol(), "└");
+        assert_eq!(buffer[(0, 8)].symbol(), " ");
     }
 
     #[test]

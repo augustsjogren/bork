@@ -116,15 +116,6 @@ fn in_mission_view(issue: &Issue, mission_id: &str) -> bool {
 /// How many of a mission's newest notes the notes popup shows.
 const MISSION_NOTES_SHOWN: usize = 50;
 
-/// A sidebar mission row's summary.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct MissionProgress {
-    pub members: usize,
-    pub done: usize,
-    /// The mission card or any member needs you.
-    pub needs_you: bool,
-}
-
 pub fn apply_git_poll(live: &mut LiveState, result: crate::external::git::GitPollResult) -> bool {
     let branches = result.branches;
     let existing = result.existing;
@@ -1312,22 +1303,6 @@ impl Project {
         self.issues
             .iter()
             .filter(|issue| issue.kind == IssueKind::Orchestrator && issue.column != Column::Done)
-    }
-
-    pub fn mission_progress(&self, mission_id: &str) -> MissionProgress {
-        let mut progress = MissionProgress::default();
-        for issue in self
-            .issues
-            .iter()
-            .filter(|issue| in_mission_view(issue, mission_id))
-        {
-            progress.needs_you |= self.needs_you(issue);
-            if crate::ops::is_member_of(issue, mission_id) {
-                progress.members += 1;
-                progress.done += usize::from(issue.column == Column::Done);
-            }
-        }
-        progress
     }
 
     fn agent_attention(&self, issue: &Issue) -> Option<Attention> {
@@ -4052,13 +4027,11 @@ mod tests {
 
         app.project_mut().issues[0].column = Column::CodeReview;
         app.project_mut().collect_mission_notes();
-        assert_eq!(app.project().unread_mission_notes("bork-1"), 1);
         let due = app.project_mut().take_due_mission_notes(now);
 
         assert_eq!(written(&due), vec!["bork-2 moved to Code Review"]);
         assert_eq!(due.nudges.len(), 1);
         assert_eq!(due.nudges[0].mission_id, "bork-1");
-        assert_eq!(app.project().unread_mission_notes("bork-1"), 0);
         assert_eq!(
             app.project_mut().take_due_mission_notes(now),
             crate::mission_notes::DueNotes::default()
@@ -4305,7 +4278,6 @@ mod tests {
                 .take_due_mission_notes(std::time::Instant::now()),
             crate::mission_notes::DueNotes::default()
         );
-        assert_eq!(app.project().unread_mission_notes("bork-1"), 0);
     }
 
     #[test]
@@ -10785,20 +10757,6 @@ mod tests {
             .collect();
 
         assert!(header.contains("\u{25c6} Test issue bork-1  "), "{header}");
-    }
-
-    #[test]
-    fn mission_progress_counts_members_and_done() {
-        let app = mission_board();
-
-        assert_eq!(
-            app.active_project().mission_progress("bork-1"),
-            MissionProgress {
-                members: 2,
-                done: 1,
-                needs_you: false,
-            }
-        );
     }
 
     #[test]

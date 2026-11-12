@@ -31,8 +31,13 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 
     let projects_height =
         (app.projects.len() as u16 + 2).min(area.height.saturating_sub(MIN_MISSIONS_HEIGHT));
-    let [projects_area, missions_area] =
-        Layout::vertical([Constraint::Length(projects_height), Constraint::Min(0)]).areas(area);
+    let missions_height = app.active_project().open_missions().count() as u16 + 2;
+    let [projects_area, missions_area, _] = Layout::vertical([
+        Constraint::Length(projects_height),
+        Constraint::Length(missions_height),
+        Constraint::Min(0),
+    ])
+    .areas(area);
     render_projects(frame, app, sidebar, border_color, projects_area);
     render_missions(frame, app, sidebar, border_color, missions_area);
 }
@@ -106,7 +111,7 @@ fn render_projects(
                 spans.push(Span::styled(" \u{1f50c}", Style::default()));
             }
 
-            ListItem::new(Line::from(spans)).style(row_style(sidebar, i))
+            row_item(spans, is_selected(sidebar, i))
         })
         .collect();
 
@@ -132,25 +137,12 @@ fn render_missions(
         .open_missions()
         .enumerate()
         .map(|(i, mission)| {
-            let progress = project.mission_progress(&mission.id);
             let is_filtered = project.is_mission_filtered(&mission.id);
+            let marker = if is_filtered { "◆" } else { " " };
+            let marker_style = Style::default().fg(styles::ACCENT);
 
-            let (marker, marker_style) = if is_filtered {
-                ("◆", Style::default().fg(styles::ACCENT))
-            } else if progress.needs_you {
-                ("●", Style::default().fg(Color::Yellow))
-            } else {
-                (" ", Style::default().fg(Color::DarkGray))
-            };
-
-            let count = match project.unread_mission_notes(&mission.id) {
-                0 => format!(" {}/{}", progress.done, progress.members),
-                unread => format!(" ✉{unread} {}/{}", progress.done, progress.members),
-            };
-            let max_title = area
-                .width
-                .saturating_sub(SIDEBAR_NAME_PADDING + count.len() as u16)
-                as usize;
+            let max_title = area.width.saturating_sub(SIDEBAR_NAME_PADDING) as usize;
+            let title = styles::truncate_to_width(&mission.title, max_title);
             let title_style = if is_filtered {
                 Style::default()
                     .fg(styles::ACCENT)
@@ -161,19 +153,28 @@ fn render_missions(
 
             let spans = vec![
                 Span::styled(format!(" {} ", marker), marker_style),
-                Span::styled(styles::truncate(&mission.title, max_title), title_style),
-                Span::styled(count, Style::default().fg(Color::DarkGray)),
+                Span::styled(title, title_style),
             ];
-            ListItem::new(Line::from(spans)).style(row_style(sidebar, first_row + i))
+            row_item(spans, is_selected(sidebar, first_row + i))
         })
         .collect();
 
     frame.render_widget(List::new(items).block(block), area);
 }
 
-fn row_style(sidebar: &SidebarState, row: usize) -> Style {
-    if sidebar.focused && row == sidebar.selected {
-        return Style::default().add_modifier(Modifier::REVERSED);
+fn is_selected(sidebar: &SidebarState, row: usize) -> bool {
+    sidebar.focused && row == sidebar.selected
+}
+
+/// A sidebar row. The selected row drops its per-part colours so the
+/// reversed highlight reads as one even bar.
+fn row_item(spans: Vec<Span<'static>>, selected: bool) -> ListItem<'static> {
+    if !selected {
+        return ListItem::new(Line::from(spans));
     }
-    Style::default()
+    let plain: Vec<Span> = spans
+        .into_iter()
+        .map(|span| Span::raw(span.content))
+        .collect();
+    ListItem::new(Line::from(plain)).style(Style::default().add_modifier(Modifier::REVERSED))
 }
