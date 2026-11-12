@@ -8,7 +8,7 @@ pub fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else if max > 3 {
         let end: String = s.chars().take(max - 3).collect();
-        format!("{}...", end)
+        format!("{}...", end.trim_end())
     } else {
         s.chars().take(max).collect()
     }
@@ -32,7 +32,7 @@ pub fn truncate_to_width(s: &str, max: usize) -> String {
         }
         end = next;
     }
-    format!("{}{ellipsis}", &s[..end])
+    format!("{}{ellipsis}", s[..end].trim_end())
 }
 
 // All colors use ANSI 16 palette so they adapt to the user's terminal theme.
@@ -278,6 +278,12 @@ mod tests {
     #[test]
     fn truncate_adds_ellipsis() {
         assert_eq!(truncate("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn truncate_drops_a_space_before_the_ellipsis() {
+        assert_eq!(truncate("Transcript lane", 14), "Transcript...");
+        assert_eq!(truncate_to_width("Transcript lane", 14), "Transcript...");
     }
 
     #[test]

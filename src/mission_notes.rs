@@ -220,15 +220,6 @@ impl Project {
         }
     }
 
-    /// Notes waiting for mission control to be nudged about them.
-    pub fn unread_mission_notes(&self, mission_id: &str) -> usize {
-        self.mission_notes
-            .unread
-            .get(mission_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
     /// Hand out every unwritten note, and a nudge for each mission whose
     /// mission control just finished a turn (its status hook reported Idle,
     /// which no approval prompt does) and wasn't nudged within
