@@ -22,7 +22,7 @@ pub struct MissionNotes {
     /// Cards the user moved with TUI keys (or archived) since the last check.
     pub user_moved: HashSet<String>,
     /// Notes not yet written to their mission's notes file, by mission id.
-    unwritten: HashMap<String, Vec<String>>,
+    unwritten: HashMap<String, Vec<Note>>,
     /// Notes mission control hasn't been nudged about yet, by mission id.
     unread: HashMap<String, usize>,
     nudged_at: HashMap<String, Instant>,
@@ -35,6 +35,7 @@ struct MemberSnapshot {
     mission_id: String,
     /// The card as notes name it, kept for the note when it leaves.
     card: String,
+    pr_number: Option<u32>,
     column: Column,
     /// Attention states already noted since the card last changed column, so
     /// one flapping between two states is noted once.
@@ -42,11 +43,41 @@ struct MemberSnapshot {
     merged_reported: bool,
 }
 
+/// One line for a mission's notes file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Note {
+    pub text: String,
+    /// A PR whose final state the writer looks up and appends, for a card
+    /// that left the board before its merge or close was seen.
+    pub pr_to_check: Option<u32>,
+}
+
+impl From<String> for Note {
+    fn from(text: String) -> Self {
+        Note {
+            text,
+            pr_to_check: None,
+        }
+    }
+}
+
+impl Note {
+    /// The note as written, given the checked PR's state when there is one.
+    pub fn resolved(&self, pr_state: Option<PrState>) -> String {
+        match pr_state {
+            Some(state) if self.pr_to_check.is_some() && state != PrState::Open => {
+                format!("{}, PR {state}", self.text)
+            }
+            _ => self.text.clone(),
+        }
+    }
+}
+
 /// What one delivery tick hands to the background writer.
 #[derive(Debug, Default, PartialEq)]
 pub struct DueNotes {
     /// Notes to append, by mission id.
-    pub writes: Vec<(String, Vec<String>)>,
+    pub writes: Vec<(String, Vec<Note>)>,
     pub nudges: Vec<Nudge>,
 }
 
@@ -67,7 +98,7 @@ impl Project {
         }
 
         let mut seen = HashSet::new();
-        let mut notes: Vec<(String, String)> = Vec::new();
+        let mut notes: Vec<(String, Note)> = Vec::new();
         for issue in &self.issues {
             let Some(mission) = crate::ops::mission_of(&self.issues, issue) else {
                 continue;
@@ -81,6 +112,7 @@ impl Project {
             let attention = self.attention_for(issue).filter(|a| a.needs_you());
             let pr = self.pr_for(issue);
             let merged = pr.is_some_and(|pr| pr.state == PrState::Merged);
+            let pr_number = pr.map(|pr| pr.number);
             let card = match pr {
                 Some(pr) => format!("{} (#{})", issue.id, pr.number),
                 None => issue.id.clone(),
@@ -90,6 +122,7 @@ impl Project {
             let first_seen = MemberSnapshot {
                 mission_id: mission.id.clone(),
                 card: card.clone(),
+                pr_number,
                 column,
                 reported: attention.into_iter().collect(),
                 merged_reported: merged,
@@ -103,16 +136,20 @@ impl Project {
             if snapshot.mission_id != mission.id {
                 notes.push((
                     snapshot.mission_id.clone(),
-                    format!("{} left the mission", snapshot.card),
+                    format!("{} left the mission", snapshot.card).into(),
                 ));
                 *snapshot = first_seen;
                 continue;
             }
             snapshot.card = card.clone();
+            snapshot.pr_number = pr_number;
 
             if column != snapshot.column {
                 if !moved_by_user && !mission_control_busy {
-                    notes.push((mission.id.clone(), format!("{card} moved to {column}")));
+                    notes.push((
+                        mission.id.clone(),
+                        format!("{card} moved to {column}").into(),
+                    ));
                 }
                 snapshot.column = column;
                 snapshot.reported.clear();
@@ -120,12 +157,12 @@ impl Project {
             if let Some(attention) = attention.filter(|a| !snapshot.reported.contains(a)) {
                 notes.push((
                     mission.id.clone(),
-                    format!("{card}: {}", attention_note(attention)),
+                    format!("{card}: {}", attention_note(attention)).into(),
                 ));
                 snapshot.reported.push(attention);
             }
             if merged && !snapshot.merged_reported {
-                notes.push((mission.id.clone(), format!("{card}: PR merged")));
+                notes.push((mission.id.clone(), format!("{card}: PR merged").into()));
                 snapshot.merged_reported = true;
             }
         }
@@ -136,9 +173,12 @@ impl Project {
                 return true;
             }
             let note = if issues.iter().any(|issue| issue.id == *id) {
-                format!("{} left the mission", snapshot.card)
+                format!("{} left the mission", snapshot.card).into()
             } else {
-                format!("{}: card removed from the board", snapshot.card)
+                Note {
+                    text: format!("{}: card removed from the board", snapshot.card),
+                    pr_to_check: snapshot.pr_number.filter(|_| !snapshot.merged_reported),
+                }
             };
             notes.push((snapshot.mission_id.clone(), note));
             false
@@ -287,9 +327,10 @@ impl Project {
 /// One line, since it is typed into the agent's input.
 pub fn nudge_text(mission_id: &str) -> String {
     format!(
-        "[bork] New notes about your cards in {}/{mission_id}/{}. Read them, record what matters in your plan and tell the user; don't act on them unless they ask.",
-        crate::backup::PLANS_DIR,
-        crate::backup::MISSION_NOTES_NAME
+        "[bork] New notes about your cards in {plans}/{mission_id}/{}. Read them, record what matters in your plan and tell the user; don't act on them unless they ask. {plans}/{mission_id}/{} always lists the mission's cards as they are now.",
+        crate::backup::MISSION_NOTES_NAME,
+        crate::backup::MISSION_CARDS_NAME,
+        plans = crate::backup::PLANS_DIR,
     )
 }
 
