@@ -113,6 +113,9 @@ fn in_mission_view(issue: &Issue, mission_id: &str) -> bool {
     issue.id.eq_ignore_ascii_case(mission_id) || crate::ops::is_member_of(issue, mission_id)
 }
 
+/// How many of a mission's newest notes the notes popup shows.
+const MISSION_NOTES_SHOWN: usize = 50;
+
 /// A sidebar mission row's summary.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct MissionProgress {
@@ -2724,6 +2727,8 @@ pub struct App {
     pub picker_tab: ImportSource,
     pub link_picker: Option<LinkPickerState>,
     pub debug_inspector_json: Option<String>,
+    /// Popup title; the inspector also shows a mission's notes.
+    pub debug_inspector_title: String,
     pub debug_inspector_scroll: usize,
     pub update_available: bool,
     /// Latest backup worker status; only warnings render.
@@ -2779,6 +2784,7 @@ impl App {
             picker_tab: ImportSource::Linear,
             link_picker: None,
             debug_inspector_json: None,
+            debug_inspector_title: String::new(),
             debug_inspector_scroll: 0,
             update_available: false,
             backup: Default::default(),
@@ -3501,7 +3507,13 @@ impl App {
     }
 
     pub fn open_debug_inspector(&mut self, json: String) {
-        self.debug_inspector_json = Some(json);
+        self.open_text_popup("Debug: Issue".into(), json);
+    }
+
+    /// Show `text` in the scrollable inspector popup under `title`.
+    pub fn open_text_popup(&mut self, title: String, text: String) {
+        self.debug_inspector_title = title;
+        self.debug_inspector_json = Some(text);
         self.debug_inspector_scroll = 0;
         self.input_mode = InputMode::DebugInspector;
     }
@@ -3629,19 +3641,10 @@ impl App {
     /// itself when a mission card is selected, otherwise the one it belongs to.
     pub fn toggle_mission_filter(&mut self, ctx: &ActionContext) {
         let query = self.search_query.clone();
-        let project = self.context_project(ctx);
-        let mission_id = if project.mission_filter.is_some() {
+        let mission_id = if self.context_project(ctx).mission_filter.is_some() {
             None
         } else {
-            let Some(issue) = project.selected_issue(&query) else {
-                return;
-            };
-            let mission = if issue.kind == IssueKind::Orchestrator {
-                Some(issue)
-            } else {
-                crate::ops::mission_of(&project.issues, issue)
-            };
-            let Some(mission) = mission else {
+            let Some(mission) = self.selected_card_mission(ctx) else {
                 self.set_warning("Card isn't in a mission");
                 return;
             };
@@ -3650,6 +3653,44 @@ impl App {
         let project = self.context_project_mut(ctx);
         project.mission_filter = mission_id;
         project.clamp_all_rows(&query);
+    }
+
+    /// Show the newest notes of the filtered mission, or else of the selected
+    /// card's mission, in the scrollable popup.
+    pub fn open_mission_notes(&mut self, ctx: &ActionContext) {
+        let project = self.context_project(ctx);
+        let filtered = project
+            .mission_filter
+            .as_deref()
+            .and_then(|id| project.issues.iter().find(|issue| issue.id == id));
+        let Some(mission) = filtered.or_else(|| self.selected_card_mission(ctx)) else {
+            self.set_warning("Card isn't in a mission");
+            return;
+        };
+        let title = format!("Notes: {}", mission.title);
+        let notes = crate::ops::recent_mission_notes(
+            &project.config.project_root,
+            &mission.id,
+            MISSION_NOTES_SHOWN,
+        );
+        match notes {
+            Ok(notes) if notes.is_empty() => self.open_text_popup(
+                title,
+                "No notes yet. bork adds one when a card in this mission changes.".into(),
+            ),
+            Ok(notes) => self.open_text_popup(title, notes.join("\n")),
+            Err(e) => self.set_warning(format!("Couldn't read the mission's notes: {e:#}")),
+        }
+    }
+
+    /// The selected card's mission: the card itself when it is a mission.
+    fn selected_card_mission(&self, ctx: &ActionContext) -> Option<&Issue> {
+        let project = self.context_project(ctx);
+        let issue = project.selected_issue(&self.search_query)?;
+        if issue.kind == IssueKind::Orchestrator {
+            return Some(issue);
+        }
+        crate::ops::mission_of(&project.issues, issue)
     }
 
     pub fn toggle_popup_width_mode(&mut self) {
@@ -10732,6 +10773,17 @@ mod tests {
 
         assert_eq!(app.active_project().mission_filter, None);
         assert!(app.message.is_some());
+    }
+
+    #[test]
+    fn mission_notes_open_for_the_selected_cards_mission() {
+        let mut app = mission_board();
+        let ctx = app.action_context();
+
+        app.open_mission_notes(&ctx);
+
+        assert_eq!(app.input_mode, InputMode::DebugInspector);
+        assert_eq!(app.debug_inspector_title, "Notes: Test issue bork-1");
     }
 
     #[test]

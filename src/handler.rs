@@ -935,6 +935,10 @@ fn handle_normal(
             app.toggle_mission_filter(ctx);
             PostAction::None
         }
+        Action::OpenMissionNotes => {
+            app.open_mission_notes(ctx);
+            PostAction::None
+        }
         Action::ToggleAttentionFilter => {
             app.toggle_attention_filter(ctx);
             PostAction::None

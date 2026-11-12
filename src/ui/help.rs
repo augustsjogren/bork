@@ -66,6 +66,7 @@ const SECTIONS: &[Section] = &[
             ("t", "Terminal"),
             ("x", "Kill session"),
             ("M", "Put card in a mission / hand off a mission"),
+            ("N", "Mission notes"),
         ],
     },
     Section {

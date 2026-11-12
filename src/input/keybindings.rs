@@ -133,6 +133,7 @@ fn map_normal_key(key: KeyEvent, swimlane_count: usize) -> Action {
 
         KeyCode::Char('f') => Action::ToggleLinkFilter,
         KeyCode::Char('F') => Action::ToggleMissionFilter,
+        KeyCode::Char('N') => Action::OpenMissionNotes,
         KeyCode::Char('!') => Action::ToggleAttentionFilter,
         KeyCode::Char('c') => Action::OpenLinkPicker,
 
@@ -549,6 +550,10 @@ mod tests {
         assert_eq!(
             map_normal_key(key(KeyCode::Char('F')), 1),
             Action::ToggleMissionFilter
+        );
+        assert_eq!(
+            map_normal_key(key(KeyCode::Char('N')), 1),
+            Action::OpenMissionNotes
         );
         assert_eq!(
             map_normal_key(key(KeyCode::Char('c')), 1),

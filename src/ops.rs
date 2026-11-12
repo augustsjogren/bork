@@ -705,6 +705,29 @@ pub fn write_mission_cards(
     )
 }
 
+/// A mission's newest `limit` notes, newest first, without the list marker.
+/// No notes file yet means no notes.
+pub fn recent_mission_notes(
+    project_root: &Path,
+    mission_id: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<String>> {
+    let path =
+        mission_context_dir(project_root, mission_id)?.join(crate::backup::MISSION_NOTES_NAME);
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(text
+        .lines()
+        .rev()
+        .filter_map(|line| line.strip_prefix("- "))
+        .take(limit)
+        .map(str::to_string)
+        .collect())
+}
+
 /// `unix_secs` as `YYYY-MM-DD HH:MM` in the machine's time zone.
 fn local_minute(unix_secs: u64) -> String {
     let time = unix_secs as libc::time_t;
@@ -2821,6 +2844,25 @@ mod tests {
         assert_eq!(
             fs::read_to_string(path).unwrap(),
             "- https://chat.example/t/1 — kickoff\n- https://docs.example/d\n"
+        );
+    }
+
+    #[test]
+    fn recent_mission_notes_are_newest_first_and_capped() {
+        let dir = setup_project();
+        let root = dir.path();
+        assert!(recent_mission_notes(root, "test-1", 2).unwrap().is_empty());
+
+        fs::create_dir_all(root.join("plans/test-1")).unwrap();
+        fs::write(
+            root.join("plans/test-1/notes.md"),
+            "- [a] first\n- [b] second\n- [c] third\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            recent_mission_notes(root, "test-1", 2).unwrap(),
+            vec!["[c] third", "[b] second"]
         );
     }
 
