@@ -132,6 +132,9 @@ pub const MISSION_LINKS_NAME: &str = "links.md";
 /// The board's notes about a mission's cards, next to its plan.
 pub const MISSION_NOTES_NAME: &str = "notes.md";
 
+/// The board's current list of a mission's cards, next to its plan.
+pub const MISSION_CARDS_NAME: &str = "cards.md";
+
 /// What a backup run covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {

@@ -248,7 +248,7 @@ fn render_footer_content(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(styles::ACCENT),
             ),
             Span::raw("  "),
-            Span::styled("Esc", styles::statusbar_key_style()),
+            Span::styled("F/Esc", styles::statusbar_key_style()),
             Span::styled(":clear", styles::statusbar_desc_style()),
         ]);
         frame.render_widget(Paragraph::new(line), area);

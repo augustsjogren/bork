@@ -83,7 +83,11 @@ const SECTIONS: &[Section] = &[
     },
     Section {
         title: "Links",
-        bindings: &[("c", "Link issues"), ("f", "Filter to linked")],
+        bindings: &[
+            ("c", "Link issues"),
+            ("f", "Filter to linked"),
+            ("F", "Filter to card's mission"),
+        ],
     },
     Section {
         title: "Other",
