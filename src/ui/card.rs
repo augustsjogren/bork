@@ -337,7 +337,7 @@ fn format_bottom_line(ctx: &CardContext, max_width: usize) -> Line<'static> {
             .collect();
         push_chip(
             &mut left,
-            format!("▤ {}", names.join(", ")),
+            format!("≡ {}", names.join(", ")),
             linear_style,
             MIN_CHIP_WIDTH,
             room,
@@ -647,7 +647,7 @@ mod tests {
 
         push_chip(
             &mut left,
-            "▤ 🚀🚀🚀🚀🚀 launch".into(),
+            "≡ 🚀🚀🚀🚀🚀 launch".into(),
             Style::default(),
             MIN_CHIP_WIDTH,
             12,
@@ -663,7 +663,7 @@ mod tests {
         let width: usize = left.iter().map(Span::width).sum();
         assert_eq!(left.len(), 3, "the second chip has no room left");
         assert!(width <= 13, "chip plus its trailing space fit: {width}");
-        assert_eq!(left[1].content, "▤ 🚀🚀...");
+        assert_eq!(left[1].content, "≡ 🚀🚀...");
     }
 
     #[test]

@@ -36,6 +36,9 @@ pub fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(styles::TEXT),
         ));
     }
+    if let Some(mission) = mission_filter_span(app) {
+        title_spans.push(mission);
+    }
     let needs_you = app.visible_attention_count();
     if needs_you > 0 {
         title_spans.push(Span::styled(
@@ -77,6 +80,26 @@ pub fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 
     let title = Line::from(title_spans);
     frame.render_widget(Paragraph::new(title), title_area);
+}
+
+/// Longest mission title the header shows before cutting it.
+const MISSION_TITLE_MAX: usize = 40;
+
+/// Header label for an active mission filter.
+fn mission_filter_span(app: &App) -> Option<Span<'static>> {
+    let project = app.active_project();
+    let mission_id = project.mission_filter.as_deref()?;
+    let label = match project.issues.iter().find(|issue| issue.id == mission_id) {
+        Some(mission) => format!(
+            " \u{25c6} {} ",
+            styles::truncate(&mission.title, MISSION_TITLE_MAX)
+        ),
+        None => format!(" \u{25c6} {mission_id} "),
+    };
+    Some(Span::styled(
+        label,
+        Style::default().fg(ratatui::style::Color::Magenta),
+    ))
 }
 
 /// Header warning when the last backup failed or is too old; nothing
@@ -234,21 +257,6 @@ fn render_footer_content(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::raw("  "),
             Span::styled("f/Esc", styles::statusbar_key_style()),
-            Span::styled(":clear", styles::statusbar_desc_style()),
-        ]);
-        frame.render_widget(Paragraph::new(line), area);
-        render_right_indicators(frame, app, area);
-        return;
-    }
-
-    if let Some(mission_id) = &app.active_project().mission_filter {
-        let line = Line::from(vec![
-            Span::styled(
-                format!(" \u{25c6} mission: {}", mission_id),
-                Style::default().fg(styles::ACCENT),
-            ),
-            Span::raw("  "),
-            Span::styled("F/Esc", styles::statusbar_key_style()),
             Span::styled(":clear", styles::statusbar_desc_style()),
         ]);
         frame.render_widget(Paragraph::new(line), area);

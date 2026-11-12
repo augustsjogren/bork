@@ -10631,6 +10631,27 @@ mod tests {
     }
 
     #[test]
+    fn the_header_names_the_filtered_mission() {
+        let mut app = mission_board();
+        app.set_mission_filter(Some("bork-1".into()));
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 1)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::status_bar::render_header(frame, &app, frame.area()))
+            .unwrap();
+        let header: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(header.contains("\u{25c6} Test issue bork-1  "), "{header}");
+    }
+
+    #[test]
     fn mission_progress_counts_members_and_done() {
         let app = mission_board();
 
