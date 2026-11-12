@@ -106,6 +106,7 @@ pub enum Action {
     DebugReset,
     DebugInspect,
     DebugInspectorClose,
+    DebugInspectorSelect,
     DebugInspectorScrollUp,
     DebugInspectorScrollDown,
     DebugInspectorScrollTop,
