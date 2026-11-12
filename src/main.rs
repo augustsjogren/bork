@@ -449,6 +449,7 @@ fn deliver_mission_notes(app: &mut app::App) {
             continue;
         }
         let project_root = project.config.project_root.clone();
+        let main_dir = project.config.main_dir();
         thread::spawn(move || {
             let mut failures = Vec::new();
             for (mission_id, cards) in &cards {
@@ -456,8 +457,15 @@ fn deliver_mission_notes(app: &mut app::App) {
                     failures.push(format!("cards for mission {mission_id} not saved: {e:#}"));
                 }
             }
+            let pr_states = final_pr_states(&main_dir, &due.writes, &mut failures);
             for (mission_id, notes) in &due.writes {
-                if let Err(e) = ops::append_mission_notes(&project_root, mission_id, notes) {
+                let notes: Vec<String> = notes
+                    .iter()
+                    .map(|note| {
+                        note.resolved(note.pr_to_check.and_then(|n| pr_states.get(&n).copied()))
+                    })
+                    .collect();
+                if let Err(e) = ops::append_mission_notes(&project_root, mission_id, &notes) {
                     failures.push(format!("notes for mission {mission_id} not saved: {e:#}"));
                 }
             }
@@ -473,6 +481,27 @@ fn deliver_mission_notes(app: &mut app::App) {
             config::append_error_log(&project_root, &failures);
         });
     }
+}
+
+/// How the PRs that notes ask about ended, by number. Empty when no note asks
+/// or GitHub can't be reached; the notes are then written without it.
+fn final_pr_states(
+    main_dir: &std::path::Path,
+    writes: &[(String, Vec<mission_notes::Note>)],
+    failures: &mut Vec<String>,
+) -> HashMap<u32, types::PrState> {
+    let numbers: Vec<u32> = writes
+        .iter()
+        .flat_map(|(_, notes)| notes.iter().filter_map(|note| note.pr_to_check))
+        .collect();
+    if numbers.is_empty() {
+        return HashMap::new();
+    }
+    let mut prs = Vec::new();
+    if let Err(e) = external::github::fetch_missing_prs(main_dir, &numbers, &mut prs) {
+        failures.push(format!("PR states for mission notes not fetched: {e}"));
+    }
+    prs.into_iter().map(|pr| (pr.number, pr.state)).collect()
 }
 
 /// Publish the identifiers every board holds without a Linear id for the

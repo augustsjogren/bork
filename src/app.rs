@@ -3995,7 +3995,7 @@ mod tests {
     fn written(due: &crate::mission_notes::DueNotes) -> Vec<String> {
         due.writes
             .iter()
-            .flat_map(|(_, notes)| notes.clone())
+            .flat_map(|(_, notes)| notes.iter().map(|note| note.text.clone()))
             .collect()
     }
 
@@ -4117,6 +4117,42 @@ mod tests {
                 "bork-2 left the mission",
                 "bork-3: card removed from the board",
             ]
+        );
+    }
+
+    #[test]
+    fn a_card_removed_with_an_unmerged_pr_asks_the_writer_how_the_pr_ended() {
+        let mut app = mission_notes_app();
+        app.project_mut().issues[0]
+            .github_pr_links
+            .push(LinkedGithubPr {
+                number: 7,
+                imported: true,
+                import_source: Some(PrImportSource::Authored),
+            });
+        app.project_mut().live.user_prs = vec![test_pr(7, "feature")];
+        app.project_mut().collect_mission_notes();
+
+        app.project_mut().issues.remove(0);
+        app.project_mut().live.user_prs.clear();
+        app.project_mut().collect_mission_notes();
+        let due = app
+            .project_mut()
+            .take_due_mission_notes(std::time::Instant::now());
+
+        let note = &due.writes[0].1[0];
+        assert_eq!(note.pr_to_check, Some(7));
+        assert_eq!(
+            note.resolved(Some(PrState::Merged)),
+            "bork-2 (#7): card removed from the board, PR merged"
+        );
+        assert_eq!(
+            note.resolved(Some(PrState::Open)),
+            "bork-2 (#7): card removed from the board"
+        );
+        assert_eq!(
+            note.resolved(None),
+            "bork-2 (#7): card removed from the board"
         );
     }
 
