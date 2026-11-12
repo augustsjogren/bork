@@ -265,6 +265,7 @@ fn map_debug_inspector_key(key: KeyEvent) -> Action {
     }
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => Action::DebugInspectorClose,
+        KeyCode::Enter => Action::DebugInspectorSelect,
         KeyCode::Char('j') | KeyCode::Down => Action::DebugInspectorScrollDown,
         KeyCode::Char('k') | KeyCode::Up => Action::DebugInspectorScrollUp,
         KeyCode::Char('g') => Action::DebugInspectorScrollTop,

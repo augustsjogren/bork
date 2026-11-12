@@ -357,6 +357,14 @@ fn finished_run(snapshot: &mut MemberSnapshot, status: AgentStatus, now: u64) ->
     }
 }
 
+/// The card a notes line is about: the first word after its timestamp, as in
+/// `[2026-11-12 14:04] bork-12 (#42): PR opened`.
+pub fn note_card_id(line: &str) -> Option<&str> {
+    let (_, rest) = line.split_once("] ")?;
+    let id = rest.split([' ', ':']).next()?;
+    (!id.is_empty()).then_some(id)
+}
+
 /// One line, since it is typed into the agent's input.
 pub fn nudge_text(mission_id: &str) -> String {
     format!(
@@ -386,5 +394,23 @@ fn attention_note(attention: Attention) -> &'static str {
         Attention::ReReview => "review requested again",
         Attention::AgentBlocked => "agent waiting on an approval",
         Attention::AgentError => "agent reported an error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::note_card_id;
+
+    #[test]
+    fn note_card_id_reads_the_first_word_after_the_timestamp() {
+        assert_eq!(
+            note_card_id("[2026-11-12 14:04] bork-12 (#42): PR opened"),
+            Some("bork-12")
+        );
+        assert_eq!(
+            note_card_id("[1700000000] bork-7: PR merge blocked"),
+            Some("bork-7")
+        );
+        assert_eq!(note_card_id("bork-7 moved to Done"), None);
     }
 }

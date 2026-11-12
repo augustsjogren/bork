@@ -2153,6 +2153,23 @@ impl Project {
         result
     }
 
+    /// Move the cursor to the card with `id`, if the board shows it.
+    pub fn select_issue(&mut self, id: &str, query: &str) -> bool {
+        for column in Column::ALL {
+            let rows = self.issues_in_column(column, query);
+            let Some(row) = rows
+                .iter()
+                .position(|(_, issue)| issue.id.eq_ignore_ascii_case(id))
+            else {
+                continue;
+            };
+            self.selected_column = column.index();
+            self.selected_row[column.index()] = row;
+            return true;
+        }
+        false
+    }
+
     pub fn clamp_all_rows(&mut self, query: &str) {
         for col in 0..4 {
             let count = self.column_count(col, query);
@@ -2705,6 +2722,9 @@ pub struct App {
     /// Popup title; the inspector also shows a mission's notes.
     pub debug_inspector_title: String,
     pub debug_inspector_scroll: usize,
+    /// The selected line while the popup shows mission notes, which Enter
+    /// follows to its card.
+    pub debug_inspector_cursor: Option<usize>,
     pub update_available: bool,
     /// Latest backup worker status; only warnings render.
     pub backup: crate::backup::schedule::BackupIndicator,
@@ -2761,6 +2781,7 @@ impl App {
             debug_inspector_json: None,
             debug_inspector_title: String::new(),
             debug_inspector_scroll: 0,
+            debug_inspector_cursor: None,
             update_available: false,
             backup: Default::default(),
             backup_manual_pending: false,
@@ -3490,12 +3511,14 @@ impl App {
         self.debug_inspector_title = title;
         self.debug_inspector_json = Some(text);
         self.debug_inspector_scroll = 0;
+        self.debug_inspector_cursor = None;
         self.input_mode = InputMode::DebugInspector;
     }
 
     pub fn close_debug_inspector(&mut self) {
         self.debug_inspector_json = None;
         self.debug_inspector_scroll = 0;
+        self.debug_inspector_cursor = None;
         self.input_mode = InputMode::Normal;
     }
 
@@ -3653,8 +3676,30 @@ impl App {
                 title,
                 "No notes yet. bork adds one when a card in this mission changes.".into(),
             ),
-            Ok(notes) => self.open_text_popup(title, notes.join("\n")),
+            Ok(notes) => {
+                self.open_text_popup(title, notes.join("\n"));
+                self.debug_inspector_cursor = Some(0);
+            }
             Err(e) => self.set_warning(format!("Couldn't read the mission's notes: {e:#}")),
+        }
+    }
+
+    /// Close the notes popup and move the board cursor to the card the
+    /// selected note is about.
+    pub fn open_card_from_note(&mut self, ctx: &ActionContext) {
+        let line = self.debug_inspector_cursor.and_then(|cursor| {
+            self.debug_inspector_json
+                .as_deref()
+                .and_then(|text| text.lines().nth(cursor))
+        });
+        let Some(card_id) = line.and_then(crate::mission_notes::note_card_id) else {
+            return;
+        };
+        let card_id = card_id.to_string();
+        self.close_debug_inspector();
+        let query = self.search_query.clone();
+        if !self.context_project_mut(ctx).select_issue(&card_id, &query) {
+            self.set_warning(format!("{card_id} isn't on the board"));
         }
     }
 
@@ -10801,6 +10846,32 @@ mod tests {
 
         assert_eq!(app.input_mode, InputMode::DebugInspector);
         assert_eq!(app.debug_inspector_title, "Notes: Test issue bork-1");
+    }
+
+    #[test]
+    fn enter_on_a_note_moves_the_cursor_to_its_card() {
+        let mut app = mission_board();
+        let ctx = app.action_context();
+        app.open_text_popup(
+            "Notes".into(),
+            "[2026-11-12 14:04] bork-1 (#7): PR opened\n[1794328049] bork-9: PR merged".into(),
+        );
+        app.debug_inspector_cursor = Some(0);
+
+        app.open_card_from_note(&ctx);
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.active_project()
+                .selected_issue("")
+                .map(|issue| issue.id.as_str()),
+            Some("bork-1")
+        );
+
+        app.open_text_popup("Notes".into(), "[1794328049] bork-9: PR merged".into());
+        app.debug_inspector_cursor = Some(0);
+        app.open_card_from_note(&ctx);
+        assert!(app.message.is_some());
     }
 
     #[test]

@@ -55,15 +55,20 @@ pub fn render_debug_inspector(frame: &mut Frame, app: &App) {
     let total = lines.len();
 
     let max_scroll = total.saturating_sub(content_height);
-    let scroll = app.debug_inspector_scroll.min(max_scroll);
+    let scroll = match app.debug_inspector_cursor {
+        Some(cursor) => cursor.saturating_sub(content_height.saturating_sub(1)),
+        None => app.debug_inspector_scroll,
+    }
+    .min(max_scroll);
 
     let visible = &lines[scroll..total.min(scroll + content_height)];
 
     for (i, line_text) in visible.iter().enumerate() {
-        let line = Line::from(Span::styled(
-            format!(" {}", line_text),
-            Style::default().fg(styles::TEXT),
-        ));
+        let mut style = Style::default().fg(styles::TEXT);
+        if app.debug_inspector_cursor == Some(scroll + i) {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        let line = Line::from(Span::styled(format!(" {}", line_text), style));
         frame.render_widget(
             Paragraph::new(line),
             Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
@@ -76,13 +81,18 @@ pub fn render_debug_inspector(frame: &mut Frame, app: &App) {
         String::new()
     };
 
-    let footer = Line::from(vec![
+    let mut footer = vec![
         Span::styled(" Esc", styles::statusbar_key_style()),
         Span::styled(":close  ", styles::statusbar_desc_style()),
         Span::styled("j/k", styles::statusbar_key_style()),
         Span::styled(":scroll", styles::statusbar_desc_style()),
-        Span::styled(scroll_indicator, styles::dim_style()),
-    ]);
+    ];
+    if app.debug_inspector_cursor.is_some() {
+        footer.push(Span::styled("  Enter", styles::statusbar_key_style()));
+        footer.push(Span::styled(":go to card", styles::statusbar_desc_style()));
+    }
+    footer.push(Span::styled(scroll_indicator, styles::dim_style()));
+    let footer = Line::from(footer);
     frame.render_widget(
         Paragraph::new(footer),
         Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),

@@ -141,7 +141,7 @@ pub fn handle_action(
             PostAction::None
         }
         InputMode::DebugInspector => {
-            handle_debug_inspector(app, action);
+            handle_debug_inspector(app, action, ctx);
             PostAction::None
         }
         InputMode::Normal => {
@@ -1481,9 +1481,22 @@ fn handle_bonk(app: &mut App, action: Action) {
     }
 }
 
-fn handle_debug_inspector(app: &mut App, action: Action) {
+fn handle_debug_inspector(app: &mut App, action: Action, ctx: &ActionContext) {
+    let last_line = app.debug_inspector_line_count().saturating_sub(1);
+    if let Some(cursor) = app.debug_inspector_cursor.as_mut() {
+        match action {
+            Action::DebugInspectorScrollDown => *cursor = (*cursor + 1).min(last_line),
+            Action::DebugInspectorScrollUp => *cursor = cursor.saturating_sub(1),
+            Action::DebugInspectorScrollTop => *cursor = 0,
+            Action::DebugInspectorScrollBottom => *cursor = last_line,
+            _ => {}
+        }
+    }
     match action {
         Action::DebugInspectorClose => app.close_debug_inspector(),
+        Action::DebugInspectorSelect => app.open_card_from_note(ctx),
+        Action::Quit => app.should_quit = true,
+        _ if app.debug_inspector_cursor.is_some() => {}
         Action::DebugInspectorScrollDown => {
             app.debug_inspector_scroll = app.debug_inspector_scroll.saturating_add(1);
         }
@@ -1494,11 +1507,7 @@ fn handle_debug_inspector(app: &mut App, action: Action) {
             app.debug_inspector_scroll = 0;
         }
         Action::DebugInspectorScrollBottom => {
-            let lines = app.debug_inspector_line_count();
-            app.debug_inspector_scroll = lines.saturating_sub(1);
-        }
-        Action::Quit => {
-            app.should_quit = true;
+            app.debug_inspector_scroll = last_line;
         }
         _ => {}
     }
