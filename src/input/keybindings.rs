@@ -39,6 +39,7 @@ pub fn map_key_to_action(
         // Rename is a one-line text field, same as search.
         InputMode::SidebarRename => map_search_key(key),
         InputMode::PruneDialog => map_prune_dialog_key(key),
+        InputMode::PrPicker => map_pr_picker_key(key),
     }
 }
 
@@ -54,6 +55,21 @@ fn map_prune_dialog_key(key: KeyEvent) -> Action {
         KeyCode::Char('n') => Action::PruneSelectAllKeep,
         KeyCode::Char('j') | KeyCode::Down => Action::PruneMoveDown,
         KeyCode::Char('k') | KeyCode::Up => Action::PruneMoveUp,
+        _ => Action::Noop,
+    }
+}
+
+fn map_pr_picker_key(key: KeyEvent) -> Action {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return Action::PrPickerCancel;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => Action::PrPickerCancel,
+        KeyCode::Enter => Action::PrPickerConfirm,
+        KeyCode::Char('o') => Action::PrPickerOpenAll,
+        KeyCode::Char(' ') => Action::PrPickerToggle,
+        KeyCode::Char('j') | KeyCode::Down => Action::PrPickerDown,
+        KeyCode::Char('k') | KeyCode::Up => Action::PrPickerUp,
         _ => Action::Noop,
     }
 }
@@ -502,6 +518,23 @@ mod tests {
             map_normal_key(key(KeyCode::Char('G')), 1),
             Action::ScrollToBottom
         );
+    }
+
+    #[test]
+    fn pr_picker_o_opens_all_and_enter_opens_selection() {
+        assert_eq!(
+            map_pr_picker_key(key(KeyCode::Char('o'))),
+            Action::PrPickerOpenAll
+        );
+        assert_eq!(
+            map_pr_picker_key(key(KeyCode::Enter)),
+            Action::PrPickerConfirm
+        );
+        assert_eq!(
+            map_pr_picker_key(key(KeyCode::Char(' '))),
+            Action::PrPickerToggle
+        );
+        assert_eq!(map_pr_picker_key(key(KeyCode::Esc)), Action::PrPickerCancel);
     }
 
     #[test]

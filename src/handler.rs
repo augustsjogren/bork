@@ -158,6 +158,10 @@ pub fn handle_action(
             handle_prune_dialog(app, action, ctx, ch.action_tx);
             PostAction::None
         }
+        InputMode::PrPicker => {
+            handle_pr_picker(app, action, ch);
+            PostAction::None
+        }
     }
 }
 
@@ -1312,8 +1316,12 @@ fn handle_normal(
                 }
                 return PostAction::None;
             }
-            let main_worktree = project.config.project_root.join("main");
+            let main_worktree = project.config.main_dir();
             let note = skipped_note(failures.len(), "PR");
+            if numbers.len() > 1 {
+                app.open_pr_picker(ctx, main_worktree, numbers, note);
+                return PostAction::None;
+            }
             spawn_open_prs(app, ch, main_worktree, numbers, note);
             PostAction::None
         }
@@ -2575,6 +2583,35 @@ fn attach_github_to_dialog(app: &mut App, _ctx: &ActionContext) {
         }
     }
     app.focus_github_picker_pr(number);
+}
+
+fn handle_pr_picker(app: &mut App, action: Action, ch: &ActionChannels<'_>) {
+    match action {
+        Action::PrPickerCancel => app.close_pr_picker(),
+        Action::PrPickerConfirm | Action::PrPickerOpenAll => {
+            let Some(picker) = app.pr_picker.take() else {
+                return;
+            };
+            app.close_pr_picker();
+            let numbers = if action == Action::PrPickerOpenAll {
+                picker.all_numbers()
+            } else {
+                picker.numbers_to_open()
+            };
+            spawn_open_prs(app, ch, picker.main_worktree, numbers, picker.note);
+        }
+        _ => {
+            let Some(picker) = app.pr_picker.as_mut() else {
+                return;
+            };
+            match action {
+                Action::PrPickerUp => picker.move_up(),
+                Action::PrPickerDown => picker.move_down(),
+                Action::PrPickerToggle => picker.toggle_current(),
+                _ => {}
+            }
+        }
+    }
 }
 
 fn handle_prune_dialog(
@@ -7389,6 +7426,41 @@ mod tests {
         let (msg, kind) = app.message.as_ref().unwrap();
         assert!(msg.contains("No PR found"));
         assert_eq!(*kind, MessageKind::Warning);
+    }
+
+    fn link_prs(app: &mut App, numbers: &[u32]) {
+        app.project_mut().issues[0].github_pr_links = numbers
+            .iter()
+            .map(|&number| LinkedGithubPr {
+                number,
+                imported: false,
+                import_source: None,
+            })
+            .collect();
+    }
+
+    #[test]
+    fn open_pr_with_several_prs_opens_the_picker() {
+        let mut app = app_with_issues();
+        link_prs(&mut app, &[11, 12]);
+
+        act(&mut app, Action::OpenPR);
+
+        assert_eq!(app.input_mode, InputMode::PrPicker);
+        let picker = app.pr_picker.as_ref().unwrap();
+        assert_eq!(picker.all_numbers(), vec![11, 12]);
+    }
+
+    #[test]
+    fn pr_picker_cancel_returns_to_the_board() {
+        let mut app = app_with_issues();
+        link_prs(&mut app, &[11, 12]);
+        act(&mut app, Action::OpenPR);
+
+        act(&mut app, Action::PrPickerCancel);
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.pr_picker.is_none());
     }
 
     #[test]

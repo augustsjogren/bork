@@ -231,6 +231,7 @@ fn render_footer_content(frame: &mut Frame, app: &App, area: Rect) {
             | InputMode::Help
             | InputMode::Bonk
             | InputMode::DebugInspector
+            | InputMode::PrPicker
     ) {
         return;
     }

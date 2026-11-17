@@ -131,5 +131,11 @@ pub enum Action {
     PruneSelectAllKeep,
     PruneConfirm,
     PruneCancel,
+    PrPickerUp,
+    PrPickerDown,
+    PrPickerToggle,
+    PrPickerConfirm,
+    PrPickerOpenAll,
+    PrPickerCancel,
     Noop,
 }

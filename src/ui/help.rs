@@ -99,7 +99,7 @@ const SECTIONS: &[Section] = &[
             ("Shift+B", "Back up now"),
             ("p", "Pull base branch in main checkout"),
             ("W", "Prune worktrees"),
-            ("o", "Open PR / stack"),
+            ("o", "Open PR / stack (oo opens all)"),
             ("s", "Expand stack or PRs"),
             ("O", "Open in Linear"),
             ("I", "Import from Linear"),
