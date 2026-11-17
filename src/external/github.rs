@@ -4,7 +4,7 @@ use std::sync::{Condvar, Mutex};
 
 use crate::types::{
     ChecksStatus, GithubStack, GithubStackPullRequest, MergeBlocker, MergeQueueState, PrState,
-    PrStatus, ReviewDecision,
+    PrStatus, ReviewDecision, StackPosition,
 };
 
 #[derive(Clone)]
@@ -34,6 +34,8 @@ macro_rules! pr_fields {
             r#"
     number url title state isDraft headRefName
     isCrossRepository
+    stack { number size }
+    stackEntry { position }
     author { login }
     reviewDecision
     mergeStateStatus
@@ -607,6 +609,8 @@ fn parse_pr_node(node: &serde_json::Value) -> Option<PrStatus> {
         })
         .unwrap_or_default();
 
+    let stack = parse_stack_position(node);
+
     Some(PrStatus {
         number,
         title,
@@ -626,6 +630,16 @@ fn parse_pr_node(node: &serde_json::Value) -> Option<PrStatus> {
         unresolved_threads_by_you: 0,
         updated_at,
         requested_reviewers,
+        stack,
+    })
+}
+
+fn parse_stack_position(node: &serde_json::Value) -> Option<StackPosition> {
+    let as_u32 = |pointer: &str| node.pointer(pointer)?.as_u64().map(|value| value as u32);
+    Some(StackPosition {
+        stack: as_u32("/stack/number")?,
+        position: as_u32("/stackEntry/position")? as usize,
+        size: as_u32("/stack/size")? as usize,
     })
 }
 
@@ -1866,6 +1880,27 @@ mod tests {
         assert!(!pr.is_draft);
     }
 
+    #[test]
+    fn test_parse_stack_position() {
+        let node =
+            make_pr_node(r#"{"stack": {"number": 7, "size": 3}, "stackEntry": {"position": 2}}"#);
+        let pr = parse_pr_node(&node).unwrap();
+        assert_eq!(
+            pr.stack,
+            Some(StackPosition {
+                stack: 7,
+                position: 2,
+                size: 3
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_pr_outside_a_stack_has_no_position() {
+        let node = make_pr_node(r#"{"stack": null, "stackEntry": null}"#);
+        assert_eq!(parse_pr_node(&node).unwrap().stack, None);
+    }
+
     // --- parse_graphql_response ---
 
     #[test]
@@ -2114,6 +2149,7 @@ mod tests {
             unresolved_threads_by_you: 0,
             updated_at: String::new(),
             requested_reviewers: Vec::new(),
+            stack: None,
         }
     }
 

@@ -3548,7 +3548,10 @@ impl App {
                     .pr_by_number(number)
                     .map(|pr| pr.title.clone())
                     .unwrap_or_default(),
-                stack: project.stack_position(number),
+                stack: project
+                    .pr_by_number(number)
+                    .and_then(|pr| pr.stack)
+                    .or_else(|| project.stack_position(number)),
                 checked: false,
             })
             .collect();
@@ -4598,6 +4601,7 @@ mod tests {
             unresolved_threads_by_you: 0,
             updated_at: String::new(),
             requested_reviewers: Vec::new(),
+            stack: None,
         }
     }
 
@@ -9303,6 +9307,7 @@ mod tests {
             unresolved_threads_by_you: 0,
             updated_at: String::new(),
             requested_reviewers: Vec::new(),
+            stack: None,
         };
         app.project_mut()
             .live

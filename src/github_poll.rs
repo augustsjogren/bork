@@ -653,6 +653,7 @@ mod tests {
             unresolved_threads_by_you: 0,
             updated_at: String::new(),
             requested_reviewers: Vec::new(),
+            stack: None,
         }
     }
 

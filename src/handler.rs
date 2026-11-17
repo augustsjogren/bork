@@ -3917,6 +3917,7 @@ mod tests {
                 unresolved_threads_by_you: 0,
                 updated_at: String::new(),
                 requested_reviewers: Vec::new(),
+                stack: None,
             };
             members.push(GithubStackPullRequest {
                 number,
@@ -7219,6 +7220,7 @@ mod tests {
             merge_queue: None,
             unresolved_threads: 0,
             requested_reviewers: Vec::new(),
+            stack: None,
         }
     }
 
@@ -8487,6 +8489,7 @@ mod tests {
             unresolved_threads_by_you: 0,
             updated_at: String::new(),
             requested_reviewers: Vec::new(),
+            stack: None,
         };
         app.projects[0]
             .live

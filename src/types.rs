@@ -1155,6 +1155,8 @@ pub struct PrStatus {
     /// `involves:` search feeding `review_requested_prs`, which keeps a PR
     /// once reviewed.
     pub requested_reviewers: Vec<String>,
+    #[serde(default)]
+    pub stack: Option<StackPosition>,
 }
 
 impl PrStatus {
@@ -1178,7 +1180,7 @@ pub struct GithubStack {
 
 /// Where a PR sits in its GitHub stack: `position` of `size`, counted from
 /// the stack's first member.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackPosition {
     pub stack: u32,
     pub position: usize,
@@ -1256,6 +1258,7 @@ mod tests {
             unresolved_threads_by_you: 0,
             updated_at: String::new(),
             requested_reviewers: Vec::new(),
+            stack: None,
         };
         let cloned = pr.clone();
         assert_eq!(cloned.number, 1);
