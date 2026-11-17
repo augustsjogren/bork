@@ -36,6 +36,10 @@ pub enum Action {
     /// Fast-forward the main checkout to its base branch's remote.
     PullBase,
     OpenPR,
+    /// Check or uncheck the highlighted PR in the stack details popup.
+    StackToggle,
+    /// Open the checked PRs in the stack details popup, or the highlighted one.
+    StackOpenPicked,
     OpenAllPRs,
     OpenLinear,
     AssignWorktree,
@@ -82,7 +86,6 @@ pub enum Action {
     LinearPickerRefresh,
     PickerSwitchTab,
     AttachStack,
-    ExpandStack,
     CloseStack,
     StackDown,
     StackUp,
@@ -131,11 +134,5 @@ pub enum Action {
     PruneSelectAllKeep,
     PruneConfirm,
     PruneCancel,
-    PrPickerUp,
-    PrPickerDown,
-    PrPickerToggle,
-    PrPickerConfirm,
-    PrPickerOpenAll,
-    PrPickerCancel,
     Noop,
 }

@@ -69,7 +69,6 @@ pub enum InputMode {
     Sidebar,
     SidebarRename,
     PruneDialog,
-    PrPicker,
 }
 
 /// Fold a git poll into live state, reporting whether anything changed.
@@ -2326,6 +2325,8 @@ pub struct StackDetailsState {
     pub project_id: ProjectId,
     pub issue_id: String,
     pub selected: usize,
+    /// PR numbers picked with Space; Enter opens these.
+    pub checked: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -2396,63 +2397,6 @@ pub enum PickerPurpose {
     /// Put `issue_ids` (the selected card, or every marked one) into the
     /// picked mission, or take them out when they are all already in it.
     Mission { issue_ids: Vec<String> },
-}
-
-/// Pick which of several PRs `o` opens. Enter opens the checked rows, or the
-/// highlighted one when none are checked; `o` opens every row.
-#[derive(Debug, Clone)]
-pub struct PrPickerState {
-    pub main_worktree: std::path::PathBuf,
-    pub rows: Vec<PrPickerRow>,
-    pub selected: usize,
-    /// Appended to the open summary, e.g. how many marked cards had no PR.
-    pub note: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct PrPickerRow {
-    pub number: u32,
-    pub title: String,
-    pub stack: Option<crate::types::StackPosition>,
-    pub checked: bool,
-}
-
-impl PrPickerState {
-    pub fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    pub fn move_down(&mut self) {
-        if self.selected + 1 < self.rows.len() {
-            self.selected += 1;
-        }
-    }
-
-    pub fn toggle_current(&mut self) {
-        if let Some(row) = self.rows.get_mut(self.selected) {
-            row.checked = !row.checked;
-        }
-    }
-
-    pub fn numbers_to_open(&self) -> Vec<u32> {
-        let checked: Vec<u32> = self
-            .rows
-            .iter()
-            .filter(|row| row.checked)
-            .map(|row| row.number)
-            .collect();
-        if !checked.is_empty() {
-            return checked;
-        }
-        self.rows
-            .get(self.selected)
-            .map(|row| vec![row.number])
-            .unwrap_or_default()
-    }
-
-    pub fn all_numbers(&self) -> Vec<u32> {
-        self.rows.iter().map(|row| row.number).collect()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -2876,7 +2820,6 @@ pub struct App {
     pub queued_force_clears: Vec<(ProjectId, String, ForceRequired)>,
     pub dialog: Option<DialogState>,
     pub prune_dialog: Option<PruneDialogState>,
-    pub pr_picker: Option<PrPickerState>,
     pub should_quit: bool,
     pub message: Option<(String, MessageKind)>,
     pub message_set_at: Option<Instant>,
@@ -2946,7 +2889,6 @@ impl App {
             queued_force_clears: Vec::new(),
             dialog: None,
             prune_dialog: None,
-            pr_picker: None,
             should_quit: false,
             message: None,
             message_set_at: None,
@@ -3529,43 +3471,6 @@ impl App {
 
     pub fn close_prune_dialog(&mut self) {
         self.prune_dialog = None;
-        self.input_mode = InputMode::Normal;
-    }
-
-    pub fn open_pr_picker(
-        &mut self,
-        ctx: &ActionContext,
-        main_worktree: std::path::PathBuf,
-        numbers: Vec<u32>,
-        note: String,
-    ) {
-        let project = self.context_project(ctx);
-        let rows = numbers
-            .into_iter()
-            .map(|number| PrPickerRow {
-                number,
-                title: project
-                    .pr_by_number(number)
-                    .map(|pr| pr.title.clone())
-                    .unwrap_or_default(),
-                stack: project
-                    .pr_by_number(number)
-                    .and_then(|pr| pr.stack)
-                    .or_else(|| project.stack_position(number)),
-                checked: false,
-            })
-            .collect();
-        self.pr_picker = Some(PrPickerState {
-            main_worktree,
-            rows,
-            selected: 0,
-            note,
-        });
-        self.input_mode = InputMode::PrPicker;
-    }
-
-    pub fn close_pr_picker(&mut self) {
-        self.pr_picker = None;
         self.input_mode = InputMode::Normal;
     }
 
@@ -10937,43 +10842,6 @@ mod tests {
             None,
             false,
         )
-    }
-
-    fn make_pr_picker(numbers: &[u32]) -> PrPickerState {
-        PrPickerState {
-            main_worktree: std::path::PathBuf::from("/x"),
-            rows: numbers
-                .iter()
-                .map(|&number| PrPickerRow {
-                    number,
-                    title: String::new(),
-                    stack: None,
-                    checked: false,
-                })
-                .collect(),
-            selected: 0,
-            note: String::new(),
-        }
-    }
-
-    #[test]
-    fn pr_picker_with_nothing_checked_opens_the_highlighted_row() {
-        let mut picker = make_pr_picker(&[1, 2, 3]);
-        picker.move_down();
-
-        assert_eq!(picker.numbers_to_open(), vec![2]);
-    }
-
-    #[test]
-    fn pr_picker_opens_only_checked_rows_when_any_are_checked() {
-        let mut picker = make_pr_picker(&[1, 2, 3]);
-        picker.toggle_current();
-        picker.move_down();
-        picker.move_down();
-        picker.toggle_current();
-
-        assert_eq!(picker.numbers_to_open(), vec![1, 3]);
-        assert_eq!(picker.all_numbers(), vec![1, 2, 3]);
     }
 
     fn make_prune_dialog(candidates: Vec<PruneCandidate>) -> PruneDialogState {

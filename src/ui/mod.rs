@@ -6,7 +6,6 @@ pub mod dialog;
 pub mod help;
 pub mod linear_picker;
 pub mod link_picker;
-pub mod pr_picker;
 pub mod prune_dialog;
 pub mod sidebar;
 pub mod stack_details;
@@ -72,7 +71,6 @@ pub fn render(frame: &mut Frame, app: &App) {
     linear_picker::render_import_picker(frame, app);
     link_picker::render_link_picker(frame, app);
     prune_dialog::render_prune_dialog(frame, app);
-    pr_picker::render_pr_picker(frame, app);
     stack_details::render(frame, app);
     help::render_help(frame, app);
     bonk_art::render_bonk(frame, app);

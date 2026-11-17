@@ -231,7 +231,6 @@ fn render_footer_content(frame: &mut Frame, app: &App, area: Rect) {
             | InputMode::Help
             | InputMode::Bonk
             | InputMode::DebugInspector
-            | InputMode::PrPicker
     ) {
         return;
     }
@@ -316,7 +315,7 @@ fn render_footer_content(frame: &mut Frame, app: &App, area: Rect) {
         && !app.active_project().live.gh_missing
         && !app.active_project().live.stacks_unsupported
     {
-        bindings.insert(0, ("s", "view stack"));
+        bindings.insert(0, ("o", "view stack"));
     }
     if swimlane_count > 1 {
         bindings.insert(0, ("Tab", "lane"));
