@@ -2374,6 +2374,11 @@ fn open_stack_details(app: &mut App, ctx: &ActionContext, issue_id: String) {
     app.input_mode = InputMode::StackDetails;
 }
 
+fn close_stack_details(app: &mut App) {
+    app.stack_details = None;
+    app.input_mode = InputMode::Normal;
+}
+
 fn handle_stack_details(app: &mut App, action: Action, ch: &ActionChannels<'_>) -> PostAction {
     let Some(details) = &app.stack_details else {
         return PostAction::None;
@@ -2392,8 +2397,7 @@ fn handle_stack_details(app: &mut App, action: Action, ch: &ActionChannels<'_>) 
         })
         .cloned();
     if action == Action::CloseStack || issue.as_ref().is_none_or(|issue| !issue.has_pr()) {
-        app.stack_details = None;
-        app.input_mode = InputMode::Normal;
+        close_stack_details(app);
         return PostAction::None;
     }
     let Some(issue) = issue else {
@@ -2449,10 +2453,20 @@ fn handle_stack_details(app: &mut App, action: Action, ch: &ActionChannels<'_>) 
             }
             let cwd = project.config.main_dir();
             spawn_open_prs(app, ch, cwd, numbers, String::new());
+            close_stack_details(app);
         }
-        Action::OpenAllPRs | Action::OpenReviewPR => {
-            return open_pr_group(app, action, &ctx, &issue, ch)
+        Action::OpenAllPRs => {
+            let opens = app
+                .context_project(&ctx)
+                .detail_open_numbers(&issue)
+                .is_ok();
+            let post = open_pr_group(app, action, &ctx, &issue, ch);
+            if opens {
+                close_stack_details(app);
+            }
+            return post;
         }
+        Action::OpenReviewPR => return open_pr_group(app, action, &ctx, &issue, ch),
         _ => {}
     }
     PostAction::None
