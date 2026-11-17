@@ -189,7 +189,7 @@ fn render_members(
             count => format!("{count} picked  "),
         };
         format!(
-            "Space pick  Enter open  o all  R review  P refresh  Esc close  {picked}{}/{}",
+            "Space pick  Enter open  o open all  R review  P refresh  Esc close  {picked}{}/{}",
             selected + 1,
             members.len()
         )
