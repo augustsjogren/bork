@@ -1,5 +1,7 @@
 use crate::app::Project;
-use crate::types::{ChecksStatus, GithubStack, GithubStackPullRequest, Issue, PrState, PrStatus};
+use crate::types::{
+    ChecksStatus, GithubStack, GithubStackPullRequest, Issue, PrState, PrStatus, StackPosition,
+};
 
 impl Project {
     pub fn linked_pr_numbers(&self) -> Vec<u32> {
@@ -19,6 +21,20 @@ impl Project {
             .github_stacks
             .iter()
             .find(|stack| stack.number == number)
+    }
+
+    pub fn stack_position(&self, number: u32) -> Option<StackPosition> {
+        self.live.github_stacks.iter().find_map(|stack| {
+            let index = stack
+                .pull_requests
+                .iter()
+                .position(|pr| pr.number == number)?;
+            Some(StackPosition {
+                stack: stack.number,
+                position: index + 1,
+                size: stack.pull_requests.len(),
+            })
+        })
     }
 
     pub fn pr_by_number(&self, number: u32) -> Option<&PrStatus> {

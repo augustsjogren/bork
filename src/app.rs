@@ -2413,6 +2413,7 @@ pub struct PrPickerState {
 pub struct PrPickerRow {
     pub number: u32,
     pub title: String,
+    pub stack: Option<crate::types::StackPosition>,
     pub checked: bool,
 }
 
@@ -3547,6 +3548,7 @@ impl App {
                     .pr_by_number(number)
                     .map(|pr| pr.title.clone())
                     .unwrap_or_default(),
+                stack: project.stack_position(number),
                 checked: false,
             })
             .collect();
@@ -10940,6 +10942,7 @@ mod tests {
                 .map(|&number| PrPickerRow {
                     number,
                     title: String::new(),
+                    stack: None,
                     checked: false,
                 })
                 .collect(),

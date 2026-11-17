@@ -1176,6 +1176,15 @@ pub struct GithubStack {
     pub pull_requests: Vec<GithubStackPullRequest>,
 }
 
+/// Where a PR sits in its GitHub stack: `position` of `size`, counted from
+/// the stack's first member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackPosition {
+    pub stack: u32,
+    pub position: usize,
+    pub size: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GithubStackPullRequest {
     pub number: u32,

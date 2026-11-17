@@ -7452,6 +7452,41 @@ mod tests {
     }
 
     #[test]
+    fn pr_picker_rows_carry_their_stack_position() {
+        let mut app = app_with_issues();
+        link_prs(&mut app, &[11, 12, 20]);
+        app.project_mut().live.github_stacks = vec![crate::types::GithubStack {
+            number: 5,
+            url: String::new(),
+            base_ref: "main".to_string(),
+            open: true,
+            pull_requests: [10, 11, 12]
+                .map(|number| crate::types::GithubStackPullRequest {
+                    number,
+                    state: PrState::Open,
+                    is_draft: false,
+                    head_branch: String::new(),
+                })
+                .to_vec(),
+        }];
+
+        act(&mut app, Action::OpenPR);
+
+        let positions: Vec<_> = app
+            .pr_picker
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| {
+                row.stack
+                    .map(|stack| (stack.stack, stack.position, stack.size))
+            })
+            .collect();
+        assert_eq!(positions, vec![Some((5, 2, 3)), Some((5, 3, 3)), None]);
+    }
+
+    #[test]
     fn pr_picker_cancel_returns_to_the_board() {
         let mut app = app_with_issues();
         link_prs(&mut app, &[11, 12]);
