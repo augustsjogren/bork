@@ -2403,14 +2403,15 @@ fn handle_stack_details(app: &mut App, action: Action, ch: &ActionChannels<'_>) 
     let Some(issue) = issue else {
         return PostAction::None;
     };
+    let member_count = app.context_project(&ctx).detail_members(&issue).len();
+    let selected = selected.min(member_count.saturating_sub(1));
     match action {
         Action::StackDown | Action::StackUp => {
-            let count = app.context_project(&ctx).detail_members(&issue).len();
             if let Some(details) = &mut app.stack_details {
                 if action == Action::StackDown {
-                    details.selected = (details.selected + 1).min(count.saturating_sub(1));
+                    details.selected = (selected + 1).min(member_count.saturating_sub(1));
                 } else {
-                    details.selected = details.selected.saturating_sub(1);
+                    details.selected = selected.saturating_sub(1);
                 }
             }
         }
@@ -7479,6 +7480,49 @@ mod tests {
         act(&mut app, Action::StackToggle);
 
         assert_eq!(app.stack_details.as_ref().unwrap().checked, vec![12]);
+    }
+
+    #[test]
+    fn stack_toggle_after_the_list_shrinks_picks_the_last_row() {
+        let mut app = app_with_issues();
+        link_prs(&mut app, &[11, 12, 13]);
+        act(&mut app, Action::OpenPR);
+        act(&mut app, Action::StackDown);
+        act(&mut app, Action::StackDown);
+        link_prs(&mut app, &[11, 12]);
+
+        act(&mut app, Action::StackToggle);
+
+        assert_eq!(app.stack_details.as_ref().unwrap().checked, vec![12]);
+    }
+
+    #[test]
+    fn a_merged_pr_stays_in_its_stack_group() {
+        let mut app = app_with_issues();
+        link_prs(&mut app, &[20, 11, 12]);
+        let mut merged = stacked_pr(11);
+        merged.state = crate::types::PrState::Merged;
+        app.project_mut().live.github_stacks = vec![crate::types::GithubStack {
+            number: 5,
+            url: String::new(),
+            base_ref: "main".to_string(),
+            open: true,
+            pull_requests: vec![merged, stacked_pr(12)],
+        }];
+        app.project_mut()
+            .live
+            .pr_statuses_by_number
+            .insert(11, test_pr_status(11, crate::types::PrState::Merged));
+        let issue = app.project().issues[0].clone();
+
+        let order: Vec<u32> = app
+            .project()
+            .linked_pr_members(&issue)
+            .iter()
+            .map(|member| member.number)
+            .collect();
+
+        assert_eq!(order, vec![11, 12, 20]);
     }
 
     #[test]
