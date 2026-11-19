@@ -293,8 +293,8 @@ impl DialogState {
         if self.linear_available && self.kind.links_linear_projects() {
             fields.push(DialogField::LinearProject);
         }
-        // Orchestrators coordinate other issues and have no PR of their own.
-        if self.github_available && self.kind != IssueKind::Orchestrator {
+        // Coordinators have no PR of their own.
+        if self.github_available && !self.kind.is_coordinator() {
             fields.push(DialogField::GithubPr);
         }
         if self.kind.is_agentic() {
@@ -329,7 +329,7 @@ impl DialogState {
         if linear_available && kind.links_linear_projects() {
             idx += 1;
         }
-        if github_available && kind != IssueKind::Orchestrator {
+        if github_available && !kind.is_coordinator() {
             idx += 1;
         }
         if kind.is_agentic() {
@@ -397,9 +397,10 @@ impl DialogState {
             // Cloud cards keep their kind; the selector never offers Cloud.
             DialogField::Kind if self.kind == IssueKind::Cloud => {}
             DialogField::Kind => {
-                const KIND_ORDER: [IssueKind; 3] = [
+                const KIND_ORDER: [IssueKind; 4] = [
                     IssueKind::Agentic,
                     IssueKind::Orchestrator,
+                    IssueKind::Mission,
                     IssueKind::NonAgentic,
                 ];
                 let idx = KIND_ORDER.iter().position(|k| *k == self.kind).unwrap_or(0);

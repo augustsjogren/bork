@@ -697,16 +697,19 @@ fn build_agent_cmd(
     // since resume paths skip the prompt entirely. Returned verbatim (no shell
     // escaping) because it's staged to a file and read back via `"$(cat ...)"`.
     let build_prompt_contents = || {
-        let default_prompt = if issue.kind == IssueKind::Orchestrator {
-            config
+        let default_prompt = match issue.kind {
+            IssueKind::Orchestrator => config
                 .orchestrator_prompt
                 .as_deref()
-                .unwrap_or(config::DEFAULT_ORCHESTRATOR_PROMPT)
-        } else {
-            config
+                .unwrap_or(config::DEFAULT_ORCHESTRATOR_PROMPT),
+            IssueKind::Mission => config
+                .mission_prompt
+                .as_deref()
+                .unwrap_or(config::DEFAULT_MISSION_PROMPT),
+            _ => config
                 .default_prompt
                 .as_deref()
-                .unwrap_or(config::DEFAULT_PROMPT_FALLBACK)
+                .unwrap_or(config::DEFAULT_PROMPT_FALLBACK),
         };
         let main_worktree = config.project_root.join("main");
         let mut prompt = build_prompt(
@@ -733,9 +736,15 @@ fn build_agent_cmd(
             ));
         }
         if issue.kind == IssueKind::Orchestrator {
+            prompt.push_str(&format!(
+                "\n\nMaintain your plan in plans/{}/planning.md, relative to the project root (the directory containing main/).",
+                issue.id
+            ));
+        }
+        if issue.kind == IssueKind::Mission {
             prompt.push_str(&mission_context(&issue.id));
         }
-        if issue.kind == IssueKind::Orchestrator && issue.has_linear() {
+        if issue.kind.is_coordinator() && issue.has_linear() {
             prompt.push_str(LINEAR_TICKET_UPDATES);
         }
         if issue.kind.links_linear_projects() && !issue.linear_projects.is_empty() {
@@ -1626,6 +1635,7 @@ mod tests {
             review_prompt: None,
             stack_review_prompt: None,
             orchestrator_prompt: None,
+            mission_prompt: None,
             setup_script: None,
             teardown_script: None,
             session_kill_script: None,
@@ -1744,11 +1754,39 @@ mod tests {
         assert!(prompt.contains("orchestrator agent"));
         assert!(prompt.contains("bork issue start"));
         assert!(prompt.contains("plans/bork-1/planning.md"));
-        assert!(prompt.contains("bork mission show bork-1"));
+        assert!(prompt.contains("bork issue list --linked <your-issue-id>"));
+        assert!(!prompt.contains("bork mission"));
         assert!(!prompt.contains("Assigned worktree"));
         assert!(!prompt.contains("attach-pr"));
         // The regular default prompt is not used for orchestrators.
         assert!(!prompt.contains("The source code is in main/."));
+    }
+
+    #[test]
+    fn mission_prompt_uses_mission_template_and_context() {
+        let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        issue.kind = crate::types::IssueKind::Mission;
+        let config = test_config();
+        let (_, _, prompt) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        let prompt = prompt.unwrap();
+        assert!(prompt.contains("You are mission control"));
+        assert!(prompt.contains("plans/bork-1/planning.md"));
+        assert!(prompt.contains("bork mission show bork-1"));
+        assert!(!prompt.contains("Assigned worktree"));
+        assert!(!prompt.contains("attach-pr"));
+    }
+
+    #[test]
+    fn mission_prompt_respects_config_override() {
+        let mut issue = test_issue(AgentKind::OpenCode, AgentMode::Build);
+        issue.kind = crate::types::IssueKind::Mission;
+        let mut config = test_config();
+        config.orchestrator_prompt = Some("Orchestrator rules".to_string());
+        config.mission_prompt = Some("Mission rules".to_string());
+        let (_, _, prompt) = agent_cmd(&issue, &config, "bork-bork-1", "/tmp/status");
+        let prompt = prompt.unwrap();
+        assert!(prompt.contains("Mission rules"));
+        assert!(!prompt.contains("Orchestrator rules"));
     }
 
     #[test]

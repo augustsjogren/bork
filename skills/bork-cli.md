@@ -167,14 +167,14 @@ bork mission notes bork-1 off           # stop notes about member cards (plans/<
 
 A mission card leads its mission. `bork issue start` run from its session adds the new issue to that mission; `--mission <id>` picks one explicitly.
 
-### Link a Linear project (missions only)
+### Link a Linear project (orchestrators and missions only)
 
 ```bash
 bork integration attach-linear-project bork-1 https://linear.app/acme/project/auth-1a2b3c4d5e6f
 bork integration detach-linear-project bork-1 1a2b3c4d5e6f
 ```
 
-Takes a project URL or slug. Fails on issues that aren't missions.
+Takes a project URL or slug. Fails on issues that aren't orchestrators or missions.
 
 ### Link a GitHub PR
 

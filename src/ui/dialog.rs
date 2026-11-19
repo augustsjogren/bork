@@ -110,7 +110,7 @@ pub fn render_dialog(frame: &mut Frame, app: &App) {
         next_row += 2;
     }
 
-    if dialog.github_available && dialog.kind != IssueKind::Orchestrator {
+    if dialog.github_available && !dialog.kind.is_coordinator() {
         let github_area = Rect::new(inner.x + 1, inner.y + next_row, inner.width - 2, 1);
         render_github_pr_field(
             frame,
@@ -472,6 +472,7 @@ fn render_kind_field(
     let options = [
         IssueKind::Agentic,
         IssueKind::Orchestrator,
+        IssueKind::Mission,
         IssueKind::NonAgentic,
     ];
 

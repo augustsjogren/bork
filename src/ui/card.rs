@@ -32,7 +32,7 @@ pub fn render_card(frame: &mut Frame, ctx: &CardContext, area: Rect, card_size: 
         return;
     }
 
-    let border_style = if ctx.issue.kind == IssueKind::Orchestrator {
+    let border_style = if ctx.issue.kind.is_coordinator() {
         styles::orchestrator_card_border_style(ctx.selected, ctx.marked)
     } else {
         styles::card_border_style(ctx.selected, ctx.marked)
@@ -48,10 +48,11 @@ pub fn render_card(frame: &mut Frame, ctx: &CardContext, area: Rect, card_size: 
     // cards get the sidebar's mission glyph so the id isn't truncated.
     let id_room = |label: &str| (area.width as usize).saturating_sub(Span::raw(label).width() + 3);
     let (type_label, type_style) = match ctx.issue.kind {
-        IssueKind::Orchestrator if id_room("· mission ") >= Span::raw(id_text.as_str()).width() => {
+        IssueKind::Orchestrator => ("· orch ", styles::orchestrator_badge_style()),
+        IssueKind::Mission if id_room("· mission ") >= Span::raw(id_text.as_str()).width() => {
             ("· mission ", styles::orchestrator_badge_style())
         }
-        IssueKind::Orchestrator => ("· ◆ ", styles::orchestrator_badge_style()),
+        IssueKind::Mission => ("· ◆ ", styles::orchestrator_badge_style()),
         IssueKind::NonAgentic => ("· todo ", styles::dim_style()),
         IssueKind::Cloud => ("· cloud ", styles::cloud_badge_style()),
         IssueKind::Agentic => ("", title_style),
@@ -65,6 +66,8 @@ pub fn render_card(frame: &mut Frame, ctx: &CardContext, area: Rect, card_size: 
     // which the ANSI 16 palette can't pick safely for both light and dark themes.
     let border_type = if ctx.selected {
         BorderType::Thick
+    } else if ctx.issue.kind == IssueKind::Mission {
+        BorderType::Double
     } else {
         BorderType::Plain
     };
@@ -89,6 +92,25 @@ pub fn render_card(frame: &mut Frame, ctx: &CardContext, area: Rect, card_size: 
     }
 }
 
+/// The card's title row. A mission's title leads with the sidebar's mission
+/// glyph.
+fn card_title_line(ctx: &CardContext, max_width: usize, title_style: Style) -> Line<'static> {
+    const MISSION_MARK: &str = "\u{25c6} ";
+    if ctx.issue.kind != IssueKind::Mission {
+        let title_text = styles::truncate(&ctx.issue.title, max_width);
+        return Line::from(highlight_spans(&title_text, ctx.search_query, title_style));
+    }
+
+    let mark_width = Span::raw(MISSION_MARK).width();
+    let title_text = styles::truncate(&ctx.issue.title, max_width.saturating_sub(mark_width));
+    let mut spans = vec![Span::styled(
+        MISSION_MARK,
+        styles::orchestrator_badge_style(),
+    )];
+    spans.extend(highlight_spans(&title_text, ctx.search_query, title_style));
+    Line::from(spans)
+}
+
 fn render_full(
     frame: &mut Frame,
     ctx: &CardContext,
@@ -96,8 +118,7 @@ fn render_full(
     max_width: usize,
     title_style: Style,
 ) {
-    let title_text = styles::truncate(&ctx.issue.title, max_width);
-    let title_line = Line::from(highlight_spans(&title_text, ctx.search_query, title_style));
+    let title_line = card_title_line(ctx, max_width, title_style);
     let status_line = format_status_line(ctx);
     let pr_lines = format_pr_rows(ctx, max_width, false);
     let bottom_line = format_bottom_line(ctx, max_width);
@@ -130,8 +151,7 @@ fn render_medium(
     max_width: usize,
     title_style: Style,
 ) {
-    let title_text = styles::truncate(&ctx.issue.title, max_width);
-    let title_line = Line::from(highlight_spans(&title_text, ctx.search_query, title_style));
+    let title_line = card_title_line(ctx, max_width, title_style);
     let status_line = format_status_line(ctx);
     let pr_lines = format_pr_rows(ctx, max_width, true);
 

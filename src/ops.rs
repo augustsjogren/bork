@@ -747,11 +747,11 @@ pub fn unlink_issues(project_root: &Path, a: &str, b: &str) -> anyhow::Result<(S
     Ok((id_a, id_b))
 }
 
-/// The mission `issue` belongs to, when its `mission_id` still names an
-/// orchestrator and `issue` isn't one itself. Ids are kept across kind
+/// The mission `issue` belongs to, when its `mission_id` still names a
+/// Mission and `issue` isn't a coordinator itself. Ids are kept across kind
 /// changes, so turning either side back restores the membership.
 pub fn mission_of<'a>(issues: &'a [Issue], issue: &Issue) -> Option<&'a Issue> {
-    if issue.kind == IssueKind::Orchestrator {
+    if issue.kind.is_coordinator() {
         return None;
     }
     find_mission(issues, issue.mission_id.as_deref()?)
@@ -763,7 +763,7 @@ pub fn is_mission(issues: &[Issue], issue_id: &str) -> bool {
 
 fn find_mission<'a>(issues: &'a [Issue], mission_id: &str) -> Option<&'a Issue> {
     let idx = find_issue_index(issues, mission_id)?;
-    Some(&issues[idx]).filter(|mission| mission.kind == IssueKind::Orchestrator)
+    Some(&issues[idx]).filter(|mission| mission.kind == IssueKind::Mission)
 }
 
 fn require_mission<'a>(issues: &'a [Issue], mission_id: &str) -> anyhow::Result<&'a Issue> {
@@ -779,7 +779,7 @@ fn in_mission(issues: &[Issue], issue: &Issue, mission_id: &str) -> bool {
 /// know `mission_id` is a mission (see `is_mission`); this skips that lookup
 /// so per-frame board filters stay linear.
 pub fn is_member_of(issue: &Issue, mission_id: &str) -> bool {
-    issue.kind != IssueKind::Orchestrator
+    !issue.kind.is_coordinator()
         && issue
             .mission_id
             .as_deref()
@@ -820,8 +820,12 @@ pub fn assign_mission_in(
     for issue_id in issue_ids {
         let idx = find_issue_index(issues, issue_id)
             .ok_or_else(|| anyhow::anyhow!("Issue '{}' not found", issue_id))?;
-        if issues[idx].kind == IssueKind::Orchestrator {
-            anyhow::bail!("{} is itself a mission", issues[idx].id);
+        if issues[idx].kind.is_coordinator() {
+            anyhow::bail!(
+                "{} is itself a {}, so it can't join a mission",
+                issues[idx].id,
+                issues[idx].kind.to_string().to_lowercase()
+            );
         }
         member_indexes.push(idx);
     }
@@ -1079,7 +1083,7 @@ pub fn restart_mission(project_root: &Path, mission_id: &str) -> anyhow::Result<
     let mut state = config::load_state(project_root);
     let config = config::load_config_from(project_root);
     let idx = find_issue_index(&state.issues, mission_id)
-        .filter(|&idx| state.issues[idx].kind == IssueKind::Orchestrator)
+        .filter(|&idx| state.issues[idx].kind == IssueKind::Mission)
         .ok_or_else(|| anyhow::anyhow!("{} is not a mission", mission_id))?;
 
     let mission = &mut state.issues[idx];
@@ -1220,7 +1224,7 @@ pub fn show_issue(project_root: &Path, issue_id: &str, json: bool) -> anyhow::Re
     if let Some(mission) = mission_of(&state.issues, issue) {
         let _ = writeln!(out, "Mission:  {} \"{}\"", mission.id, mission.title);
     }
-    if issue.kind == IssueKind::Orchestrator {
+    if issue.kind == IssueKind::Mission {
         let member_ids: Vec<&str> = mission_members(&state.issues, &issue.id)
             .map(|member| member.id.as_str())
             .collect();
@@ -1313,9 +1317,9 @@ pub fn attach_pr(project_root: &Path, issue_id: &str, pr_number: u32) -> anyhow:
 
     let issue = &mut state.issues[idx];
 
-    if issue.kind == IssueKind::Orchestrator {
+    if issue.kind.is_coordinator() {
         anyhow::bail!(
-            "Cannot attach a PR to '{}': missions have no PR links",
+            "Cannot attach a PR to '{}': orchestrator and mission issues have no PR links",
             issue.id
         );
     }
@@ -1373,7 +1377,7 @@ pub fn attach_linear_project(
 
     if !issue.kind.links_linear_projects() {
         anyhow::bail!(
-            "Cannot attach a Linear project to '{}': only missions have project links",
+            "Cannot attach a Linear project to '{}': only orchestrator and mission issues have project links",
             issue.id
         );
     }
@@ -2537,7 +2541,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("missions have no PR links"));
+            .contains("orchestrator and mission issues have no PR links"));
 
         let state = config::load_state(root);
         assert!(state.issues[0].github_pr_links.is_empty());
@@ -3141,7 +3145,7 @@ mod tests {
 
     fn mission_with_member() -> Vec<Issue> {
         let mut mission = test_issue("test-1", Column::InProgress);
-        mission.kind = IssueKind::Orchestrator;
+        mission.kind = IssueKind::Mission;
         let mut member = test_issue("test-2", Column::InProgress);
         member.mission_id = Some("test-1".into());
         vec![mission, member]
@@ -3432,7 +3436,7 @@ mod tests {
             root,
             mission_id,
             UpdateOptions {
-                kind: Some(IssueKind::Orchestrator),
+                kind: Some(IssueKind::Mission),
                 ..Default::default()
             },
         )
@@ -3479,7 +3483,7 @@ mod tests {
             root,
             "test-2",
             UpdateOptions {
-                kind: Some(IssueKind::Orchestrator),
+                kind: Some(IssueKind::Mission),
                 ..Default::default()
             },
         )
@@ -3487,7 +3491,10 @@ mod tests {
 
         let error = assign_mission(root, "test-1", &["test-2".into()]).unwrap_err();
 
-        assert_eq!(error.to_string(), "test-2 is itself a mission");
+        assert_eq!(
+            error.to_string(),
+            "test-2 is itself a mission, so it can't join a mission"
+        );
         assert!(mission_member_ids(root, "test-1").is_empty());
     }
 

@@ -47,7 +47,7 @@ pub fn remove_saved_plans(
     issue_id: &str,
     kind: IssueKind,
 ) -> anyhow::Result<()> {
-    if kind != IssueKind::Orchestrator && !crate::backup::config::project_enabled(project_root)? {
+    if kind != IssueKind::Mission && !crate::backup::config::project_enabled(project_root)? {
         return Ok(());
     }
     if !crate::backup::select::is_plain_component(issue_id) {
@@ -204,7 +204,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("links.md"), "- https://a\n").unwrap();
 
-        remove_saved_plans(root.path(), "demo-1", IssueKind::Orchestrator).unwrap();
+        remove_saved_plans(root.path(), "demo-1", IssueKind::Mission).unwrap();
 
         assert!(!dir.exists());
     }

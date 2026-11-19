@@ -716,7 +716,7 @@ fn handle_normal(
                 return PostAction::None;
             };
             let has_marks = !app.context_project(ctx).marked_issues.is_empty();
-            if has_marks || mission.kind != IssueKind::Orchestrator {
+            if has_marks || mission.kind != IssueKind::Mission {
                 app.open_mission_picker(ctx);
                 return PostAction::None;
             }
@@ -1688,8 +1688,7 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
         if let Some(idx) = idx {
             let issue = &p.issues[idx];
             let switches_agent = picker_moved && dialog.agent_kind != issue.agent_kind;
-            let crosses_boundary =
-                (issue.kind == IssueKind::Orchestrator) != (dialog.kind == IssueKind::Orchestrator);
+            let crosses_boundary = issue.kind_change_resets_session(dialog.kind);
             let forgets_live_session = dialog
                 .forgotten_sessions
                 .iter()
@@ -1762,7 +1761,7 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
             p.mark_dirty();
 
             if crossed_orchestrator_boundary {
-                match detached_worktree.filter(|_| dialog.kind == IssueKind::Orchestrator) {
+                match detached_worktree.filter(|_| dialog.kind.is_coordinator()) {
                     Some(wt) => app.set_message(format!(
                         "Updated {} (session reset; worktree {} detached, remove it manually)",
                         updated_id, wt
@@ -1826,7 +1825,7 @@ fn submit_dialog(app: &mut App, ctx: &ActionContext) {
     };
     // Created while filtered to a mission, the card joins it; otherwise the
     // filter would hide the card that was just made.
-    if issue.kind != IssueKind::Orchestrator {
+    if !issue.kind.is_coordinator() {
         issue.mission_id = p.mission_filter.clone();
     }
     p.issues.push(issue);
@@ -1867,7 +1866,7 @@ fn apply_linear_project_fields(issue: &mut Issue, dialog: &crate::app::DialogSta
 }
 
 fn apply_pr_fields(issue: &mut Issue, dialog: &crate::app::DialogState) {
-    issue.github_stack = if dialog.kind == IssueKind::Orchestrator {
+    issue.github_stack = if dialog.kind.is_coordinator() {
         None
     } else {
         dialog.github_stack
@@ -1879,8 +1878,8 @@ fn apply_pr_fields(issue: &mut Issue, dialog: &crate::app::DialogState) {
     {
         issue.stack_review_import = None;
     }
-    // Orchestrators have no PR field; drop any links left from a kind change.
-    if dialog.kind == IssueKind::Orchestrator || dialog.github_pr_cleared {
+    // Coordinators have no PR field; drop any links left from a kind change.
+    if dialog.kind.is_coordinator() || dialog.github_pr_cleared {
         issue.github_pr_links.clear();
     } else if !dialog.github_prs.is_empty() {
         issue.github_pr_links = dialog.github_prs.clone();
@@ -2272,7 +2271,7 @@ fn import_linear_project(app: &mut App, ctx: &ActionContext) {
     }
 
     let issue = Issue {
-        kind: IssueKind::Orchestrator,
+        kind: IssueKind::Mission,
         linear_projects: vec![linear_project.to_link(true)],
         ..Issue::new(
             project.next_issue_id(),
@@ -3485,8 +3484,8 @@ fn delete_confirm_message(project: &Project, issues: &[&Issue]) -> Option<String
     let subject = match issues {
         [] => return None,
         [issue] => {
-            if issue.kind == IssueKind::Orchestrator {
-                details.push("orchestrator".to_string());
+            if issue.kind.is_coordinator() {
+                details.push(issue.kind.to_string().to_lowercase());
             }
             if issue.has_links() {
                 details.push(format!("{} linked", issue.linked_issues.len()));
@@ -3858,6 +3857,7 @@ mod tests {
             review_prompt: None,
             stack_review_prompt: None,
             orchestrator_prompt: None,
+            mission_prompt: None,
             setup_script: None,
             teardown_script: None,
             session_kill_script: None,
@@ -4473,6 +4473,16 @@ mod tests {
     }
 
     fn card_rows(app: &App, issue: &Issue, width: u16, size: crate::app::CardSize) -> Vec<String> {
+        card_rows_with_selection(app, issue, width, size, true)
+    }
+
+    fn card_rows_with_selection(
+        app: &App,
+        issue: &Issue,
+        width: u16,
+        size: crate::app::CardSize,
+        selected: bool,
+    ) -> Vec<String> {
         use crate::ui::card::{render_card, CardContext, CARD_HEIGHT, CARD_HEIGHT_MEDIUM};
         let height = match size {
             crate::app::CardSize::Full => CARD_HEIGHT,
@@ -4480,7 +4490,7 @@ mod tests {
         };
         let context = CardContext {
             issue,
-            selected: true,
+            selected,
             marked: false,
             session_alive: false,
             agent_status: crate::types::AgentStatus::Idle,
@@ -4520,7 +4530,7 @@ mod tests {
     fn member_card_app() -> (App, Issue) {
         let mut app = test_app();
         let mission = Issue {
-            kind: IssueKind::Orchestrator,
+            kind: IssueKind::Mission,
             title: "Roadmap".into(),
             ..test_issue("bork-1", Column::InProgress)
         };
@@ -4594,7 +4604,7 @@ mod tests {
     fn a_narrow_mission_card_keeps_its_id_with_the_short_badge() {
         let app = stack_test_app(2);
         let issue = Issue {
-            kind: IssueKind::Orchestrator,
+            kind: IssueKind::Mission,
             ..test_issue("bork-12", Column::Todo)
         };
 
@@ -4603,6 +4613,38 @@ mod tests {
 
         assert!(narrow[0].contains(" bork-12 · ◆ "), "{}", narrow[0]);
         assert!(wide[0].contains(" bork-12 · mission "), "{}", wide[0]);
+    }
+
+    #[test]
+    fn a_mission_card_has_a_double_border_and_a_marked_title() {
+        let app = stack_test_app(2);
+        let mission = Issue {
+            kind: IssueKind::Mission,
+            ..test_issue("bork-12", Column::Todo)
+        };
+        let orchestrator = Issue {
+            kind: IssueKind::Orchestrator,
+            ..test_issue("bork-13", Column::Todo)
+        };
+
+        let unselected = |issue: &Issue| {
+            card_rows_with_selection(&app, issue, 40, crate::app::CardSize::Full, false)
+        };
+        let mission_rows = unselected(&mission);
+        let orchestrator_rows = unselected(&orchestrator);
+
+        assert!(mission_rows[0].starts_with('╔'), "{}", mission_rows[0]);
+        assert!(mission_rows[1].contains("◆ "), "{}", mission_rows[1]);
+        assert!(
+            orchestrator_rows[0].starts_with('┌'),
+            "{}",
+            orchestrator_rows[0]
+        );
+        assert!(
+            !orchestrator_rows[1].contains('◆'),
+            "{}",
+            orchestrator_rows[1]
+        );
     }
 
     #[test]
@@ -4633,7 +4675,8 @@ mod tests {
                     assert!(!footer.contains("s expand"), "{footer}");
                     assert!(!rows[2].contains('∞'));
                     let kind_label = match kind {
-                        IssueKind::Orchestrator => "mission",
+                        IssueKind::Orchestrator => "orch",
+                        IssueKind::Mission => "mission",
                         IssueKind::NonAgentic => "todo",
                         IssueKind::Agentic => "",
                         IssueKind::Cloud => "cloud",
@@ -5893,7 +5936,7 @@ mod tests {
     /// `app_with_issues` with `bork-3` as a mission; the cursor is on `bork-1`.
     fn app_with_mission_bork_3() -> App {
         let mut app = app_with_issues();
-        app.project_mut().issues[2].kind = IssueKind::Orchestrator;
+        app.project_mut().issues[2].kind = IssueKind::Mission;
         app
     }
 
@@ -5987,7 +6030,9 @@ mod tests {
     #[test]
     fn picking_another_mission_moves_the_card_there() {
         let mut app = app_with_mission_bork_3();
-        app.project_mut().issues[1].kind = IssueKind::Orchestrator;
+        app.project_mut().issues[1].kind = IssueKind::Mission;
+        // A mission tops its column, so keep it out of the selected card's.
+        app.project_mut().issues[1].column = Column::InProgress;
         app.project_mut().issues[0].mission_id = Some("bork-2".into());
 
         act(&mut app, Action::Mission);
@@ -6007,7 +6052,7 @@ mod tests {
     fn app_with_mission_session(session_id: &str) -> App {
         let mut app = app_with_issues();
         let mission = &mut app.project_mut().issues[0];
-        mission.kind = IssueKind::Orchestrator;
+        mission.kind = IssueKind::Mission;
         mission.record_session(mission.agent_kind, session_id.to_string(), None);
         app
     }
@@ -7787,6 +7832,7 @@ mod tests {
             review_prompt: None,
             stack_review_prompt: None,
             orchestrator_prompt: None,
+            mission_prompt: None,
             setup_script: None,
             teardown_script: None,
             session_kill_script: None,
@@ -7814,6 +7860,7 @@ mod tests {
                 last_prune_at: None,
                 deleted_issues: Vec::new(),
                 issues: vec![test_issue("alpha-1", Column::Todo)],
+                ..Default::default()
             },
         );
         app.add_background_project(
@@ -7822,6 +7869,7 @@ mod tests {
                 last_prune_at: None,
                 deleted_issues: Vec::new(),
                 issues: vec![test_issue("beta-1", Column::InProgress)],
+                ..Default::default()
             },
         );
         app.add_background_project(
@@ -7830,6 +7878,7 @@ mod tests {
                 last_prune_at: None,
                 deleted_issues: Vec::new(),
                 issues: vec![test_issue("gamma-1", Column::Todo)],
+                ..Default::default()
             },
         );
         app.enable_sidebar();
@@ -7917,7 +7966,7 @@ mod tests {
     fn test_multi_app_with_mission() -> App {
         let mut app = test_multi_app();
         let mut mission = test_issue("alpha-2", Column::InProgress);
-        mission.kind = IssueKind::Orchestrator;
+        mission.kind = IssueKind::Mission;
         let project = app.active_project_mut();
         project.issues[0].mission_id = Some("alpha-2".into());
         project.issues.push(mission);

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::global_config::global_config_dir;
 use crate::toml_lite::{self, Table};
-use crate::types::{AgentKind, AgentMode, DeletedIssue, Issue};
+use crate::types::{AgentKind, AgentMode, DeletedIssue, Issue, IssueKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -23,6 +23,7 @@ pub struct AppConfig {
     pub review_prompt: Option<String>,
     pub stack_review_prompt: Option<String>,
     pub orchestrator_prompt: Option<String>,
+    pub mission_prompt: Option<String>,
     /// Shell command run inside a fresh issue worktree before the agent
     /// starts (e.g. dependency install). Prepended to the agent launch
     /// command with `&&`, so the agent only starts if setup succeeds.
@@ -151,6 +152,14 @@ pub const DEFAULT_REVIEW_PROMPT: &str = "Use the tuicr-review skill to review th
 pub const DEFAULT_ORCHESTRATOR_PROMPT: &str = "You are an orchestrator agent: you coordinate work across multiple bork issues instead of writing code yourself. \
 Maintain a planning file (path given below) that holds the overarching goal, a task breakdown, and a status log; keep it updated as work progresses. \
 Break the goal into discrete issues and spawn each one with `bork issue start \"Title\" --project <name-or-path> --prompt \"Details...\"`, giving every issue a rich, self-contained prompt. \
+Issues you spawn are automatically linked back to you (pass `--link <your-issue-id>` explicitly if a spawned issue ends up unlinked), so you can review just your sub-issues with `bork issue list --linked <your-issue-id> --json`. \
+Monitor progress with `bork issue list --json` and `bork issue show <id> --json`. \
+Inspect a running agent's output with `tmux capture-pane -p -t <project>-<issue-id>`, and if an agent is heading in the wrong direction, nudge it with `tmux send-keys -t <project>-<issue-id> 'your message' Enter`. \
+Do not create a worktree for yourself; the issues you spawn get their own worktrees.";
+
+pub const DEFAULT_MISSION_PROMPT: &str = "You are mission control: you lead a mission and coordinate work across multiple bork issues instead of writing code yourself. \
+Maintain a planning file (path given below) that holds the overarching goal, a task breakdown, and a status log; keep it updated as work progresses. \
+Break the goal into discrete issues and spawn each one with `bork issue start \"Title\" --project <name-or-path> --prompt \"Details...\"`, giving every issue a rich, self-contained prompt. \
 You lead a mission: issues you spawn join it automatically (pass `--mission <your-issue-id>` if one ends up outside it), and `bork mission add <your-issue-id> <id>...` adds existing issues. Review just your mission with `bork issue list --mission <your-issue-id> --json`. \
 Monitor progress with `bork issue list --json` and `bork issue show <id> --json`. \
 Inspect a running agent's output with `tmux capture-pane -p -t <project>-<issue-id>`, and if an agent is heading in the wrong direction, nudge it with `tmux send-keys -t <project>-<issue-id> 'your message' Enter`. \
@@ -168,6 +177,7 @@ impl Default for AppConfig {
             review_prompt: None,
             stack_review_prompt: None,
             orchestrator_prompt: None,
+            mission_prompt: None,
             setup_script: None,
             teardown_script: None,
             session_kill_script: None,
@@ -198,6 +208,10 @@ pub struct AppState {
     /// Deleted issues that can still be restored, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deleted_issues: Vec<DeletedIssue>,
+    /// Whether this board has run [`split_missions_from_orchestrators`].
+    /// Every loaded state has, so every save writes `true`.
+    #[serde(default)]
+    pub missions_split: bool,
 }
 
 /// Walk up from cwd looking for a `.bork/` directory.
@@ -288,6 +302,7 @@ pub struct PartialConfig {
     pub review_prompt: Option<String>,
     pub stack_review_prompt: Option<String>,
     pub orchestrator_prompt: Option<String>,
+    pub mission_prompt: Option<String>,
     pub setup_script: Option<String>,
     pub teardown_script: Option<String>,
     pub session_kill_script: Option<String>,
@@ -356,6 +371,7 @@ impl PartialConfig {
             review_prompt: other.review_prompt.or(self.review_prompt),
             stack_review_prompt: other.stack_review_prompt.or(self.stack_review_prompt),
             orchestrator_prompt: other.orchestrator_prompt.or(self.orchestrator_prompt),
+            mission_prompt: other.mission_prompt.or(self.mission_prompt),
             setup_script: other.setup_script.or(self.setup_script),
             teardown_script: other.teardown_script.or(self.teardown_script),
             session_kill_script: other.session_kill_script.or(self.session_kill_script),
@@ -419,6 +435,7 @@ fn materialize(merged: PartialConfig, project_root: &Path) -> AppConfig {
         review_prompt: merged.review_prompt,
         stack_review_prompt: merged.stack_review_prompt,
         orchestrator_prompt: merged.orchestrator_prompt,
+        mission_prompt: merged.mission_prompt,
         setup_script: merged.setup_script,
         teardown_script: merged.teardown_script,
         session_kill_script: merged.session_kill_script,
@@ -525,6 +542,11 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
+    let mission_prompt = table
+        .get("mission_prompt")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
     let setup_script = table
         .get("setup_script")
         .and_then(|v| v.as_str())
@@ -580,6 +602,7 @@ fn partial_from_table(table: &Table) -> PartialConfig {
         review_prompt,
         stack_review_prompt,
         orchestrator_prompt,
+        mission_prompt,
         setup_script,
         teardown_script,
         session_kill_script,
@@ -648,7 +671,10 @@ pub fn load_state(project_root: &Path) -> AppState {
 pub fn try_load_state(project_root: &Path) -> Option<AppState> {
     let path = state_path(project_root);
     if !path.exists() {
-        return Some(AppState::default());
+        return Some(AppState {
+            missions_split: true,
+            ..AppState::default()
+        });
     }
     let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
@@ -678,7 +704,47 @@ pub fn try_load_state(project_root: &Path) -> Option<AppState> {
             }
         }
     }
+    if !state.missions_split {
+        split_missions_from_orchestrators(&mut state, project_root);
+    }
     Some(state)
+}
+
+/// Missions began as orchestrators. An orchestrator that shows mission use
+/// (member cards, muted mission notes, or mission files under `plans/<id>/`)
+/// becomes a Mission; the rest stay orchestrators. Runs once per board, so a
+/// mission switched back to Orchestrator later stays one.
+fn split_missions_from_orchestrators(state: &mut AppState, project_root: &Path) {
+    let led_missions: HashSet<String> = state
+        .issues
+        .iter()
+        .chain(state.deleted_issues.iter().map(|entry| &entry.issue))
+        .filter_map(|issue| issue.mission_id.as_deref())
+        .map(str::to_lowercase)
+        .collect();
+    let deleted = state
+        .deleted_issues
+        .iter_mut()
+        .map(|entry| &mut entry.issue);
+    for issue in state.issues.iter_mut().chain(deleted) {
+        let used_as_mission = led_missions.contains(&issue.id.to_lowercase())
+            || issue.mission_notes_off
+            || has_mission_files(project_root, &issue.id);
+        if issue.kind == IssueKind::Orchestrator && used_as_mission {
+            issue.kind = IssueKind::Mission;
+        }
+    }
+    state.missions_split = true;
+}
+
+fn has_mission_files(project_root: &Path, issue_id: &str) -> bool {
+    let dir = crate::backup::issue_plan_dir(project_root, issue_id);
+    [
+        crate::backup::MISSION_LINKS_NAME,
+        crate::backup::MISSION_NOTES_NAME,
+    ]
+    .iter()
+    .any(|name| dir.join(name).exists())
 }
 
 pub fn state_mtime(project_root: &Path) -> Option<SystemTime> {
@@ -1322,6 +1388,7 @@ auto_prune_check_interval = 3600
                 ),
                 deleted_at: 1_700_000_000,
             }],
+            ..Default::default()
         };
         let json = serde_json::to_string(&state).unwrap();
         let back: AppState = serde_json::from_str(&json).unwrap();
@@ -1351,6 +1418,7 @@ auto_prune_check_interval = 3600
             issues: Vec::new(),
             last_prune_at: Some(1_700_000_000),
             deleted_issues: Vec::new(),
+            ..Default::default()
         };
         let json = serde_json::to_string(&state).unwrap();
         let roundtrip: AppState = serde_json::from_str(&json).unwrap();
@@ -1539,6 +1607,7 @@ args = ["--dangerously-skip-permissions"]
             )],
             last_prune_at: None,
             deleted_issues: Vec::new(),
+            ..Default::default()
         };
         save_state(&state, dir.path()).unwrap();
         let loaded = load_state(dir.path());
@@ -1707,7 +1776,109 @@ args = ["--dangerously-skip-permissions"]
 
         save_state(&state, dir.path()).unwrap();
         let saved = fs::read_to_string(dir.path().join(".bork/state.json")).unwrap();
-        assert_eq!(saved, PRE_CLOUD_STATE);
+        let expected = PRE_CLOUD_STATE.replace(
+            "\"last_prune_at\": 1700000000",
+            "\"last_prune_at\": 1700000000,\n  \"missions_split\": true",
+        );
+        assert_eq!(saved, expected);
+    }
+
+    fn orchestrator(id: &str) -> Issue {
+        Issue {
+            kind: IssueKind::Orchestrator,
+            ..Issue::new(
+                id,
+                "Coordinate",
+                crate::types::Column::Todo,
+                AgentKind::Claude,
+            )
+        }
+    }
+
+    fn write_unsplit_state(root: &Path, issues: Vec<Issue>) {
+        let json = serde_json::to_string(&AppState {
+            issues,
+            ..Default::default()
+        })
+        .unwrap();
+        fs::write(root.join(".bork/state.json"), json).unwrap();
+    }
+
+    fn kinds(state: &AppState) -> Vec<(&str, IssueKind)> {
+        state
+            .issues
+            .iter()
+            .map(|issue| (issue.id.as_str(), issue.kind))
+            .collect()
+    }
+
+    #[test]
+    fn split_turns_orchestrators_used_as_missions_into_missions() {
+        let dir = temp_project();
+        let root = dir.path();
+        let member = Issue {
+            mission_id: Some("BORK-1".into()),
+            ..Issue::new(
+                "bork-4",
+                "Member",
+                crate::types::Column::Todo,
+                AgentKind::Claude,
+            )
+        };
+        let muted = Issue {
+            mission_notes_off: true,
+            ..orchestrator("bork-2")
+        };
+        let plans = crate::backup::issue_plan_dir(root, "bork-3");
+        fs::create_dir_all(&plans).unwrap();
+        fs::write(plans.join(crate::backup::MISSION_LINKS_NAME), "- link\n").unwrap();
+        write_unsplit_state(
+            root,
+            vec![
+                orchestrator("bork-1"),
+                muted,
+                orchestrator("bork-3"),
+                member,
+                orchestrator("bork-5"),
+            ],
+        );
+
+        let state = try_load_state(root).unwrap();
+
+        assert_eq!(
+            kinds(&state),
+            vec![
+                ("bork-1", IssueKind::Mission),
+                ("bork-2", IssueKind::Mission),
+                ("bork-3", IssueKind::Mission),
+                ("bork-4", IssueKind::Agentic),
+                ("bork-5", IssueKind::Orchestrator),
+            ]
+        );
+        assert!(state.missions_split);
+    }
+
+    #[test]
+    fn a_mission_switched_back_to_orchestrator_stays_one_after_the_split() {
+        let dir = temp_project();
+        let root = dir.path();
+        let member = Issue {
+            mission_id: Some("bork-1".into()),
+            ..Issue::new(
+                "bork-2",
+                "Member",
+                crate::types::Column::Todo,
+                AgentKind::Claude,
+            )
+        };
+        write_unsplit_state(root, vec![orchestrator("bork-1"), member]);
+        let mut state = try_load_state(root).unwrap();
+        assert!(state.issues[0].set_kind(IssueKind::Orchestrator));
+        save_state(&state, root).unwrap();
+
+        let reloaded = try_load_state(root).unwrap();
+
+        assert_eq!(reloaded.issues[0].kind, IssueKind::Orchestrator);
     }
 
     #[test]
@@ -1750,6 +1921,7 @@ args = ["--dangerously-skip-permissions"]
             issues: vec![cloud_issue.clone(), unconfirmed.clone()],
             last_prune_at: None,
             deleted_issues: Vec::new(),
+            ..Default::default()
         };
 
         save_state(&state, dir.path()).unwrap();

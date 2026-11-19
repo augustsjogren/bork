@@ -191,6 +191,10 @@ pub enum IssueKind {
     /// Coordinates work across multiple bork issues: maintains a plan file,
     /// spawns issues via `bork issue start`, and monitors their agents.
     Orchestrator,
+    /// An orchestrator that leads a mission: member cards join it through
+    /// `Issue.mission_id`, and it keeps mission context under `plans/<id>/`
+    /// so mission control can be replaced.
+    Mission,
     /// A Cursor cloud agent. Runs on Cursor's VMs, so it has no tmux session
     /// and no worktree; its state lives in `Issue.cloud`. Not agentic in the
     /// `is_agentic` sense, so no local launch path (including bulk start)
@@ -201,13 +205,19 @@ pub enum IssueKind {
 impl IssueKind {
     /// Whether this kind launches a local agent session.
     pub fn is_agentic(self) -> bool {
-        matches!(self, Self::Agentic | Self::Orchestrator)
+        matches!(self, Self::Agentic | Self::Orchestrator | Self::Mission)
+    }
+
+    /// Whether this kind coordinates other issues from the project root:
+    /// no worktree, no PR links, and a coordinator prompt.
+    pub fn is_coordinator(self) -> bool {
+        matches!(self, Self::Orchestrator | Self::Mission)
     }
 
     /// Whether this kind can link Linear projects. Single owner of the
-    /// "orchestrators only" rule the dialog, picker, CLI and prompt follow.
+    /// "coordinators only" rule the dialog, picker, CLI and prompt follow.
     pub fn links_linear_projects(self) -> bool {
-        self == Self::Orchestrator
+        self.is_coordinator()
     }
 }
 
@@ -216,7 +226,8 @@ impl fmt::Display for IssueKind {
         match self {
             Self::Agentic => write!(f, "Agentic"),
             Self::NonAgentic => write!(f, "Todo"),
-            Self::Orchestrator => write!(f, "Mission"),
+            Self::Orchestrator => write!(f, "Orchestrator"),
+            Self::Mission => write!(f, "Mission"),
             Self::Cloud => write!(f, "Cloud"),
         }
     }
@@ -594,9 +605,9 @@ pub struct Issue {
     /// Cursor cloud agent, only for `IssueKind::Cloud` issues.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<CloudAgent>,
-    /// The mission (an orchestrator issue in the same project) this issue
-    /// belongs to. Resolve it with `ops::mission_of`, which ignores an id
-    /// that no longer names an orchestrator.
+    /// The mission (a Mission issue in the same project) this issue belongs
+    /// to. Resolve it with `ops::mission_of`, which ignores an id that no
+    /// longer names a mission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mission_id: Option<String>,
 
@@ -947,7 +958,7 @@ impl Issue {
         }
         self.sessions.clear();
         self.session_dirs.clear();
-        if kind == IssueKind::Orchestrator {
+        if kind.is_coordinator() {
             self.worktree = None;
             self.github_pr_links.clear();
             self.github_stack = None;
@@ -979,13 +990,13 @@ impl Issue {
         changed
     }
 
-    /// Whether changing to `kind` crosses the orchestrator boundary, i.e. the
-    /// issue's live session must be killed before committing the change (a
-    /// re-attached session would resume the old agent with the previous
-    /// kind's prompt and cwd). Single owner of the rule `set_kind` and its
-    /// callers act on.
+    /// Whether changing to `kind` enters, leaves or switches coordinator kind,
+    /// i.e. the issue's live session must be killed before committing the
+    /// change (a re-attached session would resume the old agent with the
+    /// previous kind's prompt and cwd). Single owner of the rule `set_kind`
+    /// and its callers act on.
     pub fn kind_change_resets_session(&self, kind: IssueKind) -> bool {
-        (self.kind == IssueKind::Orchestrator) != (kind == IssueKind::Orchestrator)
+        self.kind != kind && (self.kind.is_coordinator() || kind.is_coordinator())
     }
 
     pub fn has_linear(&self) -> bool {
@@ -1330,6 +1341,7 @@ mod tests {
     fn issue_kind_is_agentic() {
         assert!(IssueKind::Agentic.is_agentic());
         assert!(IssueKind::Orchestrator.is_agentic());
+        assert!(IssueKind::Mission.is_agentic());
         assert!(!IssueKind::NonAgentic.is_agentic());
     }
 
@@ -1337,7 +1349,8 @@ mod tests {
     fn issue_kind_display() {
         assert_eq!(IssueKind::Agentic.to_string(), "Agentic");
         assert_eq!(IssueKind::NonAgentic.to_string(), "Todo");
-        assert_eq!(IssueKind::Orchestrator.to_string(), "Mission");
+        assert_eq!(IssueKind::Orchestrator.to_string(), "Orchestrator");
+        assert_eq!(IssueKind::Mission.to_string(), "Mission");
     }
 
     #[test]
@@ -1474,6 +1487,35 @@ mod tests {
         let issue = Issue::new("bork-1", "Test", Column::Todo, AgentKind::OpenCode);
 
         assert_eq!(issue.worktree_path_in(Path::new("/projects/demo")), None);
+    }
+
+    #[test]
+    fn issue_kind_mission_serializes_as_mission() {
+        let mut issue = test_issue("bork-1", Column::Todo);
+        issue.kind = IssueKind::Mission;
+        let json = serde_json::to_string(&issue).unwrap();
+        assert!(json.contains(r#""kind":"Mission""#), "got: {json}");
+        let back: Issue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, IssueKind::Mission);
+    }
+
+    #[test]
+    fn switching_between_orchestrator_and_mission_resets_the_session_only() {
+        let mut issue = issue_with_session_state(IssueKind::Orchestrator);
+        issue.worktree = None;
+        issue.github_pr_links.clear();
+        issue.linear_projects.push(LinkedLinearProject {
+            id: "p1".into(),
+            slug: "roadmap".into(),
+            name: "Roadmap".into(),
+            url: String::new(),
+            imported: false,
+        });
+
+        assert!(issue.set_kind(IssueKind::Mission));
+
+        assert!(issue.sessions.is_empty());
+        assert_eq!(issue.linear_projects.len(), 1);
     }
 
     #[test]
@@ -2012,16 +2054,20 @@ mod tests {
 
     #[test]
     fn cloud_kind_is_locked_both_ways() {
-        use IssueKind::{Agentic, Cloud, NonAgentic, Orchestrator};
+        use IssueKind::{Agentic, Cloud, Mission, NonAgentic, Orchestrator};
         let cases = [
             (Cloud, Agentic, false),
             (Cloud, NonAgentic, false),
             (Cloud, Orchestrator, false),
+            (Cloud, Mission, false),
             (Agentic, Cloud, false),
             (NonAgentic, Cloud, false),
             (Orchestrator, Cloud, false),
+            (Mission, Cloud, false),
             (Cloud, Cloud, true),
             (Agentic, Orchestrator, true),
+            (Agentic, Mission, true),
+            (Orchestrator, Mission, true),
             (Agentic, NonAgentic, true),
         ];
         for (from, to, allowed) in cases {

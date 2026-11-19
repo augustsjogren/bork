@@ -100,11 +100,15 @@ fn prune_roast(removable: usize) -> String {
     }
 }
 
-/// Stable partition: own work keeps its order at the top, review-imported
-/// cards keep theirs below. The board draws the group boundary.
-fn review_cards_last(mut items: Vec<(usize, &Issue)>) -> Vec<(usize, &Issue)> {
-    items.sort_by_key(|(_, issue)| issue.is_review_import());
+/// Stable partition: missions first, then own work, then review-imported
+/// cards, each group in board order. The board draws the review boundary.
+fn column_order(mut items: Vec<(usize, &Issue)>) -> Vec<(usize, &Issue)> {
+    items.sort_by_key(|(_, issue)| column_group(issue));
     items
+}
+
+fn column_group(issue: &Issue) -> (bool, bool) {
+    (issue.kind != IssueKind::Mission, issue.is_review_import())
 }
 
 /// The mission's own card or one of its members: what the board shows while
@@ -354,6 +358,9 @@ impl Project {
             mut issues,
             last_prune_at,
             deleted_issues,
+            // Every state a Project holds came through a load, which ran the
+            // split; `to_state` writes it back as done.
+            missions_split: _,
         } = state;
         let now = unix_now();
         for issue in &mut issues {
@@ -456,6 +463,7 @@ impl Project {
             issues: self.issues.clone(),
             last_prune_at: self.last_prune_at,
             deleted_issues: self.deleted_issues.clone(),
+            missions_split: true,
         };
         // Compile-time coverage guard: forces a build error when `AppState`
         // grows a field, so a new persisted field can't be silently dropped
@@ -464,6 +472,7 @@ impl Project {
             issues: _,
             last_prune_at: _,
             deleted_issues: _,
+            missions_split: _,
         } = &state;
         state
     }
@@ -601,11 +610,11 @@ impl Project {
             })
             .collect();
         let Some(anchor) = self.link_filter.as_deref() else {
-            return review_cards_last(matches);
+            return column_order(matches);
         };
         // Resolve the component once (cached) instead of per-issue, then filter.
         self.with_linked_component(anchor, |component| {
-            review_cards_last(
+            column_order(
                 matches
                     .into_iter()
                     .filter(|(_, issue)| component.contains(&issue.id.to_lowercase()))
@@ -909,6 +918,10 @@ impl Project {
         if target_row >= items.len() {
             return;
         }
+        // Cards move within their group; the column order keeps them there.
+        if column_group(items[row].1) != column_group(items[target_row].1) {
+            return;
+        }
         let (a, b) = (items[row].0, items[target_row].0);
         self.issues.swap(a, b);
         self.selected_row[self.selected_column] = target_row;
@@ -1176,10 +1189,8 @@ impl Project {
         let assignments: Vec<(usize, String)> = (0..self.issues.len())
             .filter(|&i| {
                 self.issues[i].worktree.is_none()
-                    && !matches!(
-                        self.issues[i].kind,
-                        IssueKind::Orchestrator | IssueKind::Cloud
-                    )
+                    && !self.issues[i].kind.is_coordinator()
+                    && self.issues[i].kind != IssueKind::Cloud
                     && !self.worktrees_in_flight.contains(&self.issues[i].id)
             })
             .filter_map(|i| self.detect_worktree(&self.issues[i]).map(|wt| (i, wt)))
@@ -1247,7 +1258,7 @@ impl Project {
         if let Some(wt) = self.worktree_for(issue) {
             return Some(wt);
         }
-        if issue.kind == IssueKind::Orchestrator {
+        if issue.kind.is_coordinator() {
             return None;
         }
         let branches = self.live.background_branches.as_ref()?;
@@ -1348,7 +1359,7 @@ impl Project {
     pub fn open_missions(&self) -> impl Iterator<Item = &Issue> {
         self.issues
             .iter()
-            .filter(|issue| issue.kind == IssueKind::Orchestrator && issue.column != Column::Done)
+            .filter(|issue| issue.kind == IssueKind::Mission && issue.column != Column::Done)
     }
 
     fn agent_attention(&self, issue: &Issue) -> Option<Attention> {
@@ -2611,7 +2622,7 @@ fn merge_deleted_issues(
 /// 3-way field merge: for each field, if file diverged from base but memory didn't,
 /// take the file value. If both diverged, memory wins.
 fn crossed_orchestrator_boundary(issue: &Issue, base: &Issue) -> bool {
-    (issue.kind == IssueKind::Orchestrator) != (base.kind == IssueKind::Orchestrator)
+    base.kind_change_resets_session(issue.kind)
 }
 
 fn merge_issue_fields(memory: &mut Issue, base: &Issue, file: &Issue) {
@@ -3832,7 +3843,7 @@ impl App {
     fn selected_card_mission(&self, ctx: &ActionContext) -> Option<&Issue> {
         let project = self.context_project(ctx);
         let issue = project.selected_issue(&self.search_query)?;
-        if issue.kind == IssueKind::Orchestrator {
+        if issue.kind == IssueKind::Mission {
             return Some(issue);
         }
         crate::ops::mission_of(&project.issues, issue)
@@ -3920,11 +3931,11 @@ impl App {
         let issue_ids: Vec<String> = project
             .target_issues(&query)
             .into_iter()
-            .filter(|issue| issue.kind != IssueKind::Orchestrator)
+            .filter(|issue| !issue.kind.is_coordinator())
             .map(|issue| issue.id.clone())
             .collect();
         if issue_ids.is_empty() {
-            self.set_warning("Missions can't join another mission");
+            self.set_warning("Orchestrators and missions can't join a mission");
             return;
         }
         self.link_picker = Some(LinkPickerState {
@@ -4039,6 +4050,7 @@ mod tests {
             review_prompt: None,
             stack_review_prompt: None,
             orchestrator_prompt: None,
+            mission_prompt: None,
             setup_script: None,
             teardown_script: None,
             session_kill_script: None,
@@ -4144,6 +4156,7 @@ mod tests {
             issues,
             last_prune_at: None,
             deleted_issues: Vec::new(),
+            ..Default::default()
         };
         App::new(test_config(), state)
     }
@@ -4152,7 +4165,7 @@ mod tests {
     /// status hook reporting Idle, and PRs polled.
     fn mission_notes_app() -> App {
         let mission = Issue {
-            kind: IssueKind::Orchestrator,
+            kind: IssueKind::Mission,
             ..test_issue("bork-1", Column::InProgress)
         };
         let member = Issue {
@@ -5133,6 +5146,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: vec![issue_linked_to_pr(&format!("{name}-1"), 7, None)],
+            ..Default::default()
         };
         let mut app = App::new(test_config_named(names[0]), state(names[0]));
         for name in &names[1..] {
@@ -7561,11 +7575,13 @@ mod tests {
     }
 
     #[test]
-    fn dialog_kind_space_cycles_three_kinds() {
+    fn dialog_kind_space_cycles_four_kinds() {
         let mut d = opencode_dialog();
         d.focused_field = 0; // Kind field
         d.push_char(' ');
         assert_eq!(d.kind, IssueKind::Orchestrator);
+        d.push_char(' ');
+        assert_eq!(d.kind, IssueKind::Mission);
         d.push_char(' ');
         assert_eq!(d.kind, IssueKind::NonAgentic);
         d.push_char(' ');
@@ -7579,9 +7595,13 @@ mod tests {
         d.push_char('l');
         assert_eq!(d.kind, IssueKind::Orchestrator);
         d.push_char('l');
+        assert_eq!(d.kind, IssueKind::Mission);
+        d.push_char('l');
         assert_eq!(d.kind, IssueKind::NonAgentic);
         d.push_char('l');
         assert_eq!(d.kind, IssueKind::NonAgentic);
+        d.push_char('h');
+        assert_eq!(d.kind, IssueKind::Mission);
         d.push_char('h');
         assert_eq!(d.kind, IssueKind::Orchestrator);
         d.push_char('h');
@@ -7757,6 +7777,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: vec![issue],
+            ..Default::default()
         };
         let app = App::new(test_config(), state);
         assert!(
@@ -7773,6 +7794,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: vec![issue],
+            ..Default::default()
         };
         let app = App::new(test_config(), state);
         assert_eq!(app.project().issues[0].done_at, Some(1000));
@@ -7786,6 +7808,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: vec![issue],
+            ..Default::default()
         };
         let app = App::new(test_config(), state);
         assert_eq!(app.project().issues[0].done_at, None);
@@ -8506,6 +8529,52 @@ mod tests {
             .map(|(_, issue)| issue.id.as_str())
             .collect();
         assert_eq!(ids, vec!["bork-1", "bork-3", "bork-2"]);
+    }
+
+    #[test]
+    fn missions_sort_to_the_top_of_their_column() {
+        let mut review = issue_linked_to_pr("bork-1", 7, Some(PrImportSource::ReviewRequested));
+        review.column = Column::Todo;
+        let own = test_issue("bork-2", Column::Todo);
+        let mission = Issue {
+            kind: IssueKind::Mission,
+            ..test_issue("bork-3", Column::Todo)
+        };
+        let orchestrator = Issue {
+            kind: IssueKind::Orchestrator,
+            ..test_issue("bork-4", Column::Todo)
+        };
+        let app = test_app(vec![review, own, mission, orchestrator]);
+
+        let ids: Vec<&str> = app
+            .project()
+            .issues_in_column(Column::Todo, "")
+            .into_iter()
+            .map(|(_, issue)| issue.id.as_str())
+            .collect();
+
+        assert_eq!(ids, vec!["bork-3", "bork-2", "bork-4", "bork-1"]);
+    }
+
+    #[test]
+    fn a_card_does_not_move_up_past_a_mission() {
+        let mission = Issue {
+            kind: IssueKind::Mission,
+            ..test_issue("bork-1", Column::Todo)
+        };
+        let mut app = test_app(vec![mission, test_issue("bork-2", Column::Todo)]);
+        app.project_mut().selected_row[0] = 1;
+
+        app.project_mut().move_issue_up("");
+
+        let ids: Vec<&str> = app
+            .project()
+            .issues_in_column(Column::Todo, "")
+            .into_iter()
+            .map(|(_, issue)| issue.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["bork-1", "bork-2"]);
+        assert_eq!(app.project().selected_row[0], 1);
     }
 
     #[test]
@@ -9270,6 +9339,7 @@ mod tests {
                     test_issue_titled("alpha-1", "Fix login", Column::Todo),
                     test_issue_titled("alpha-2", "Add feature", Column::Todo),
                 ],
+                ..Default::default()
             },
         );
         app.add_background_project(
@@ -9281,6 +9351,7 @@ mod tests {
                     test_issue_titled("beta-1", "Fix crash", Column::Todo),
                     test_issue_titled("beta-2", "Dark mode", Column::Todo),
                 ],
+                ..Default::default()
             },
         );
         app.enable_sidebar();
@@ -9333,6 +9404,7 @@ mod tests {
                     test_issue_titled("alpha-1", "Fix login", Column::Todo),
                     test_issue_titled("alpha-2", "Add feature", Column::Todo),
                 ],
+                ..Default::default()
             },
         );
         app.add_background_project(
@@ -9344,6 +9416,7 @@ mod tests {
                     test_issue_titled("beta-1", "Fix crash", Column::Todo),
                     test_issue_titled("beta-2", "Dark mode", Column::Todo),
                 ],
+                ..Default::default()
             },
         );
         app.enable_sidebar();
@@ -9376,6 +9449,7 @@ mod tests {
                     test_issue_titled("alpha-1", "Fix login", Column::Todo),
                     test_issue_titled("alpha-2", "Add feature", Column::Todo),
                 ],
+                ..Default::default()
             },
         );
         app.add_background_project(
@@ -9384,6 +9458,7 @@ mod tests {
                 last_prune_at: None,
                 deleted_issues: Vec::new(),
                 issues: vec![test_issue_titled("beta-1", "Fix crash", Column::Todo)],
+                ..Default::default()
             },
         );
         app.enable_sidebar();
@@ -9416,6 +9491,7 @@ mod tests {
                     test_issue_titled("alpha-1", "Fix login", Column::Todo),
                     test_issue_titled("alpha-2", "Add feature", Column::Todo),
                 ],
+                ..Default::default()
             },
         );
         app.add_background_project(
@@ -9424,6 +9500,7 @@ mod tests {
                 last_prune_at: None,
                 deleted_issues: Vec::new(),
                 issues: vec![test_issue_titled("beta-1", "Fix crash", Column::Todo)],
+                ..Default::default()
             },
         );
         app.enable_sidebar();
@@ -9677,6 +9754,7 @@ mod tests {
             review_prompt: None,
             stack_review_prompt: None,
             orchestrator_prompt: None,
+            mission_prompt: None,
             setup_script: None,
             teardown_script: None,
             session_kill_script: None,
@@ -9704,6 +9782,7 @@ mod tests {
                 last_prune_at: None,
                 deleted_issues: Vec::new(),
                 issues: vec![test_issue("alpha-1", Column::Todo)],
+                ..Default::default()
             },
         );
         app.add_background_project(
@@ -9715,6 +9794,7 @@ mod tests {
                     test_issue("beta-1", Column::Todo),
                     test_issue("beta-2", Column::InProgress),
                 ],
+                ..Default::default()
             },
         );
         app.add_background_project(
@@ -9723,6 +9803,7 @@ mod tests {
                 last_prune_at: None,
                 deleted_issues: Vec::new(),
                 issues: vec![test_issue("gamma-1", Column::CodeReview)],
+                ..Default::default()
             },
         );
         app.enable_sidebar();
@@ -10443,6 +10524,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: issues.clone(),
+            ..Default::default()
         };
         let mut project = Project::new(test_config(), state);
         // base_issues is set by new(), but last_state_mtime will be None
@@ -10461,6 +10543,7 @@ mod tests {
             last_prune_at: Some(200),
             deleted_issues: Vec::new(),
             issues: vec![],
+            ..Default::default()
         };
         project.merge_external_state(file_state);
         assert_eq!(project.last_prune_at, Some(200));
@@ -10479,6 +10562,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: vec![test_issue("b", Column::InProgress)],
+            ..Default::default()
         };
         project.merge_external_state(file_state);
 
@@ -10499,6 +10583,7 @@ mod tests {
                 test_issue("a", Column::Todo),
                 test_issue("b", Column::InProgress),
             ],
+            ..Default::default()
         };
         project.merge_external_state(file_state);
 
@@ -10520,6 +10605,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: vec![test_issue("a", Column::Todo)],
+            ..Default::default()
         };
         project.merge_external_state(file_state);
 
@@ -10543,6 +10629,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: vec![file_issue],
+            ..Default::default()
         };
         project.merge_external_state(file_state);
 
@@ -10570,6 +10657,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: vec![test_issue("a", Column::Todo)],
+            ..Default::default()
         };
         project.merge_external_state(file_state);
 
@@ -10603,6 +10691,7 @@ mod tests {
                 test_issue("b", Column::Todo),
                 test_issue("c", Column::Todo),
             ],
+            ..Default::default()
         };
         project.merge_external_state(file_state);
 
@@ -10662,6 +10751,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: vec![test_issue("a", Column::Todo)],
+            ..Default::default()
         };
         project.merge_external_state(file_state);
 
@@ -10690,6 +10780,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: vec![test_issue("new", Column::Todo)],
+            ..Default::default()
         };
         project.merge_external_state(file_state);
 
@@ -10709,6 +10800,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: issues.clone(),
+            ..Default::default()
         };
         project.merge_external_state(file_state);
 
@@ -10728,6 +10820,7 @@ mod tests {
             last_prune_at: None,
             deleted_issues: Vec::new(),
             issues: new_issues.clone(),
+            ..Default::default()
         };
         project.merge_external_state(file_state);
 
@@ -11107,7 +11200,7 @@ mod tests {
     /// `bork-4` is outside it.
     fn mission_board() -> App {
         let mut mission = test_issue("bork-1", Column::InProgress);
-        mission.kind = IssueKind::Orchestrator;
+        mission.kind = IssueKind::Mission;
         let mut done_member = test_issue("bork-2", Column::Done);
         done_member.mission_id = Some("bork-1".into());
         let mut member = test_issue("bork-3", Column::Todo);

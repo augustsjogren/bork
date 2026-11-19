@@ -185,7 +185,7 @@ fn render_column(
         y_offset += 1;
     }
 
-    // Own work sorts above review-imported cards (`review_cards_last`); a
+    // Own work sorts above review-imported cards (`column_order`); a
     // one-row rule marks the boundary. `compute_viewport` already reserved
     // room for it against the overflow guard below when it could.
     let review_divider_before =

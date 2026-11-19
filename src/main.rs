@@ -754,13 +754,16 @@ Start here (for AI agents):
     --model   agent's default unless set             # e.g. sonnet, opus, haiku
                                                      # (Claude); passed through
                                                      # as --model <value>
-    --kind    agentic (default), todo, mission       # todo: no agent;
-                                                     # mission: mission control
-                                                     # leads cards from the
-                                                     # project root
+    --kind    agentic (default), todo, orchestrator, # todo: no agent;
+              mission                                # orchestrator: plans,
+                                                     # spawns + monitors issues
+                                                     # from the project root;
+                                                     # mission: an orchestrator
+                                                     # that leads member cards
 
   Defaults + allowlist live in ~/.config/bork/config.toml
-  (default_agent, default_mode, agents = [...], orchestrator_prompt);
+  (default_agent, default_mode, agents = [...], orchestrator_prompt,
+  mission_prompt);
   per-project override in .bork/config.toml."
     )
 }
@@ -1061,7 +1064,7 @@ enum IssueCommand {
         #[arg(long)]
         prompt: Option<String>,
 
-        /// Issue kind (agentic, todo, mission)
+        /// Issue kind (agentic, todo, orchestrator, mission)
         #[arg(long, value_parser = parse_issue_kind)]
         kind: Option<IssueKind>,
     },
@@ -1151,7 +1154,7 @@ enum IssueCommand {
         #[arg(long)]
         prompt: Option<String>,
 
-        /// Change issue kind (agentic, todo, mission)
+        /// Change issue kind (agentic, todo, orchestrator, mission)
         #[arg(long, value_parser = parse_issue_kind)]
         kind: Option<IssueKind>,
 
@@ -1283,7 +1286,7 @@ enum IntegrationCommand {
         pr_number: u32,
     },
 
-    /// Link a Linear project to a mission
+    /// Link a Linear project to an orchestrator or mission issue
     AttachLinearProject {
         /// Issue ID (e.g. bork-1)
         issue_id: String,
@@ -1426,9 +1429,10 @@ fn parse_issue_kind(s: &str) -> Result<IssueKind, String> {
     match s.to_lowercase().as_str() {
         "agentic" => Ok(IssueKind::Agentic),
         "todo" | "non-agentic" | "nonagentic" => Ok(IssueKind::NonAgentic),
-        "mission" | "orchestrator" | "orch" | "planner" => Ok(IssueKind::Orchestrator),
+        "orchestrator" | "orch" | "planner" => Ok(IssueKind::Orchestrator),
+        "mission" => Ok(IssueKind::Mission),
         _ => Err(format!(
-            "Unknown issue kind '{}'. Options: agentic, todo, mission",
+            "Unknown issue kind '{}'. Options: agentic, todo, orchestrator, mission",
             s
         )),
     }
@@ -1875,6 +1879,7 @@ const CONFIG_KEYS: &[(&str, ConfigKeyKind)] = &[
     ("review_prompt", ConfigKeyKind::Str),
     ("stack_review_prompt", ConfigKeyKind::Str),
     ("orchestrator_prompt", ConfigKeyKind::Str),
+    ("mission_prompt", ConfigKeyKind::Str),
 ];
 
 fn config_key_kind(key: &str) -> Option<ConfigKeyKind> {
@@ -1937,6 +1942,7 @@ fn resolved_config_value(config: &config::AppConfig, key: &str) -> Option<String
         "review_prompt" => Some(config.review_prompt.clone().unwrap_or_default()),
         "stack_review_prompt" => Some(config.stack_review_prompt.clone().unwrap_or_default()),
         "orchestrator_prompt" => Some(config.orchestrator_prompt.clone().unwrap_or_default()),
+        "mission_prompt" => Some(config.mission_prompt.clone().unwrap_or_default()),
         _ => None,
     }
 }
@@ -4277,7 +4283,7 @@ mod tests {
             parse_issue_kind("orchestrator"),
             Ok(IssueKind::Orchestrator)
         );
-        assert_eq!(parse_issue_kind("mission"), Ok(IssueKind::Orchestrator));
+        assert_eq!(parse_issue_kind("mission"), Ok(IssueKind::Mission));
         assert_eq!(parse_issue_kind("orch"), Ok(IssueKind::Orchestrator));
         assert_eq!(parse_issue_kind("planner"), Ok(IssueKind::Orchestrator));
         assert_eq!(parse_issue_kind("todo"), Ok(IssueKind::NonAgentic));

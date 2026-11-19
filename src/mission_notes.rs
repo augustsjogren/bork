@@ -227,7 +227,7 @@ impl Project {
     pub fn take_due_mission_notes(&mut self, now: Instant) -> DueNotes {
         let live_mission = |id: &str| {
             self.issues.iter().find(|issue| {
-                issue.id == id && issue.kind == IssueKind::Orchestrator && !issue.mission_notes_off
+                issue.id == id && issue.kind == IssueKind::Mission && !issue.mission_notes_off
             })
         };
         let gone: Vec<String> = self

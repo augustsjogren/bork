@@ -156,7 +156,7 @@ bork --help
 | `bork mission notes <mission-id> on\|off` | Turn the TUI's notes about member cards on or off. When on (the default), the TUI appends a note to the mission's `plans/<id>/notes.md` when a member card moves column (unless you or a busy mission control moved it), starts needing someone (checks failing, changes requested, agent waiting on an approval…), gets its first PR or its PR merges, when its agent goes idle after at least 5 minutes of work, and when a card leaves the mission or the board. It types a one-line `[bork]` nudge pointing at the file only right after mission control finishes a turn, with nobody attached to its session, at most every 3 minutes. `N` shows the newest notes. Independently of this setting, the TUI keeps `plans/<id>/cards.md` listing every member's column, PR and what it needs |
 | `bork integration attach-linear <id> <identifier>` | Link a Linear ticket to an issue (can attach multiple) |
 | `bork integration attach-linear-from-titles [--dry-run]` | Link every ticketless issue to the Linear ticket its title starts with (`[VIL-123] fix: …`). Imported PRs get theirs at import; this catches up older cards |
-| `bork integration attach-linear-project <id> <url-or-slug>` | Link a Linear project to a mission (can attach multiple) |
+| `bork integration attach-linear-project <id> <url-or-slug>` | Link a Linear project to an orchestrator or mission issue (can attach multiple) |
 | `bork integration detach-linear-project <id> <url-or-slug>` | Unlink a Linear project from an issue |
 | `bork integration attach-pr [id] <number>` | Link a GitHub PR to an issue (can attach multiple; `id` defaults to `BORK_ISSUE_ID` inside an agent session) |
 | `bork config list` | Show all resolved config values |
@@ -231,7 +231,7 @@ bork issue delete bork-3                  # undo with u in the TUI, or:
 bork issue restore bork-3
 ```
 
-**Create options:** `--column` (todo, in-progress, code-review, done), `--agent` (opencode, claude, codex, pi), `--mode` (plan, build, yolo), `--model` (agent's default unless set, e.g. `sonnet`/`opus`/`haiku` for Claude), `--prompt`, `--kind` (agentic, todo, mission).
+**Create options:** `--column` (todo, in-progress, code-review, done), `--agent` (opencode, claude, codex, pi), `--mode` (plan, build, yolo), `--model` (agent's default unless set, e.g. `sonnet`/`opus`/`haiku` for Claude), `--prompt`, `--kind` (agentic, todo, orchestrator, mission).
 
 **Start options:** `--prompt`, `--agent` (opencode, claude, codex), `--mode` (plan, build, yolo), `--model`, `--slug`, `--no-worktree`, `--project` (registered project name or path). `bork issue start` creates a worktree with a slug generated from the title. If a `setup_script` is configured, it runs inside the worktree before the agent starts.
 
@@ -251,7 +251,7 @@ bork integration attach-linear bork-3 VIL-456   # link another Linear ticket to 
 bork integration attach-pr bork-3 42             # link a GitHub PR
 bork integration attach-pr bork-3 43             # link another PR to the same issue
 bork integration attach-linear-project bork-5 https://linear.app/acme/project/auth-1a2b3c4d5e6f
-                                                 # link a Linear project to a mission
+                                                 # link a Linear project to an orchestrator or mission
 bork issue start "Fix login" --linear VIL-789    # start an issue with a ticket already linked
 ```
 
@@ -459,7 +459,8 @@ agents           = ["opencode", "claude", "codex", "pi", "cursor"]   # allowed a
 default_prompt   = "Check AGENTS.md for project context and start working on the issue."
 review_prompt    = "Read the diff and summarize findings."  # body for individual review requests
 stack_review_prompt = "Review each PR against its own base and check interactions across the stack." # stack review body
-orchestrator_prompt = "Coordinate the work across issues." # body for mission issues (bork appends the mission context)
+orchestrator_prompt = "Coordinate the work across issues." # body for orchestrator issues (bork appends the planning file path)
+mission_prompt = "Lead the mission."                       # body for mission issues (bork appends the mission context)
 setup_script     = "npm install"                     # run inside a fresh worktree before its agent starts
 teardown_script  = "docker compose down"             # run inside a worktree before `bork issue archive` removes it
 auto_import_reviews      = true                      # auto-create issues from PRs you're asked to review
@@ -643,7 +644,7 @@ Merged and closed PRs remain visible in the expanded list. Stack cards omit diff
 counts. Individual PRs show additions/deletions, or `draft` while still in draft.
 Linked issues and Linear IDs sit at bottom-left. Selecting a stack issue shows
 `s view stack` in the app shortcut bar.
-Mission and todo cards show their type beside the issue ID in the border. A card in an open mission shows `◆ <mission title>` in its footer, after its Linear ticket. The chip is left out when the card is too narrow, and while the board is filtered to that mission.
+Orchestrator, mission and todo cards show their type beside the issue ID in the border. Mission cards sit at the top of their column, with a double border and a `◆` before the title. A card in an open mission shows `◆ <mission title>` in its footer, after its Linear ticket. The chip is left out when the card is too narrow, and while the board is filtered to that mission.
 
 Stack controls appear only when the repository supports GitHub's stack API;
 no CLI extension is required. Without `gh`, live GitHub details are hidden and

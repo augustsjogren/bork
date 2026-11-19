@@ -5,7 +5,7 @@ use anyhow::{bail, Context};
 
 use crate::agent_config;
 use crate::config;
-use crate::types::{Column, Issue, IssueKind};
+use crate::types::{Column, Issue};
 
 /// Create a git worktree and register it with bork's state.json.
 pub fn run_worktree(
@@ -183,10 +183,10 @@ pub fn create_worktree_with_branch(
     if state
         .issues
         .iter()
-        .any(|i| i.id.eq_ignore_ascii_case(issue_id) && i.kind == IssueKind::Orchestrator)
+        .any(|i| i.id.eq_ignore_ascii_case(issue_id) && i.kind.is_coordinator())
     {
         bail!(
-            "'{}' is a mission; missions run at the project root and have no worktree",
+            "'{}' is an orchestrator issue; orchestrators run at the project root and have no worktree",
             issue_id
         );
     }
@@ -589,6 +589,7 @@ mod tests {
             review_prompt: None,
             stack_review_prompt: None,
             orchestrator_prompt: None,
+            mission_prompt: None,
             setup_script: None,
             teardown_script: None,
             session_kill_script: None,
@@ -727,7 +728,11 @@ mod tests {
         let result = create_worktree_in(&cfg, "bork-1", Some("fix-bug"), None, None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("is a mission"), "unexpected error: {}", err);
+        assert!(
+            err.contains("is an orchestrator issue"),
+            "unexpected error: {}",
+            err
+        );
         assert!(!project.join("bork-1-fix-bug").exists());
 
         let _ = fs::remove_dir_all(&tmp);
