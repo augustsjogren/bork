@@ -271,21 +271,8 @@ mod tests {
             title: format!("PR {number}"),
             url: format!("https://github.com/owner/repo/pull/{number}"),
             author: "colleague".into(),
-            state: PrState::Open,
-            is_draft: false,
-            checks: None,
-            review: None,
-            additions: 0,
-            deletions: 0,
             head_branch: format!("branch-{number}"),
-            is_cross_repository: false,
-            merge_blocker: None,
-            merge_queue: None,
-            unresolved_threads: 0,
-            unresolved_threads_by_you: 0,
-            updated_at: String::new(),
-            requested_reviewers: Vec::new(),
-            stack: None,
+            ..Default::default()
         }
     }
 

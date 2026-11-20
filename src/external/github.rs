@@ -2136,20 +2136,8 @@ mod tests {
             url: format!("https://github.com/test/repo/pull/{}", number),
             author: "testuser".into(),
             state,
-            is_draft: false,
-            checks: None,
-            review: None,
-            additions: 0,
-            deletions: 0,
             head_branch: branch.into(),
-            is_cross_repository: false,
-            merge_blocker: None,
-            merge_queue: None,
-            unresolved_threads: 0,
-            unresolved_threads_by_you: 0,
-            updated_at: String::new(),
-            requested_reviewers: Vec::new(),
-            stack: None,
+            ..Default::default()
         }
     }
 

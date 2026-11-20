@@ -4505,21 +4505,12 @@ mod tests {
             title: format!("PR #{}", number),
             url: format!("https://github.com/test/repo/pull/{}", number),
             author: "testuser".into(),
-            state: PrState::Open,
-            is_draft: false,
             checks: Some(crate::types::ChecksStatus::Success),
             review: Some(crate::types::ReviewDecision::Approved),
             additions: 10,
             deletions: 5,
             head_branch: branch.into(),
-            is_cross_repository: false,
-            merge_blocker: None,
-            merge_queue: None,
-            unresolved_threads: 0,
-            unresolved_threads_by_you: 0,
-            updated_at: String::new(),
-            requested_reviewers: Vec::new(),
-            stack: None,
+            ..Default::default()
         }
     }
 
@@ -9267,21 +9258,8 @@ mod tests {
             title: "Refactor auth module".into(),
             url: "https://github.com/test/repo/pull/7".into(),
             author: "testuser".into(),
-            state: PrState::Open,
-            is_draft: false,
-            checks: None,
-            review: None,
-            additions: 0,
-            deletions: 0,
             head_branch: "bork-1/task".into(),
-            is_cross_repository: false,
-            merge_blocker: None,
-            merge_queue: None,
-            unresolved_threads: 0,
-            unresolved_threads_by_you: 0,
-            updated_at: String::new(),
-            requested_reviewers: Vec::new(),
-            stack: None,
+            ..Default::default()
         };
         app.project_mut()
             .live

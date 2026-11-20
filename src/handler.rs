@@ -3899,7 +3899,7 @@ mod tests {
     }
 
     fn stack_test_app(count: u32) -> App {
-        use crate::types::{ChecksStatus, GithubStack, GithubStackPullRequest, PrState, PrStatus};
+        use crate::types::{ChecksStatus, GithubStack, GithubStackPullRequest, PrStatus};
         let mut app = test_app();
         let project = app.project_mut();
         let mut members = Vec::new();
@@ -3907,23 +3907,12 @@ mod tests {
             let pr = PrStatus {
                 number,
                 title: format!("Change {number}"),
-                url: String::new(),
                 author: "author".into(),
-                state: PrState::Open,
-                is_draft: false,
                 checks: Some(ChecksStatus::Success),
-                review: None,
                 additions: 100,
                 deletions: 20,
                 head_branch: format!("branch-{number}"),
-                is_cross_repository: false,
-                merge_blocker: None,
-                merge_queue: None,
-                unresolved_threads: 0,
-                unresolved_threads_by_you: 0,
-                updated_at: String::new(),
-                requested_reviewers: Vec::new(),
-                stack: None,
+                ..Default::default()
             };
             members.push(GithubStackPullRequest {
                 number,
@@ -7260,18 +7249,8 @@ mod tests {
             url: format!("https://github.com/test/repo/pull/{number}"),
             author: "someone".to_string(),
             state,
-            is_draft: false,
-            checks: None,
-            review: None,
-            additions: 0,
-            deletions: 0,
             head_branch: format!("feature-{number}"),
-            is_cross_repository: false,
-            merge_blocker: None,
-            merge_queue: None,
-            unresolved_threads: 0,
-            requested_reviewers: Vec::new(),
-            stack: None,
+            ..Default::default()
         }
     }
 
@@ -8581,21 +8560,10 @@ mod tests {
             title: "Alpha PR".to_string(),
             url: "https://github.com/test/alpha/pull/42".to_string(),
             author: "testuser".to_string(),
-            state: crate::types::PrState::Open,
-            is_draft: false,
-            checks: None,
-            review: None,
             additions: 10,
             deletions: 5,
             head_branch: "feature".to_string(),
-            is_cross_repository: false,
-            merge_blocker: None,
-            merge_queue: None,
-            unresolved_threads: 0,
-            unresolved_threads_by_you: 0,
-            updated_at: String::new(),
-            requested_reviewers: Vec::new(),
-            stack: None,
+            ..Default::default()
         };
         app.projects[0]
             .live

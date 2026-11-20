@@ -1070,8 +1070,9 @@ impl Issue {
 
 // --- GitHub status and cache types ---
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PrState {
+    #[default]
     Open,
     Closed,
     Merged,
@@ -1132,7 +1133,7 @@ pub enum ReviewDecision {
     ReviewRequired,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrStatus {
     pub number: u32,
     pub title: String,
@@ -1255,21 +1256,12 @@ mod tests {
             title: "Fix bug".into(),
             url: "https://github.com/test/repo/pull/1".into(),
             author: "testuser".into(),
-            state: PrState::Open,
-            is_draft: false,
             checks: Some(ChecksStatus::Success),
             review: Some(ReviewDecision::Approved),
             additions: 10,
             deletions: 5,
             head_branch: "main".into(),
-            is_cross_repository: false,
-            merge_blocker: None,
-            merge_queue: None,
-            unresolved_threads: 0,
-            unresolved_threads_by_you: 0,
-            updated_at: String::new(),
-            requested_reviewers: Vec::new(),
-            stack: None,
+            ..Default::default()
         };
         let cloned = pr.clone();
         assert_eq!(cloned.number, 1);

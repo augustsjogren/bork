@@ -637,23 +637,11 @@ mod tests {
         PrStatus {
             number,
             title: format!("PR {number}"),
-            url: String::new(),
             author: "author".into(),
-            state: PrState::Open,
-            is_draft: false,
             checks: Some(crate::types::ChecksStatus::Success),
-            review: None,
             additions: 1,
-            deletions: 0,
             head_branch: format!("branch-{number}"),
-            is_cross_repository: false,
-            merge_blocker: None,
-            merge_queue: None,
-            unresolved_threads: 0,
-            unresolved_threads_by_you: 0,
-            updated_at: String::new(),
-            requested_reviewers: Vec::new(),
-            stack: None,
+            ..Default::default()
         }
     }
 
